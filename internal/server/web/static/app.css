@@ -17,6 +17,8 @@ button:disabled { opacity: .6; cursor: default; }
 .meetings { list-style: none; margin: 0; padding: 0; }
 .meeting { display: flex; flex-direction: column; padding: .75rem 0; border-bottom: 1px solid var(--line); }
 .meeting.current { border-left: 3px solid var(--accent); padding-left: .75rem; }
+.meeting .text { display: flex; flex-direction: column; }
+.meeting .actions { display: flex; gap: .5rem; margin-top: .5rem; }
 .meeting .meta, .muted { color: var(--muted); font-size: .9rem; }
 .notice { text-align: center; padding-top: 3rem; }
-@media (min-width: 40rem) { .meeting { flex-direction: row; justify-content: space-between; align-items: baseline; gap: 1rem; } }
+@media (min-width: 40rem) { .meeting { flex-direction: row; justify-content: space-between; align-items: center; gap: 1rem; } .meeting .actions { margin-top: 0; } }

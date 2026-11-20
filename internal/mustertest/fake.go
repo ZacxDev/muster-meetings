@@ -56,6 +56,9 @@ type Fake struct {
 	Now func() time.Time
 	// Off makes every route answer 404, as muster does with plugins off.
 	Off bool
+	// Failing makes every route answer 503, as a muster that is up but
+	// failing does.
+	Failing bool
 
 	plugins map[string]*Plugin // token → plugin
 	revoked map[string]bool
@@ -81,6 +84,13 @@ func (f *Fake) AddPlugin(p Plugin) {
 	defer f.mu.Unlock()
 	cp := p
 	f.plugins[p.Token] = &cp
+}
+
+// SetFailing makes every route answer 503 (on) or serve again (off).
+func (f *Fake) SetFailing(on bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Failing = on
 }
 
 // Revoke makes token answer 401 on every route from now on.
@@ -164,7 +174,7 @@ func (f *Fake) gate(next func(http.ResponseWriter, *http.Request, Plugin)) http.
 		tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		f.mu.Lock()
 		f.calls = append(f.calls, r.Method+" "+r.URL.Path+" "+tok)
-		off := f.Off
+		off, failing := f.Off, f.Failing
 		p, ok := f.plugins[tok]
 		revoked := f.revoked[tok]
 		var cp Plugin
@@ -174,6 +184,10 @@ func (f *Fake) gate(next func(http.ResponseWriter, *http.Request, Plugin)) http.
 		f.mu.Unlock()
 		if off {
 			http.NotFound(w, r)
+			return
+		}
+		if failing {
+			write(w, 503, `{"error":"unavailable"}`)
 			return
 		}
 		if !ok || revoked || !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {

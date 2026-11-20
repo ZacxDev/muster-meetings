@@ -9,7 +9,8 @@ on a subdomain of muster's host. The design is muster's
 **What works today (phase 2a):** the tab opens the Meetings page inside
 muster; **New meeting** makes a meeting and shows its link with **Copy link**
 (and **Share** where the browser has it); the page lists your meetings, newest
-first. Calls, the guest page and the lobby are phase 2b, so a guest opening
+first, and an open meeting's row has its own **Copy link**, so the link is
+never lost to a reload. Calls, the guest page and the lobby are phase 2b, so a guest opening
 the link today gets a `404`. Transcripts, action items and recordings come
 later.
 
@@ -87,7 +88,7 @@ Read from the environment only; `.env.example` lists them.
 | `MUSTER_PLUGIN_TOKEN` | yes | the `mpl_…` token from `/plugins`, with **App tab**. Several, comma-separated, to serve several owners (each owner's own token); one is the common case. Never logged |
 | `MUSTER_ORIGIN` | yes | muster's origin as browsers see it, e.g. `https://muster.example.test`. The only page allowed to frame the Meetings app |
 | `MEETINGS_PUBLIC_URL` | yes | this plugin's own origin, e.g. `https://meet.muster.example.test`. Guest links are built on it. Refused if it equals `MUSTER_ORIGIN` |
-| `MEETINGS_LINK_KEY` | yes | 32 random bytes, base64 (`openssl rand -base64 32`), from the plugin's own Secret. It seals each meeting's link so you can copy it again while the meeting is open (below). The plugin refuses to start when it is missing or not exactly 32 bytes. Changing it makes the links of meetings already open unreadable (their guests' links still work); never logged |
+| `MEETINGS_LINK_KEY` | yes | 32 random bytes, base64 (`openssl rand -base64 32`), from the plugin's own Secret. Every meeting's link code is derived from it (below), which is what lets you copy an open meeting's link again. The plugin refuses to start when it is missing or not exactly 32 bytes. **Changing it changes every open meeting's link.** Never logged |
 | `MEETINGS_LISTEN` | no | the public listener; default `:8080` |
 | `MEETINGS_INTERNAL_LISTEN` | no | the internal listener (`GET /healthz`); default `:8081`. Do not expose it |
 | `STATE_DIR` | no | where `meetings.db` (SQLite) lives; default `./state`. Keep it across restarts |
@@ -105,30 +106,34 @@ that does not exist.
 |---|---|
 | `GET /enter` | redeem muster's code, make the owner session, render the app |
 | `GET /api/meetings?limit=&cursor=` | your meetings, newest first: `{"meetings": [...], "next": <cursor or null>}`; `limit` 1–100, default 50 |
-| `POST /api/meetings {"title"?, "record"?}` | New meeting: `201 {"id", "join_url", "meeting"}`. A title is trimmed (runs of spaces become one), at most 80 characters, no control characters; record and AI default on |
-| `GET /api/meetings/{id}` | one meeting, its participants, and `link`: the guest link while the meeting is open, `null` once it has ended or is 24 hours old |
+| `POST /api/meetings` | New meeting: `201 {"id", "join_url", "meeting"}`. It takes no options (no body, or `{}`); record and AI are on |
+| `GET /api/meetings/{id}` | `{"meeting", "link"}`: `link` is the guest link while the meeting is open and under 24 hours old, `null` otherwise. This is how the page lets you copy an open meeting's link again |
 | `GET /healthz` | internal listener only |
 
-**The link** is `https://meet.<muster host>/j/<code>`, where the code is 128
-random bits (22 base64url characters). It dies when the meeting ends, and at
-the latest 24 hours after it was made. The plugin stores the code two ways:
-its SHA-256, which is what a guest's `/j/<code>` is looked up by, and the code
-**sealed** with `MEETINGS_LINK_KEY` (AES-256-GCM, a random nonce each time,
-the meeting's id as associated data, so a sealed code moved onto another
-meeting's row does not open). The sealed code is what lets you, and only you,
-copy the link again from the meeting while it is open. It is **deleted** (the
-column set to `NULL`) when the meeting ends, and when its 24 hours pass, by
-the minute sweep or by the first look at the meeting after that, whichever
-comes first. The code never appears in a log line, an error, or the meetings
-list, and never in the database in clear.
+**The link** is `https://meet.<muster host>/j/<code>`. The code is
+HMAC-SHA256 under `MEETINGS_LINK_KEY` of the meeting's id, cut to 128 bits
+(22 base64url characters). It is **never stored**: the plugin keeps only its
+SHA-256, which a guest's `/j/<code>` is looked up by, and derives the code
+again when you ask for it. So you can copy an open meeting's link again at
+any time, from its row in the list or after re-opening Meetings, and only
+you can: another owner's meeting is a `404`, and once a meeting has ended or
+is 24 hours old there is no link to give. The link dies when the meeting
+ends, and at the latest 24 hours after it was made.
+
+**Rotating `MEETINGS_LINK_KEY` changes every open meeting's link.** The
+links already sent stop matching what the plugin derives, so guests holding
+them are turned away once 2b checks them; send the new links. Meetings that
+have ended are unaffected (they have no link).
+
+The code never appears in a log line, an error, the meetings list, or the
+database.
 
 ## What it stores
 
 One SQLite file (`STATE_DIR/meetings.db`, mode `0600`): the owners it serves
 (muster's id and login, and which plugin token serves them), owner sessions
-(hashed), meetings (title, state, the record and AI switches, times, the
-link's hash and, while the meeting is open, the link sealed under
-`MEETINGS_LINK_KEY`) and an audit trail of what happened, which never holds a code,
+(hashed), meetings (state, the record and AI switches, times, the link
+code's hash) and an audit trail of what happened, which never holds a code,
 a token, transcript text or a guest's name. Every owner-facing query goes
 through one repository layer that filters by the session's owner.
 

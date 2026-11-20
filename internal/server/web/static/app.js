@@ -61,6 +61,29 @@
     return h > 0 ? h + ' h ' + min + ' min' : min + ' min';
   }
 
+  // linkLive: the server still gives this meeting's link (open, under 24 h).
+  function linkLive(m) { return m.state === 'open' && new Date(m.link_expires_at) > new Date(); }
+
+  // copyText copies, or falls back to selecting the link panel's field.
+  function copyText(text) {
+    var input = $('join-url');
+    var fallback = function () { input.select(); say('Press Ctrl+C (or ⌘C) to copy the link.'); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text).then(function () { say('Link copied.'); }, fallback);
+    }
+    fallback();
+    return Promise.resolve();
+  }
+
+  // linkOf asks the server for an open meeting's link again (it is derived
+  // there, never kept in this page between visits).
+  function linkOf(id) {
+    return api('GET', '/api/meetings/' + encodeURIComponent(id)).then(function (b) {
+      if (!b.link) throw new Error("this meeting's link has expired");
+      return b.link;
+    });
+  }
+
   function row(m) {
     var li = document.createElement('li');
     li.className = 'meeting';
@@ -77,7 +100,36 @@
     var d = duration(m);
     if (d) bits.push(d);
     meta.textContent = bits.join(' · ');
-    li.appendChild(t); li.appendChild(meta);
+    var text = document.createElement('div');
+    text.className = 'text';
+    text.appendChild(t); text.appendChild(meta);
+    li.appendChild(text);
+    if (linkLive(m)) {
+      var actions = document.createElement('div');
+      actions.className = 'actions';
+      var copy = document.createElement('button');
+      copy.type = 'button';
+      copy.className = 'copy-row';
+      copy.textContent = 'Copy link';
+      copy.addEventListener('click', function () {
+        say('');
+        linkOf(m.id).then(function (url) { showLink(url); return copyText(url); })
+          .catch(function (e) { if (token) say('Could not get the link: ' + e.message); });
+      });
+      actions.appendChild(copy);
+      if (navigator.share) {
+        var share = document.createElement('button');
+        share.type = 'button';
+        share.className = 'share-row';
+        share.textContent = 'Share';
+        share.addEventListener('click', function () {
+          linkOf(m.id).then(function (url) { return navigator.share({ title: 'Join my meeting', url: url }); })
+            .catch(function () { /* dismissed or expired */ });
+        });
+        actions.appendChild(share);
+      }
+      li.appendChild(actions);
+    }
     return li;
   }
 
@@ -110,16 +162,7 @@
       .then(function () { btn.disabled = false; });
   });
 
-  $('copy-link').addEventListener('click', function () {
-    var input = $('join-url');
-    var done = function () { say('Link copied.'); };
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(input.value).then(done, function () { input.select(); say('Press Ctrl+C (or ⌘C) to copy the link.'); });
-    } else {
-      input.select();
-      say('Press Ctrl+C (or ⌘C) to copy the link.');
-    }
-  });
+  $('copy-link').addEventListener('click', function () { copyText($('join-url').value); });
 
   $('share-link').addEventListener('click', function () {
     navigator.share({ title: 'Join my meeting', url: $('join-url').value }).catch(function () { /* dismissed */ });
@@ -128,4 +171,9 @@
   more.addEventListener('click', function () { load(true); });
 
   load(false);
+  // Opened for one meeting (a notification's tap): show its link at once,
+  // while it has one.
+  if (ref) {
+    linkOf(ref).then(showLink).catch(function () { /* ended: the list says so */ });
+  }
 })();

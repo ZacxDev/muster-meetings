@@ -14,7 +14,10 @@
 //	go run ./scripts/mutate -list    # names only
 //
 // It exits non-zero unless every security mutant is killed and both controls
-// behave. Run it from the repository root on a clean tree.
+// behave. Run it from the repository root. It refuses a dirty tree (`git
+// status --porcelain` not empty), so a mutant can never be left behind
+// mixed into uncommitted work, and on SIGINT or SIGTERM it puts the file it
+// is mutating back before it exits.
 package main
 
 import (
@@ -24,8 +27,43 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
+	"sync"
+	"syscall"
 )
+
+// live is the file a mutant is applied to right now, and its original bytes:
+// what a signal must put back.
+var live struct {
+	sync.Mutex
+	file string
+	orig []byte
+}
+
+func setLive(file string, orig []byte) {
+	live.Lock()
+	live.file, live.orig = file, orig
+	live.Unlock()
+}
+
+// restoreOnSignal puts the mutated file back on SIGINT or SIGTERM, then exits.
+func restoreOnSignal() {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		sig := <-ch
+		live.Lock() // held to exit: no mutant is applied after this
+		if live.file != "" {
+			if err := os.WriteFile(live.file, live.orig, 0o644); err != nil {
+				fmt.Fprintf(os.Stderr, "mutate: %v: COULD NOT RESTORE %s: %v\n", sig, live.file, err)
+				os.Exit(2)
+			}
+			fmt.Fprintf(os.Stderr, "mutate: %v: restored %s\n", sig, live.file)
+		}
+		os.Exit(130)
+	}()
+}
 
 type mutant struct {
 	name string
@@ -46,14 +84,15 @@ const (
 	secret = "internal/store/secret.go"
 	own    = "internal/owners/owners.go"
 	mainGo = "main.go"
+	link   = "internal/store/link.go"
 )
 
 var mutants = []mutant{
 	// ---- controls ----
 	{name: "control: known-caught (join code 64 bits)", file: secret, from: "JoinCodeBytes = 16", to: "JoinCodeBytes = 8",
-		pkg: "./internal/store", test: "TestJoinCodeIs128RandomBitsIn22Base64urlCharacters", want: "is not 22 base64url characters"},
+		pkg: "./internal/store", test: "TestJoinCodeIs128BitsIn22Base64urlCharacters", want: "is not 22 base64url characters"},
 	{name: "control: a no-op edit (must survive)", file: secret, from: "JoinCodeBytes = 16", to: "JoinCodeBytes = 16 // no-op",
-		pkg: "./internal/store", test: "TestJoinCodeIs128RandomBitsIn22Base64urlCharacters", survive: true},
+		pkg: "./internal/store", test: "TestJoinCodeIs128BitsIn22Base64urlCharacters", survive: true},
 
 	// ---- /enter: the redeem ----
 	{name: "redeem: accept any purpose", file: srv, from: `if red.Purpose != "app" {`, to: `if false && red.Purpose != "app" {`,
@@ -67,7 +106,7 @@ var mutants = []mutant{
 	{name: "plugin bound: ignore muster_plugin (always plugin 12)", file: srv, from: `pluginID, err := strconv.ParseInt(pid, 10, 64)`, to: `pluginID, err := strconv.ParseInt("12", 10, 64)`,
 		pkg: "./internal/server", test: "TestEnterRedeemsWithTheTokenMusterPluginNamesAndNoOther", want: "an unserved plugin ="},
 	{name: "redeem: pass another owner's ref to the page", file: srv,
-		from: `if _, _, err := s.store.ForOwner(tok.OwnerID).Meeting(r.Context(), red.Target.App.Ref); err == nil {`, to: `if true {`,
+		from: `if _, err := s.store.ForOwner(tok.OwnerID).Meeting(r.Context(), red.Target.App.Ref); err == nil {`, to: `if true {`,
 		pkg: "./internal/server", test: "TestEnterPassesTheRefOnlyForTheOwnersOwnMeeting", want: "another owner's ref reached the page"},
 
 	// ---- cookies and headers on the plugin's origin ----
@@ -127,44 +166,55 @@ var mutants = []mutant{
 		pkg: "./internal/store", test: "TestOwnerRepoNeverReturnsAnotherOwnersMeetings", want: "A's list ="},
 
 	// ---- the link ----
-	{name: "link: code stored in clear", file: repo, from: `"meeting-"+id, Hash(code),`, to: `"meeting-"+id, code,`,
-		pkg: "./internal/store", test: "TestJoinCodeIsStoredOnlyHashed", want: "the join code itself is in the database"},
-	{name: "link: code 64 bits (server)", file: secret, from: "JoinCodeBytes = 16", to: "JoinCodeBytes = 8",
+	{name: "link: code stored in clear (not hashed)", file: repo, from: `Hash(code), ms(now)`, to: `code, ms(now)`,
+		pkg: "./internal/store", test: "TestJoinCodeIsNeverStoredInClear", want: "the join code itself is in the database"},
+	{name: "link: code 64 bits (API)", file: secret, from: "JoinCodeBytes = 16", to: "JoinCodeBytes = 8",
 		pkg: "./internal/server", test: "TestNewMeetingAnswersItsIDAndALinkOnThePluginsOrigin", want: "join_url ="},
-
-	// ---- the sealed link (re-copyable while open) ----
-	{name: "link: another owner reads it", file: repo, from: "`SELECT state, created_at, join_code_sealed FROM meetings WHERE id = ? AND owner_id = ?`",
-		to:  "`SELECT state, created_at, join_code_sealed FROM meetings WHERE id = ? AND ? IS NOT NULL`",
-		pkg: "./internal/store", test: "TestOnlyTheOwnerReadsTheLink", want: "another owner reading the link"},
-	{name: "link: ending leaves the sealed code", file: st, from: "ended_at = ?, join_code_sealed = NULL WHERE owner_id = ? AND state = 'open'", to: "ended_at = ? WHERE owner_id = ? AND state = 'open'",
-		pkg: "./internal/store", test: "TestAnEndedMeetingHasNoLinkAndItsSealedCodeIsNull", want: "ending the meeting left its sealed code"},
-	{name: "link: lookup ignores an ended meeting", file: repo, from: `if state != "open" || !now.Before(`, to: `if !now.Before(`,
-		pkg: "./internal/store", test: "TestALookupOfAnEndedMeetingDeletesALeftoverSealedCode", want: "the link of an ended meeting = <nil>"},
-	{name: "link: lookup refuses but does not null", file: repo, from: "`UPDATE meetings SET join_code_sealed = NULL WHERE id = ? AND owner_id = ?`", to: "`SELECT ?, ?`",
-		pkg: "./internal/store", test: "TestALookupOfAnEndedMeetingDeletesALeftoverSealedCode", want: "left the sealed code in the row"},
-	{name: "link: no 24 h lifetime on lookup", file: repo, from: `if state != "open" || !now.Before(time.UnixMilli(created).Add(LinkLifetime)) {`, to: `if state != "open" {`,
-		pkg: "./internal/store", test: "TestALinkPast24HoursIsGoneAndItsSealedCodeNulledByTheLookup", want: "at 24 h = "},
-	{name: "link: no 24 h lifetime (API)", file: repo, from: `if state != "open" || !now.Before(time.UnixMilli(created).Add(LinkLifetime)) {`, to: `if state != "open" {`,
+	{name: "link: the key is not in the HMAC", file: link, from: "hmac.New(sha256.New, s.linkKey)", to: "hmac.New(sha256.New, nil)",
+		pkg: "./internal/store", test: "TestAnotherKeyGivesTheOwnerAnotherLink", want: "under another key"},
+	{name: "link: the meeting id is not in the HMAC", file: link, from: "m.Write([]byte(linkDomain + meetingID))", to: "m.Write([]byte(linkDomain))",
+		pkg: "./internal/store", test: "TestJoinCodeIs128BitsIn22Base64urlCharacters", want: "drawn twice"},
+	{name: "link: another owner reads it (store)", file: repo,
+		from: "m, err := scanMeeting(r.s.db.QueryRowContext(ctx, `SELECT `+meetingCols+` FROM meetings WHERE id = ? AND owner_id = ?`",
+		to:   "m, err := scanMeeting(r.s.db.QueryRowContext(ctx, `SELECT `+meetingCols+` FROM meetings WHERE id = ? AND ? IS NOT NULL`",
+		pkg:  "./internal/store", test: "TestOnlyTheOwnerReadsTheLink", want: "another owner reading the link"},
+	{name: "link: an ended meeting gives its link", file: repo, from: `if m.State != "open" || !now.Before(m.LinkExpiresAt) {`, to: `if !now.Before(m.LinkExpiresAt) {`,
+		pkg: "./internal/store", test: "TestAnEndedMeetingHasNoLink", want: "an ended meeting's link ="},
+	{name: "link: no 24 h lifetime (store)", file: repo, from: `if m.State != "open" || !now.Before(m.LinkExpiresAt) {`, to: `if m.State != "open" {`,
+		pkg: "./internal/store", test: "TestTheLinkIsGoneAt24Hours", want: "at 24 h ="},
+	{name: "link: no 24 h lifetime (API)", file: repo, from: `if m.State != "open" || !now.Before(m.LinkExpiresAt) {`, to: `if m.State != "open" {`,
 		pkg: "./internal/server", test: "TestTheLinkIsTheOwnersOnlyAndOnlyWhileOpen", want: "at 24 h = 200"},
-	{name: "link: the sweep leaves the sealed code", file: st, from: "SET join_code_sealed = NULL WHERE join_code_sealed IS NOT NULL AND (", to: "SET join_code_sealed = NULL WHERE join_code_sealed IS NOT NULL AND 0 AND (",
-		pkg: "./internal/store", test: "TestTheSweepNullsTheSealedCodeAt24Hours", want: "the sweep at 24 h left the sealed code"},
-	{name: "link: no meeting id in the AAD", file: "internal/store/seal.go", from: `return []byte("muster-meetings link v1\x00" + meetingID)`, to: `return []byte("muster-meetings link v1\x00")`,
-		pkg: "./internal/store", test: "TestASealedCodeMovedOntoAnotherMeetingDoesNotOpen", want: "a's sealed code on b's row"},
-	{name: "link: the key is ignored (fixed key)", file: "internal/store/seal.go", from: "block, err := aes.NewCipher(key)", to: "block, err := aes.NewCipher(make([]byte, 32))",
-		pkg: "./internal/store", test: "TestAnotherKeyDoesNotOpenTheLink", want: "under another key"},
-	{name: "link: code stored in clear in the sealed column", file: repo, from: "r.s.seal.seal(id, code)", to: "[]byte(code)",
-		pkg: "./internal/store", test: "TestJoinCodeIsStoredOnlyHashed", want: "the join code itself is in the database"},
 	{name: "link key: missing key accepted", file: mainGo, from: `if c.LinkKey, err = store.ParseLinkKey(getenv("MEETINGS_LINK_KEY")); err != nil {`,
 		to:  `if c.LinkKey, _ = store.ParseLinkKey(getenv("MEETINGS_LINK_KEY")); false {`,
 		pkg: ".", test: "TestLoadConfig", want: "missing link key: LoadConfig accepted it"},
-	{name: "link key: short key parsed", file: "internal/store/seal.go", from: "err == nil && len(k) == LinkKeyBytes", to: "err == nil && len(k) > 0",
+	{name: "link key: short key parsed", file: link, from: "err == nil && len(k) == LinkKeyBytes", to: "err == nil && len(k) > 0",
 		pkg: ".", test: "TestLoadConfig", want: "short link key: LoadConfig accepted it"},
-	{name: "link key: Open takes a short key", file: "internal/store/seal.go", from: "if len(key) != LinkKeyBytes {", to: "if len(key) == 0 {",
+	{name: "link key: Open takes a short key", file: st, from: "if len(linkKey) != LinkKeyBytes {", to: "if len(linkKey) == 0 {",
 		pkg: "./internal/store", test: "TestOpenAndParseLinkKeyRefuseAnythingButThirtyTwoBytes", want: "Open with a 16-byte key succeeded"},
+
+	// ---- the revocation race ----
+	{name: "race: create without the live-session check (the pre-fix code)", file: repo,
+		from: "WHERE EXISTS (SELECT 1 FROM owner_sessions WHERE token_sha256 = ? AND owner_id = ? AND expires_at > ?)`",
+		to:   "WHERE ? IS NOT NULL AND ? IS NOT NULL AND ? IS NOT NULL`",
+		pkg:  "./internal/server", test: "TestANewMeetingRacingARevocationLeavesNoOpenMeeting", want: "an open meeting for the revoked owner"},
+	{name: "race: create without the live-session check (store)", file: repo,
+		from: "WHERE EXISTS (SELECT 1 FROM owner_sessions WHERE token_sha256 = ? AND owner_id = ? AND expires_at > ?)`",
+		to:   "WHERE ? IS NOT NULL AND ? IS NOT NULL AND ? IS NOT NULL`",
+		pkg:  "./internal/store", test: "TestCreatingAMeetingNeedsTheSessionStillLive", want: "after the session was revoked"},
+
+	// ---- /enter fails closed ----
+	{name: "enter: muster down or 5xx falls through", file: srv,
+		from: "\t\t\ts.refuseEnter(w, http.StatusBadGateway, EnterNoMuster, \"muster: \"+kindOf(err))\n\t\t\treturn\n",
+		to:   "",
+		pkg:  "./internal/server", test: "TestEnterFailsClosedWhenMusterIsDownOrFailing", want: "muster failing: enter = 403"},
 
 	// ---- logs ----
 	{name: "log: no redaction of /j/<code>", file: srv, from: `return "/j/{code}"`, to: `return p`,
 		pkg: "./internal/server", test: "TestTheLogCarriesNoCodeTokenOrQuery", want: "the log carries the join code"},
+	{name: "log: a /j/ segment elsewhere is not redacted", file: srv, from: `if strings.Contains(p, "/j/") || strings.Contains(c+"/", "/j/") {`, to: `if false {`,
+		pkg: "./internal/server", test: "TestRedactPath", want: `RedactPath("/api/j/AbC_-123") = "/api/j/AbC_-123"`},
+	{name: "log: the path is not cleaned first", file: srv, from: `c := path.Clean("/" + p)`, to: `c, _ := p, path.Clean`,
+		pkg: "./internal/server", test: "TestRedactPath", want: `RedactPath("/x/../j/AbC_-123/a") = "/{redacted}"`},
 	{name: "log: the full URL with its query", file: srv, from: `RedactPath(r.URL.Path), sw.status`, to: `r.URL.String(), sw.status`,
 		pkg: "./internal/server", test: "TestTheLogCarriesNoCodeTokenOrQuery", want: "the log carries the hand-off code"},
 
@@ -182,6 +232,14 @@ func main() {
 		}
 		return
 	}
+	out, err := exec.Command("git", "status", "--porcelain").Output()
+	if err != nil {
+		fatalf("git status: %v (run it from the repository root)", err)
+	}
+	if len(bytes.TrimSpace(out)) > 0 {
+		fatalf("the tree is dirty; commit or set your work aside first (a mutant must never mix with uncommitted work):\n%s", out)
+	}
+	restoreOnSignal()
 	sums := map[string][32]byte{}
 	for _, m := range mutants {
 		b, err := os.ReadFile(m.file)
@@ -226,13 +284,17 @@ func run(m mutant) (string, string) {
 		return "ERROR", fmt.Sprintf("the text to replace occurs %d times in %s, want exactly 1", n, m.file)
 	}
 	mut := bytes.Replace(orig, []byte(m.from), []byte(m.to), 1)
+	setLive(m.file, orig)
 	if err := os.WriteFile(m.file, mut, 0o644); err != nil {
 		return "ERROR", err.Error()
 	}
 	defer func() {
+		live.Lock()
+		defer live.Unlock()
 		if err := os.WriteFile(m.file, orig, 0o644); err != nil {
 			fatalf("restoring %s: %v", m.file, err)
 		}
+		live.file, live.orig = "", nil
 	}()
 	cmd := exec.Command("go", "test", "-count=1", "-run", "^"+m.test+"$", m.pkg)
 	out, err := cmd.CombinedOutput()

@@ -1,15 +1,16 @@
 // Package store is the plugin's SQLite database (design: "Data model (the
-// plugin's SQLite)"): owners, owner sessions, meetings and their
-// participants, and an audit trail that never holds transcript text, guest
-// names or codes.
+// plugin's SQLite)"): owners, owner sessions, meetings, and an audit trail
+// that never holds transcript text, guest names or codes.
 //
 // 🔴 Every owner-facing read and write goes through OwnerRepo, which is built
 // only by ForOwner and carries the owner id in every statement. No handler
 // writes its own `WHERE owner_id`; a handler that holds an OwnerRepo can only
 // ever see that owner's rows.
 //
-// Times are stored as Unix milliseconds (UTC). Codes and tokens are stored
-// only as their SHA-256 (Hash).
+// Times are stored as Unix milliseconds (UTC). Tokens are stored only as
+// their SHA-256 (Hash). A meeting's join code is not stored at all: it is
+// derived from MEETINGS_LINK_KEY and the meeting id (JoinCode), and only its
+// SHA-256 is kept, for the guest link's lookup.
 package store
 
 import (
@@ -38,19 +39,16 @@ const LinkLifetime = 24 * time.Hour
 var ErrNotFound = errors.New("not found")
 
 // migrations are applied in order; PRAGMA user_version counts those done.
-// Never edit one that has shipped: add the next. Later phases add segments,
-// action_items, windows, recordings and summaries as their own migrations.
+// Never edit one that has shipped: add the next. Later phases add
+// participants, segments, action items, recordings, summaries and the
+// owner's settings as their own migrations.
 var migrations = []string{
 	// 1: the 2a core.
 	`CREATE TABLE owners (
-		owner_id                 INTEGER PRIMARY KEY,
-		owner_login              TEXT    NOT NULL DEFAULT '',
-		token_ref                INTEGER NOT NULL,            -- the plugin id whose token serves this owner; never the token
-		record_default           INTEGER NOT NULL DEFAULT 1 CHECK (record_default IN (0, 1)),
-		ai_default               INTEGER NOT NULL DEFAULT 1 CHECK (ai_default IN (0, 1)),
-		retention_days_recording INTEGER          DEFAULT 30,  -- NULL: forever
-		retention_days_text      INTEGER          DEFAULT 365, -- NULL: forever
-		updated_at               INTEGER NOT NULL
+		owner_id    INTEGER PRIMARY KEY,
+		owner_login TEXT    NOT NULL DEFAULT '',
+		token_ref   INTEGER NOT NULL, -- the plugin id whose token serves this owner; never the token
+		updated_at  INTEGER NOT NULL
 	) STRICT;
 	CREATE TABLE owner_sessions (
 		token_sha256 TEXT    PRIMARY KEY,
@@ -61,35 +59,20 @@ var migrations = []string{
 	) STRICT;
 	CREATE INDEX owner_sessions_plugin ON owner_sessions (plugin_id);
 	CREATE TABLE meetings (
-		id                 TEXT    PRIMARY KEY,
-		owner_id           INTEGER NOT NULL,
-		title              TEXT    NOT NULL DEFAULT '',
-		room               TEXT    NOT NULL UNIQUE,
-		join_code_sha256   TEXT    NOT NULL UNIQUE,
-		state              TEXT    NOT NULL CHECK (state IN ('open', 'ended')),
-		record             INTEGER NOT NULL CHECK (record IN (0, 1)),
-		ai                 INTEGER NOT NULL CHECK (ai IN (0, 1)),
-		created_at         INTEGER NOT NULL,
-		started_at         INTEGER,
-		ended_at           INTEGER,
-		purge_recording_at INTEGER,
-		purge_text_at      INTEGER
+		id               TEXT    PRIMARY KEY,
+		owner_id         INTEGER NOT NULL,
+		title            TEXT    NOT NULL DEFAULT '',
+		room             TEXT    NOT NULL UNIQUE,
+		join_code_sha256 TEXT    NOT NULL UNIQUE, -- the guest link's lookup; the code itself is never stored
+		state            TEXT    NOT NULL CHECK (state IN ('open', 'ended')),
+		record           INTEGER NOT NULL CHECK (record IN (0, 1)),
+		ai               INTEGER NOT NULL CHECK (ai IN (0, 1)),
+		created_at       INTEGER NOT NULL,
+		started_at       INTEGER,
+		ended_at         INTEGER
 	) STRICT;
 	CREATE INDEX meetings_owner_newest ON meetings (owner_id, created_at DESC, id DESC);
 	CREATE INDEX meetings_open ON meetings (state, created_at) WHERE state = 'open';
-	CREATE TABLE participants (
-		id            TEXT    PRIMARY KEY,
-		meeting_id    TEXT    NOT NULL REFERENCES meetings (id) ON DELETE CASCADE,
-		kind          TEXT    NOT NULL CHECK (kind IN ('owner', 'guest')),
-		display_name  TEXT    NOT NULL,
-		identity      TEXT    NOT NULL UNIQUE,
-		ticket_sha256 TEXT             UNIQUE,
-		state         TEXT    NOT NULL CHECK (state IN ('waiting', 'admitted', 'denied', 'removed', 'left')),
-		knocked_at    INTEGER,
-		admitted_at   INTEGER,
-		left_at       INTEGER
-	) STRICT;
-	CREATE INDEX participants_meeting ON participants (meeting_id);
 	CREATE TABLE audit (
 		at         INTEGER NOT NULL,
 		owner_id   INTEGER,
@@ -97,25 +80,20 @@ var migrations = []string{
 		event      TEXT    NOT NULL,
 		detail     TEXT    NOT NULL DEFAULT ''  -- never transcript text, item text, guest names or codes
 	) STRICT;`,
-	// 2: the link, sealed so its owner can copy it again while the meeting is
-	// open (AES-256-GCM under MEETINGS_LINK_KEY, the meeting id as associated
-	// data). NULL once the meeting ends or its link lifetime passes.
-	`ALTER TABLE meetings ADD COLUMN join_code_sealed BLOB;`,
 }
 
 // Store is the database.
 type Store struct {
-	db   *sql.DB
-	seal *sealer
+	db      *sql.DB
+	linkKey []byte
 }
 
 // Open opens (or creates) the database at path and brings its schema up to
 // date. The directory is created 0700 and the file is 0600. linkKey is
 // MEETINGS_LINK_KEY (ParseLinkKey): 32 bytes, or Open refuses.
 func Open(path string, linkKey []byte) (*Store, error) {
-	sl, err := newSealer(linkKey)
-	if err != nil {
-		return nil, err
+	if len(linkKey) != LinkKeyBytes {
+		return nil, ErrLinkKey
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
@@ -137,7 +115,7 @@ func Open(path string, linkKey []byte) (*Store, error) {
 	// One writer (design: one replica, one SQLite file). A single connection
 	// serialises every statement, so no request ever sees SQLITE_BUSY.
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db, seal: sl}
+	s := &Store{db: db, linkKey: append([]byte(nil), linkKey...)}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
@@ -186,13 +164,6 @@ func fromMS(v sql.NullInt64) *time.Time {
 	return &t
 }
 
-func boolInt(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
-}
-
 type execer interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
@@ -207,8 +178,7 @@ func audit(ctx context.Context, x execer, now time.Time, ownerID int64, meetingI
 	return err
 }
 
-// UpsertOwner records the owner a token serves, as /self names them. It
-// never changes the owner's settings.
+// UpsertOwner records the owner a token serves, as /self names them.
 func (s *Store) UpsertOwner(ctx context.Context, ownerID int64, login string, pluginID int64, now time.Time) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO owners (owner_id, owner_login, token_ref, updated_at) VALUES (?, ?, ?, ?)
 		ON CONFLICT (owner_id) DO UPDATE SET owner_login = excluded.owner_login, token_ref = excluded.token_ref, updated_at = excluded.updated_at`,
@@ -218,9 +188,11 @@ func (s *Store) UpsertOwner(ctx context.Context, ownerID int64, login string, pl
 
 // Session is a live owner session.
 type Session struct {
-	OwnerID   int64
-	PluginID  int64
-	ExpiresAt time.Time
+	// TokenSHA256 is the stored form of the bearer that opened it.
+	TokenSHA256 string
+	OwnerID     int64
+	PluginID    int64
+	ExpiresAt   time.Time
 }
 
 // CreateSession mints an owner session for ownerID, through the token of
@@ -261,6 +233,7 @@ func (s *Store) LookupSession(ctx context.Context, token string, now time.Time) 
 		return Session{}, err
 	}
 	out.ExpiresAt = time.UnixMilli(exp).UTC()
+	out.TokenSHA256 = Hash(token)
 	return out, nil
 }
 
@@ -287,7 +260,7 @@ func (s *Store) RevokePlugin(ctx context.Context, pluginID, ownerID int64, endMe
 	}
 	out.Sessions, _ = r.RowsAffected()
 	if endMeetings {
-		r, err = tx.ExecContext(ctx, `UPDATE meetings SET state = 'ended', ended_at = ?, join_code_sealed = NULL WHERE owner_id = ? AND state = 'open'`, ms(now), ownerID)
+		r, err = tx.ExecContext(ctx, `UPDATE meetings SET state = 'ended', ended_at = ? WHERE owner_id = ? AND state = 'open'`, ms(now), ownerID)
 		if err != nil {
 			return out, err
 		}
@@ -315,7 +288,7 @@ func (s *Store) ReconcileLive(ctx context.Context, livePlugins, liveOwners []int
 		return out, err
 	}
 	out.Sessions, _ = r.RowsAffected()
-	r, err = tx.ExecContext(ctx, `UPDATE meetings SET state = 'ended', ended_at = ?, join_code_sealed = NULL WHERE state = 'open' AND owner_id NOT IN (SELECT value FROM json_each(?))`,
+	r, err = tx.ExecContext(ctx, `UPDATE meetings SET state = 'ended', ended_at = ? WHERE state = 'open' AND owner_id NOT IN (SELECT value FROM json_each(?))`,
 		ms(now), jsonInts(liveOwners))
 	if err != nil {
 		return out, err
@@ -337,9 +310,8 @@ func jsonInts(v []int64) string {
 	return "[" + strings.Join(parts, ",") + "]"
 }
 
-// Sweep ends every meeting open LinkLifetime past its creation, nulls the
-// sealed link of every meeting that is not open or is past its lifetime, and
-// deletes expired sessions. It returns the number of meetings it ended.
+// Sweep ends every meeting open LinkLifetime past its creation, and deletes
+// expired sessions. It returns the number of meetings it ended.
 func (s *Store) Sweep(ctx context.Context, now time.Time) (int64, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -375,12 +347,6 @@ func (s *Store) Sweep(ctx context.Context, now time.Time) (int64, error) {
 		if err := audit(ctx, tx, now, e.owner, e.id, "meeting.ended", "the 24 h cap"); err != nil {
 			return 0, err
 		}
-	}
-	// No sealed link outlives its meeting or its lifetime, whichever way the
-	// meeting ended.
-	if _, err := tx.ExecContext(ctx, `UPDATE meetings SET join_code_sealed = NULL WHERE join_code_sealed IS NOT NULL AND (state <> 'open' OR created_at <= ?)`,
-		ms(now.Add(-LinkLifetime))); err != nil {
-		return 0, err
 	}
 	return int64(len(all)), tx.Commit()
 }

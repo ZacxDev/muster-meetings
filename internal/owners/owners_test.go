@@ -51,6 +51,25 @@ func setup(t *testing.T, ps ...mustertest.Plugin) (*mustertest.Fake, *store.Stor
 
 func now() time.Time { return t0 }
 
+// mkMeeting makes an open meeting for p's owner through a session minted
+// through p's token, as the server would.
+func mkMeeting(t *testing.T, st *store.Store, p mustertest.Plugin) store.Created {
+	t.Helper()
+	tok, _, err := st.CreateSession(ctx, p.OwnerID, p.PluginID, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := st.LookupSession(ctx, tok, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := st.ForSession(sess).CreateMeeting(ctx, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
 // "Session revocation: a 401 from the fake /self deletes the owner's sessions
 // and ends their meetings within one poll. Red if: the poll's handler is a
 // no-op."
@@ -62,8 +81,8 @@ func TestAPollThatMusterAnswers401DeletesTheOwnersSessionsAndEndsTheirMeetings(t
 	}
 	sa, _, _ := st.CreateSession(ctx, pA.OwnerID, pA.PluginID, t0)
 	sb, _, _ := st.CreateSession(ctx, pB.OwnerID, pB.PluginID, t0)
-	ma, _ := st.ForOwner(pA.OwnerID).CreateMeeting(ctx, store.NewMeeting{}, t0)
-	mb, _ := st.ForOwner(pB.OwnerID).CreateMeeting(ctx, store.NewMeeting{}, t0)
+	ma := mkMeeting(t, st, pA)
+	mb := mkMeeting(t, st, pB)
 
 	reg.PollOnce(ctx) // both live: nothing changes
 	if _, err := st.LookupSession(ctx, sa, t0); err != nil {
@@ -76,7 +95,7 @@ func TestAPollThatMusterAnswers401DeletesTheOwnersSessionsAndEndsTheirMeetings(t
 	if _, err := st.LookupSession(ctx, sa, t0); err != store.ErrNotFound {
 		t.Fatalf("revoked owner's session after one poll = %v, want deleted", err)
 	}
-	if m, _, _ := st.ForOwner(pA.OwnerID).Meeting(ctx, ma.Meeting.ID); m.State != "ended" {
+	if m, _ := st.ForOwner(pA.OwnerID).Meeting(ctx, ma.Meeting.ID); m.State != "ended" {
 		t.Fatalf("revoked owner's meeting after one poll = %q, want ended", m.State)
 	}
 	if _, ok := reg.Lookup(pA.PluginID); ok {
@@ -86,7 +105,7 @@ func TestAPollThatMusterAnswers401DeletesTheOwnersSessionsAndEndsTheirMeetings(t
 	if _, err := st.LookupSession(ctx, sb, t0); err != nil {
 		t.Fatalf("the other owner's session = %v", err)
 	}
-	if m, _, _ := st.ForOwner(pB.OwnerID).Meeting(ctx, mb.Meeting.ID); m.State != "open" {
+	if m, _ := st.ForOwner(pB.OwnerID).Meeting(ctx, mb.Meeting.ID); m.State != "open" {
 		t.Fatalf("the other owner's meeting = %q", m.State)
 	}
 	if _, ok := reg.Lookup(pB.PluginID); !ok {
@@ -130,7 +149,7 @@ func TestRevokingOneOfAnOwnersTwoTokensKeepsTheirMeetings(t *testing.T) {
 	}
 	s1, _, _ := st.CreateSession(ctx, pA.OwnerID, pA.PluginID, t0)
 	s2, _, _ := st.CreateSession(ctx, pA.OwnerID, p2.PluginID, t0)
-	m, _ := st.ForOwner(pA.OwnerID).CreateMeeting(ctx, store.NewMeeting{}, t0)
+	m := mkMeeting(t, st, pA)
 	f.Revoke(pA.Token)
 	reg.PollOnce(ctx)
 	if _, err := st.LookupSession(ctx, s1, t0); err != store.ErrNotFound {
@@ -139,7 +158,7 @@ func TestRevokingOneOfAnOwnersTwoTokensKeepsTheirMeetings(t *testing.T) {
 	if _, err := st.LookupSession(ctx, s2, t0); err != nil {
 		t.Fatal("the other token's session was dropped")
 	}
-	if got, _, _ := st.ForOwner(pA.OwnerID).Meeting(ctx, m.Meeting.ID); got.State != "open" {
+	if got, _ := st.ForOwner(pA.OwnerID).Meeting(ctx, m.Meeting.ID); got.State != "open" {
 		t.Fatal("the owner's meeting ended while another token still serves them")
 	}
 }
@@ -165,7 +184,7 @@ func TestBootAppliesARevocationThePluginSleptThrough(t *testing.T) {
 	f, st, cs, buf := setup(t, pA, pB)
 	sa, _, _ := st.CreateSession(ctx, pA.OwnerID, pA.PluginID, t0)
 	sb, _, _ := st.CreateSession(ctx, pB.OwnerID, pB.PluginID, t0)
-	ma, _ := st.ForOwner(pA.OwnerID).CreateMeeting(ctx, store.NewMeeting{}, t0)
+	ma := mkMeeting(t, st, pA)
 	f.Revoke(pA.Token)
 	reg, err := owners.Boot(ctx, cs, st, log.New(buf, "", 0), now)
 	if err != nil {
@@ -180,7 +199,7 @@ func TestBootAppliesARevocationThePluginSleptThrough(t *testing.T) {
 	if _, err := st.LookupSession(ctx, sb, t0); err != nil {
 		t.Fatal("a live token's session was dropped at boot")
 	}
-	if m, _, _ := st.ForOwner(pA.OwnerID).Meeting(ctx, ma.Meeting.ID); m.State != "ended" {
+	if m, _ := st.ForOwner(pA.OwnerID).Meeting(ctx, ma.Meeting.ID); m.State != "ended" {
 		t.Fatal("the revoked owner's meeting stayed open")
 	}
 	// Every token dead: nothing to serve.

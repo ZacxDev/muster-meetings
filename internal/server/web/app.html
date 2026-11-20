@@ -9,14 +9,14 @@
 </head>
 <body>
 {{- if .Session}}
-<main id="app" data-session="{{.Session}}" data-expires="{{.ExpiresAt}}"{{if .Ref}} data-ref="{{.Ref}}"{{end}}>
+<main id="app" data-session="{{.Session}}"{{if .Ref}} data-ref="{{.Ref}}"{{end}}>
   <header class="bar">
     <h1>Meetings</h1>
     <button id="new-meeting" type="button" class="primary">New meeting</button>
   </header>
   <p id="status" class="status" role="status" aria-live="polite"></p>
   <section id="link-panel" class="link-panel" hidden aria-labelledby="link-title">
-    <h2 id="link-title">Your meeting is ready</h2>
+    <h2 id="link-title">Meeting link</h2>
     <p>Send this link to the people you want to meet. They ask to join, and you let them in.</p>
     <div class="link-row">
       <input id="join-url" type="text" readonly aria-label="Meeting link">

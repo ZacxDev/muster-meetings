@@ -71,7 +71,9 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("muster: %d %s: %s", e.Status, e.Kind, e.Message)
 }
 
-// Retryable says the same call is worth sending again.
+// Retryable says the same call is worth sending again. Kept, with
+// RetryAfter, for 2b's knock notification: POST /plugin/v1/notify answers
+// 429 with Retry-After (plugins.md, "Limits").
 func (e *Error) Retryable() bool {
 	return e.Kind == KindNetwork || e.Kind == KindServer || e.Kind == KindRateLimited
 }
@@ -176,18 +178,18 @@ type Redeemed struct {
 // purpose and target: muster answers a viewer code just as readily.
 func (c *Client) Redeem(ctx context.Context, code string) (Redeemed, error) {
 	var out Redeemed
-	_, err := c.do(ctx, c.HTTP, http.MethodPost, "/plugin/v1/handoffs/redeem", map[string]string{"code": code}, &out)
+	_, err := c.do(ctx, http.MethodPost, "/plugin/v1/handoffs/redeem", map[string]string{"code": code}, &out)
 	return out, err
 }
 
 // Self is GET /plugin/v1/self.
 func (c *Client) Self(ctx context.Context) (SelfInfo, error) {
 	var out SelfInfo
-	_, err := c.do(ctx, c.HTTP, http.MethodGet, "/plugin/v1/self", nil, &out)
+	_, err := c.do(ctx, http.MethodGet, "/plugin/v1/self", nil, &out)
 	return out, err
 }
 
-func (c *Client) do(ctx context.Context, hc *http.Client, method, path string, in, out any) (int, error) {
+func (c *Client) do(ctx context.Context, method, path string, in, out any) (int, error) {
 	var body io.Reader
 	if in != nil {
 		b, err := json.Marshal(in)
@@ -204,7 +206,7 @@ func (c *Client) do(ctx context.Context, hc *http.Client, method, path string, i
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := hc.Do(req)
+	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		// net/http's error names the whole request URL; keep its scheme and
 		// host only, so a base that slipped past CheckBaseURL with a token in

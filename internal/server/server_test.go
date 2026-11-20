@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -151,6 +152,22 @@ func (e *env) enter(p mustertest.Plugin) string {
 }
 
 // sessions is the number of owner sessions in the database.
+type created struct {
+	ID      string `json:"id"`
+	JoinURL string `json:"join_url"`
+}
+
+// create is New meeting as the owner app sends it.
+func (e *env) create(sess string) created {
+	e.t.Helper()
+	resp, raw := e.do("POST", "/api/meetings", sess, map[string]any{})
+	var c created
+	if err := json.Unmarshal(raw, &c); err != nil || resp.StatusCode != 201 {
+		e.t.Fatalf("create = %d %s", resp.StatusCode, raw)
+	}
+	return c
+}
+
 func (e *env) sessions() int {
 	e.t.Helper()
 	n, err := e.store.CountSessions(context.Background())
@@ -321,6 +338,26 @@ func TestEnterWithoutACodeSaysOpenItFromMusterAgain(t *testing.T) {
 	}
 }
 
+// Fail closed: a muster that is down, or answers 5xx, admits nobody.
+func TestEnterFailsClosedWhenMusterIsDownOrFailing(t *testing.T) {
+	e := newEnv(t)
+	code := e.fake.MintApp(pA.PluginID, "")
+	e.fake.SetFailing(true)
+	resp, body := e.do("GET", enterPath(code, pA.PluginID), "", nil)
+	if resp.StatusCode != 502 || !strings.Contains(string(body), server.EnterNoMuster) || sessionAttr.Match(body) || e.sessions() != 0 {
+		t.Fatalf("muster failing: enter = %d %s (sessions %d); want 502", resp.StatusCode, body, e.sessions())
+	}
+	e.fake.SetFailing(false)
+	e.fake.Close()
+	resp, body = e.do("GET", enterPath(code, pA.PluginID), "", nil)
+	if resp.StatusCode != 502 || sessionAttr.Match(body) || e.sessions() != 0 {
+		t.Fatalf("muster down: enter = %d %s (sessions %d); want 502", resp.StatusCode, body, e.sessions())
+	}
+	if _, ok := e.reg.Lookup(pA.PluginID); !ok {
+		t.Fatal("a muster outage revoked the token")
+	}
+}
+
 // muster's 401 on the redeem is the token dying: it is revoked at once.
 func TestEnterThatMusterAnswers401RevokesTheToken(t *testing.T) {
 	e := newEnv(t)
@@ -340,13 +377,12 @@ func TestEnterThatMusterAnswers401RevokesTheToken(t *testing.T) {
 // own meetings.
 func TestEnterPassesTheRefOnlyForTheOwnersOwnMeeting(t *testing.T) {
 	e := newEnv(t)
-	own, _ := e.store.ForOwner(pA.OwnerID).CreateMeeting(context.Background(), store.NewMeeting{}, t0)
-	other, _ := e.store.ForOwner(pB.OwnerID).CreateMeeting(context.Background(), store.NewMeeting{}, t0)
-	_, body := e.do("GET", enterPath(e.fake.MintApp(pA.PluginID, own.Meeting.ID), pA.PluginID), "", nil)
-	if !strings.Contains(string(body), `data-ref="`+own.Meeting.ID+`"`) {
+	ownID, otherID := e.create(e.enter(pA)).ID, e.create(e.enter(pB)).ID
+	_, body := e.do("GET", enterPath(e.fake.MintApp(pA.PluginID, ownID), pA.PluginID), "", nil)
+	if !strings.Contains(string(body), `data-ref="`+ownID+`"`) {
 		t.Fatalf("the owner's own ref was dropped: %s", body)
 	}
-	_, body = e.do("GET", enterPath(e.fake.MintApp(pA.PluginID, other.Meeting.ID), pA.PluginID), "", nil)
+	_, body = e.do("GET", enterPath(e.fake.MintApp(pA.PluginID, otherID), pA.PluginID), "", nil)
 	if strings.Contains(string(body), "data-ref") || !sessionAttr.Match(body) {
 		t.Fatalf("another owner's ref reached the page: %s", body)
 	}
@@ -384,6 +420,45 @@ func TestOwnerRoutesRefuseAnythingButALiveBearerSession(t *testing.T) {
 	}
 	if resp, _ := e.do("GET", "/api/meetings", sess, nil); resp.StatusCode != 200 {
 		t.Fatalf("positive control: the live session = %d", resp.StatusCode)
+	}
+}
+
+// 🔴 The revocation race: a New meeting admitted just before a revocation,
+// whose insert runs just after it, must not leave an open meeting for the
+// revoked owner. The hook holds the request between its admission and its
+// insert while the revocation runs to the end, deterministically.
+func TestANewMeetingRacingARevocationLeavesNoOpenMeeting(t *testing.T) {
+	e := newEnv(t)
+	sess := e.enter(pA)
+	reached, release := make(chan struct{}), make(chan struct{})
+	server.SetBeforeCreateHookForTest(t, func() {
+		close(reached)
+		<-release
+	})
+	type result struct {
+		status int
+		body   string
+	}
+	done := make(chan result, 1)
+	go func() {
+		resp, raw := e.do("POST", "/api/meetings", sess, map[string]any{})
+		done <- result{resp.StatusCode, string(raw)}
+	}()
+	<-reached // admitted: the token was live a moment ago
+	e.fake.Revoke(pA.Token)
+	e.reg.PollOnce(context.Background()) // the whole revocation, while the create waits
+	server.SetBeforeCreateHookForTest(t, nil)
+	close(release)
+	r := <-done
+
+	list, _, _ := e.store.ForOwner(pA.OwnerID).ListMeetings(context.Background(), nil, 10)
+	for _, m := range list {
+		if m.State == "open" {
+			t.Fatalf("an open meeting for the revoked owner: %+v (create answered %d %s)", m, r.status, r.body)
+		}
+	}
+	if r.status != 401 {
+		t.Fatalf("the raced create = %d %s, want 401", r.status, r.body)
 	}
 }
 
@@ -442,7 +517,7 @@ func TestTheSelfPollEndsARevokedOwnersSessionsAndMeetingsAndNoOneElses(t *testin
 	if n := e.sessions(); n != 1 {
 		t.Fatalf("%d sessions left in the database, want only B's", n)
 	}
-	if m, _, _ := e.store.ForOwner(pA.OwnerID).Meeting(context.Background(), ma.ID); m.State != "ended" || m.EndedAt == nil {
+	if m, _ := e.store.ForOwner(pA.OwnerID).Meeting(context.Background(), ma.ID); m.State != "ended" || m.EndedAt == nil {
 		t.Fatalf("the revoked owner's meeting = %+v, want ended", m)
 	}
 	resp, raw := e.do("GET", "/api/meetings/"+mb.ID, sb, nil)
@@ -461,23 +536,15 @@ func TestTheSelfPollEndsARevokedOwnersSessionsAndMeetingsAndNoOneElses(t *testin
 func TestAnotherOwnersMeetingsAreNeverVisible(t *testing.T) {
 	e := newEnv(t)
 	sa, sb := e.enter(pA), e.enter(pB)
-	var ids []string
-	for _, title := range []string{"A first", "A second"} {
-		_, raw := e.do("POST", "/api/meetings", sa, map[string]any{"title": title})
-		var c struct{ ID string }
-		json.Unmarshal(raw, &c)
-		ids = append(ids, c.ID)
-	}
-	_, raw := e.do("POST", "/api/meetings", sb, map[string]any{"title": "B only"})
-	var cb struct{ ID string }
-	json.Unmarshal(raw, &cb)
+	ids := []string{e.create(sa).ID, e.create(sa).ID}
+	cb := e.create(sb)
 
-	_, raw = e.do("GET", "/api/meetings", sb, nil)
+	_, raw := e.do("GET", "/api/meetings", sb, nil)
 	var list struct {
-		Meetings []struct{ ID, Title string }
+		Meetings []struct{ ID string }
 	}
 	json.Unmarshal(raw, &list)
-	if len(list.Meetings) != 1 || list.Meetings[0].ID != cb.ID || strings.Contains(string(raw), "A first") {
+	if len(list.Meetings) != 1 || list.Meetings[0].ID != cb.ID || strings.Contains(string(raw), ids[0]) || strings.Contains(string(raw), ids[1]) {
 		t.Fatalf("B's list = %s; want B's one meeting only", raw)
 	}
 	_, unknown := e.do("GET", "/api/meetings/"+store.NewMeetingID(), sb, nil)
@@ -488,7 +555,7 @@ func TestAnotherOwnersMeetingsAreNeverVisible(t *testing.T) {
 		}
 	}
 	// Positive control: A reads its own.
-	if resp, raw := e.do("GET", "/api/meetings/"+ids[0], sa, nil); resp.StatusCode != 200 || !strings.Contains(string(raw), "A first") {
+	if resp, raw := e.do("GET", "/api/meetings/"+ids[0], sa, nil); resp.StatusCode != 200 || !strings.Contains(string(raw), ids[0]) {
 		t.Fatalf("A reading its own = %d %s", resp.StatusCode, raw)
 	}
 }
@@ -564,7 +631,7 @@ var joinURL = regexp.MustCompile(`^https://meet\.example\.test/j/([A-Za-z0-9_-]{
 func TestNewMeetingAnswersItsIDAndALinkOnThePluginsOrigin(t *testing.T) {
 	e := newEnv(t)
 	sess := e.enter(pA)
-	resp, raw := e.do("POST", "/api/meetings", sess, map[string]any{"title": "  Budget   review "})
+	resp, raw := e.do("POST", "/api/meetings", sess, nil)
 	var c struct {
 		ID      string `json:"id"`
 		JoinURL string `json:"join_url"`
@@ -583,7 +650,7 @@ func TestNewMeetingAnswersItsIDAndALinkOnThePluginsOrigin(t *testing.T) {
 	if m == nil {
 		t.Fatalf("join_url = %q", c.JoinURL)
 	}
-	if !store.ValidMeetingID(c.ID) || c.Meeting.Title != "Budget review" || c.Meeting.State != "open" || !c.Meeting.Record || !c.Meeting.AI ||
+	if !store.ValidMeetingID(c.ID) || c.Meeting.Title != "" || c.Meeting.State != "open" || !c.Meeting.Record || !c.Meeting.AI ||
 		!c.Meeting.CreatedAt.Equal(t0) || !c.Meeting.LinkExpiresAt.Equal(t0.Add(24*time.Hour)) {
 		t.Fatalf("created = %s", raw)
 	}
@@ -600,48 +667,89 @@ func TestNewMeetingAnswersItsIDAndALinkOnThePluginsOrigin(t *testing.T) {
 		t.Fatalf("GET one meeting's link = %s, want %q", raw, c.JoinURL)
 	}
 	// Two meetings, two links.
-	_, raw = e.do("POST", "/api/meetings", sess, map[string]any{"record": false})
-	var c2 struct {
-		JoinURL string `json:"join_url"`
-		Meeting struct{ Record, AI bool }
-	}
-	json.Unmarshal(raw, &c2)
-	if c2.JoinURL == c.JoinURL || !joinURL.MatchString(c2.JoinURL) || c2.Meeting.Record || !c2.Meeting.AI {
-		t.Fatalf("second = %s", raw)
+	if c2 := e.create(sess); c2.JoinURL == c.JoinURL || !joinURL.MatchString(c2.JoinURL) {
+		t.Fatalf("second link = %q, first %q", c2.JoinURL, c.JoinURL)
 	}
 }
 
-func TestNewMeetingRefusesABadBody(t *testing.T) {
+// New meeting takes no options (no title, no record switch): no body, or
+// {}. Anything else is refused, so a client can't believe it set one.
+func TestNewMeetingTakesNoOptions(t *testing.T) {
 	e := newEnv(t)
 	sess := e.enter(pA)
 	for name, body := range map[string]string{
-		"unknown field":    `{"title":"x","owner_id":41}`,
-		"not JSON":         `title=x`,
-		"title too long":   `{"title":"` + strings.Repeat("é", 81) + `"}`,
-		"control in title": `{"title":"a\u0007b"}`,
-		"bidi in title":    `{"title":"a\u202eb"}`,
-		"record a string":  `{"record":"no"}`,
-		"too big":          `{"title":"` + strings.Repeat(" ", 5000) + `"}`,
+		"a title":       `{"title":"x"}`,
+		"a record flag": `{"record":false}`,
+		"another owner": `{"owner_id":41}`,
+		"not JSON":      `title=x`,
+		"too big":       `{` + strings.Repeat(" ", 5000) + `}`,
 	} {
 		resp, raw := e.do("POST", "/api/meetings", sess, body)
 		if resp.StatusCode != 400 {
 			t.Errorf("%s: %d %s", name, resp.StatusCode, raw)
 		}
 	}
-	if resp, _ := e.do("POST", "/api/meetings", sess, `{}`, "Content-Type", "text/plain"); resp.StatusCode != 415 {
-		t.Errorf("text/plain = %d", resp.StatusCode)
+	for _, body := range []string{``, `{}`, ` {} `} {
+		if resp, raw := e.do("POST", "/api/meetings", sess, body); resp.StatusCode != 201 {
+			t.Errorf("body %q = %d %s", body, resp.StatusCode, raw)
+		}
 	}
-	// Boundary, positive side: 80 characters and an empty body pass.
-	if resp, raw := e.do("POST", "/api/meetings", sess, `{"title":"`+strings.Repeat("é", 80)+`"}`); resp.StatusCode != 201 {
-		t.Errorf("80 characters = %d %s", resp.StatusCode, raw)
-	}
-	if resp, raw := e.do("POST", "/api/meetings", sess, ``); resp.StatusCode != 201 {
-		t.Errorf("an empty body = %d %s", resp.StatusCode, raw)
-	}
-	list, _, _ := e.store.ForOwner(pB.OwnerID).ListMeetings(context.Background(), nil, 10)
-	if len(list) != 0 {
+	if list, _, _ := e.store.ForOwner(pB.OwnerID).ListMeetings(context.Background(), nil, 10); len(list) != 0 {
 		t.Fatal("a body naming another owner made a meeting for them")
 	}
+}
+
+// The API's shapes, pinned: one meeting is exactly {"meeting", "link"}, a
+// list item never has a link, and a created meeting answers id and join_url.
+func TestTheMeetingAPIShapes(t *testing.T) {
+	e := newEnv(t)
+	sess := e.enter(pA)
+	c := e.create(sess)
+	keys := func(raw []byte) []string {
+		var m map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatalf("not a JSON object: %s", raw)
+		}
+		var ks []string
+		for k := range m {
+			ks = append(ks, k)
+		}
+		sort.Strings(ks)
+		return ks
+	}
+	_, raw := e.do("GET", "/api/meetings/"+c.ID, sess, nil)
+	if got := strings.Join(keys(raw), ","); got != "link,meeting" {
+		t.Fatalf("one meeting's keys = %s (%s)", got, raw)
+	}
+	var one struct {
+		Meeting map[string]json.RawMessage
+		Link    *string
+	}
+	json.Unmarshal(raw, &one)
+	if one.Link == nil || *one.Link != c.JoinURL {
+		t.Fatalf("link = %v, want %q", one.Link, c.JoinURL)
+	}
+	if got := strings.Join(keys(mustJSON(t, one.Meeting)), ","); got != "ai,created_at,ended_at,id,link_expires_at,record,started_at,state,title" {
+		t.Fatalf("meeting keys = %s", got)
+	}
+	_, raw = e.do("GET", "/api/meetings", sess, nil)
+	var list struct{ Meetings []map[string]json.RawMessage }
+	json.Unmarshal(raw, &list)
+	if len(list.Meetings) != 1 {
+		t.Fatalf("list = %s", raw)
+	}
+	if _, ok := list.Meetings[0]["link"]; ok || strings.Contains(string(raw), "/j/") {
+		t.Fatalf("a list item carries a link: %s", raw)
+	}
+}
+
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 func TestTheListIsNewestFirstAndPaged(t *testing.T) {
@@ -758,11 +866,18 @@ func TestTheLogCarriesNoCodeTokenOrQuery(t *testing.T) {
 
 func TestRedactPath(t *testing.T) {
 	for in, want := range map[string]string{
-		"/j/AbC_-123":       "/j/{code}",
-		"/j/AbC_-123/knock": "/j/{code}/knock",
-		"/j/":               "/j/{code}",
-		"/api/meetings":     "/api/meetings",
-		"/jx/abc":           "/jx/abc",
+		"/j/AbC_-123":         "/j/{code}",
+		"/j/AbC_-123/knock":   "/j/{code}/knock",
+		"//j/AbC_-123":        "/j/{code}",
+		"/./j/AbC_-123":       "/j/{code}",
+		"/x/../j/AbC_-123":    "/j/{code}",
+		"/x/../j/AbC_-123/a":  "/j/{code}/a",
+		"/j/":                 "/{redacted}",
+		"/api/j/AbC_-123":     "/{redacted}",
+		"/static/../../j/AbC": "/j/{code}",
+		"/api/meetings":       "/api/meetings",
+		"/jx/abc":             "/jx/abc",
+		"/enter":              "/enter",
 	} {
 		if got := server.RedactPath(in); got != want {
 			t.Errorf("RedactPath(%q) = %q, want %q", in, got, want)

@@ -3,8 +3,8 @@
 //
 //	GET  /enter                 redeem muster's hand-off code, mint an owner session, render the app
 //	GET  /api/meetings          the owner's meetings, newest first, paged
-//	POST /api/meetings          New meeting: answers {"id", "join_url"}
-//	GET  /api/meetings/{id}     one meeting, its participants, and its link while open
+//	POST /api/meetings          New meeting: answers {"id", "join_url", "meeting"}
+//	GET  /api/meetings/{id}     one meeting, and its link while it is open
 //
 // Owner routes take `Authorization: Bearer mmo_…` and nothing else: no
 // cookie is ever set or read (muster's frame is a third-party context, where
@@ -23,14 +23,12 @@ import (
 	"io"
 	"io/fs"
 	"log"
-	"mime"
 	"net/http"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/ZacxDev/muster-meetings/internal/muster"
 	"github.com/ZacxDev/muster-meetings/internal/owners"
@@ -144,13 +142,20 @@ func (w *statusWriter) Flush() {
 }
 
 // RedactPath is a request path as the access log may record it: a guest
-// link's code (`/j/<code>…`) is replaced, so a log line never carries one.
+// link's code never reaches a log line. A path whose cleaned form is
+// `/j/<code>…` (so `//j/…`, `/./j/…` and `/x/../j/…` too, which the router
+// would redirect there) logs as `/j/{code}…`, and any other path holding a
+// `/j/` segment anywhere logs as `/{redacted}`.
 func RedactPath(p string) string {
-	if rest, ok := strings.CutPrefix(p, "/j/"); ok {
+	c := path.Clean("/" + p)
+	if rest, ok := strings.CutPrefix(c, "/j/"); ok {
 		if _, tail, ok := strings.Cut(rest, "/"); ok {
 			return "/j/{code}/" + tail
 		}
 		return "/j/{code}"
+	}
+	if strings.Contains(p, "/j/") || strings.Contains(c+"/", "/j/") {
+		return "/{redacted}"
 	}
 	return p
 }
@@ -186,11 +191,10 @@ const (
 )
 
 type enterPage struct {
-	Session   string
-	ExpiresAt string
-	Ref       string
-	Message   string
-	Again     bool
+	Session string
+	Ref     string
+	Message string
+	Again   bool
 }
 
 func (s *Server) renderEnter(w http.ResponseWriter, code int, p enterPage) {
@@ -239,15 +243,23 @@ func (s *Server) handleEnter(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case e != nil && e.Kind == muster.KindOff:
 			s.refuseEnter(w, http.StatusForbidden, EnterRefused, "muster: no such code for plugin "+pid)
+			return
 		case e != nil && e.Kind == muster.KindAuth:
-			s.reg.Revoke(r.Context(), pluginID)
+			// The revocation must finish even if the browser goes away.
+			ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
+			s.reg.Revoke(ctx, pluginID)
+			cancel()
 			s.refuseEnter(w, http.StatusForbidden, EnterNotSetUp, "muster: plugin "+pid+"'s token is revoked")
+			return
 		case e != nil && e.Kind == muster.KindCapability:
 			s.refuseEnter(w, http.StatusForbidden, EnterNotSetUp, "muster: plugin "+pid+"'s token may not redeem")
+			return
 		default:
+			// Fail closed: muster down, a 5xx, an answer this client cannot
+			// read. Nothing is admitted on an answer we did not get.
 			s.refuseEnter(w, http.StatusBadGateway, EnterNoMuster, "muster: "+kindOf(err))
+			return
 		}
-		return
 	}
 	// 🔴 The three checks that make the code this tab's: muster answers a
 	// viewer code to the same route just as readily.
@@ -264,7 +276,7 @@ func (s *Server) handleEnter(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := s.cfg.Now()
-	session, exp, err := s.store.CreateSession(r.Context(), tok.OwnerID, tok.PluginID, now)
+	session, _, err := s.store.CreateSession(r.Context(), tok.OwnerID, tok.PluginID, now)
 	if err != nil {
 		s.refuseEnter(w, http.StatusInternalServerError, EnterNoMuster, "session: "+err.Error())
 		return
@@ -273,11 +285,11 @@ func (s *Server) handleEnter(w http.ResponseWriter, r *http.Request) {
 	// names one of this owner's own meetings.
 	ref := ""
 	if red.Target.App != nil && red.Target.App.Ref != "" {
-		if _, _, err := s.store.ForOwner(tok.OwnerID).Meeting(r.Context(), red.Target.App.Ref); err == nil {
+		if _, err := s.store.ForOwner(tok.OwnerID).Meeting(r.Context(), red.Target.App.Ref); err == nil {
 			ref = red.Target.App.Ref
 		}
 	}
-	s.renderEnter(w, http.StatusOK, enterPage{Session: session, ExpiresAt: exp.Format(time.RFC3339), Ref: ref})
+	s.renderEnter(w, http.StatusOK, enterPage{Session: session, Ref: ref})
 }
 
 // kindOf names an error by its kind only: a network error's text can carry
@@ -321,7 +333,7 @@ func (s *Server) owner(next ownerHandler) http.HandlerFunc {
 			refuse()
 			return
 		}
-		next(w, r, s.store.ForOwner(sess.OwnerID))
+		next(w, r, s.store.ForSession(sess))
 	}
 }
 
@@ -366,48 +378,27 @@ func (s *Server) handleListMeetings(w http.ResponseWriter, r *http.Request, repo
 	writeJSON(w, http.StatusOK, map[string]any{"meetings": ms, "next": nextS})
 }
 
-// MaxTitle is a title's longest, in characters.
-const MaxTitle = 80
+// testHookBeforeCreate, when set (by tests only), runs after the owner's
+// session was admitted and before the meeting is inserted: the window a
+// revocation can race.
+var testHookBeforeCreate func()
 
-// ValidTitle checks a trimmed title: at most MaxTitle characters, valid
-// UTF-8, no control or bidirectional-formatting characters (a title is
-// shown as text, but a bidi override still reorders what it sits beside).
-func ValidTitle(t string) bool {
-	if !utf8.ValidString(t) || utf8.RuneCountInString(t) > MaxTitle {
-		return false
-	}
-	for _, c := range t {
-		if unicode.IsControl(c) || unicode.Is(unicode.Bidi_Control, c) || c == ' ' || c == ' ' {
-			return false
-		}
-	}
-	return true
-}
-
+// handleCreateMeeting is New meeting. It takes no options: no body, or `{}`.
 func (s *Server) handleCreateMeeting(w http.ResponseWriter, r *http.Request, repo *store.OwnerRepo) {
-	if mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mt != "application/json" {
-		writeJSON(w, http.StatusUnsupportedMediaType, map[string]any{"error": "the body is JSON: {\"title\"?, \"record\"?}"})
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1024))
+	if b := strings.TrimSpace(string(raw)); err != nil || (b != "" && b != "{}") {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "New meeting takes no options: send no body, or {}"})
 		return
 	}
-	var in struct {
-		Title  *string `json:"title"`
-		Record *bool   `json:"record"`
+	if testHookBeforeCreate != nil {
+		testHookBeforeCreate()
 	}
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&in); err != nil && !errors.Is(err, io.EOF) {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "the body is {\"title\"?: string, \"record\"?: bool}"})
+	c, err := repo.CreateMeeting(r.Context(), s.cfg.Now())
+	if errors.Is(err, store.ErrNoSession) {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="meetings"`)
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "no live owner session: " + EnterAgain})
 		return
 	}
-	title := ""
-	if in.Title != nil {
-		title = strings.Join(strings.Fields(*in.Title), " ")
-		if !ValidTitle(title) {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "a title is at most " + strconv.Itoa(MaxTitle) + " characters, with no control characters"})
-			return
-		}
-	}
-	c, err := repo.CreateMeeting(r.Context(), store.NewMeeting{Title: title, Record: in.Record}, s.cfg.Now())
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "the meeting could not be made"})
 		return
@@ -418,8 +409,11 @@ func (s *Server) handleCreateMeeting(w http.ResponseWriter, r *http.Request, rep
 // JoinURL is a guest link for code.
 func (s *Server) JoinURL(code string) string { return s.cfg.PublicURL + "/j/" + code }
 
+// handleGetMeeting is one meeting: {"meeting", "link"}. link is the guest
+// link while the meeting is open and under LinkLifetime old, null
+// otherwise; it is the owner's way to copy the link again.
 func (s *Server) handleGetMeeting(w http.ResponseWriter, r *http.Request, repo *store.OwnerRepo) {
-	m, ps, err := repo.Meeting(r.Context(), r.PathValue("id"))
+	m, err := repo.Meeting(r.Context(), r.PathValue("id"))
 	if errors.Is(err, store.ErrNotFound) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "no such meeting"})
 		return
@@ -428,8 +422,6 @@ func (s *Server) handleGetMeeting(w http.ResponseWriter, r *http.Request, repo *
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "the meeting could not be read"})
 		return
 	}
-	// link: the guest link again, while the meeting is open; null once it
-	// has ended or its lifetime has passed (Link deletes the sealed code then).
 	var link *string
 	code, err := repo.Link(r.Context(), m.ID, s.cfg.Now())
 	switch {
@@ -437,15 +429,11 @@ func (s *Server) handleGetMeeting(w http.ResponseWriter, r *http.Request, repo *
 		u := s.JoinURL(code)
 		link = &u
 	case errors.Is(err, store.ErrNoLink):
-	case errors.Is(err, store.ErrSealed):
-		if s.cfg.Log != nil {
-			s.cfg.Log.Printf("meeting %s: its sealed link does not open (was MEETINGS_LINK_KEY changed?)", m.ID)
-		}
 	default:
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "the meeting could not be read"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"meeting": m, "participants": ps, "link": link})
+	writeJSON(w, http.StatusOK, map[string]any{"meeting": m, "link": link})
 }
 
 // Internal is the internal port's handler: GET /healthz.

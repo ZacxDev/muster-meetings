@@ -8,11 +8,11 @@ import (
 	"regexp"
 )
 
-// The plugin's random values. Every one is base64url without padding, from
-// crypto/rand, and only its SHA-256 is ever stored.
+// The plugin's codes and tokens, all base64url without padding.
 const (
 	// JoinCodeBytes is a guest link's code: 128 bits, 22 characters
-	// (design: "Guests: links, the lobby, admission").
+	// (design: "Guests: links, the lobby, admission"). It is derived, not
+	// drawn: Store.JoinCode.
 	JoinCodeBytes = 16
 	// SessionTokenBytes is an owner session's token: 32 bytes, 43
 	// characters after the "mmo_" prefix (design: "The owner: the hand-off").
@@ -42,9 +42,6 @@ func random(n int) string {
 	}
 	return base64.RawURLEncoding.EncodeToString(b)
 }
-
-// NewJoinCode is a fresh guest link code.
-func NewJoinCode() string { return random(JoinCodeBytes) }
 
 // NewSessionToken is a fresh owner session token, with its prefix.
 func NewSessionToken() string { return SessionPrefix + random(SessionTokenBytes) }

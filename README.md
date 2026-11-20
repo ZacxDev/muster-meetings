@@ -1,141 +1,82 @@
-# muster-plugin-template
+# muster-meetings
 
-A starting point for a [muster](https://github.com/ZacxDev/muster) plugin, in
-Go, with no dependencies beyond the standard library.
+Meetings for [muster](https://github.com/ZacxDev/muster): a **Meetings** tab
+in muster's sidebar where you start a call, share a link, and later read what
+was said. It is a muster **plugin**, a small Go program you run beside muster
+on a subdomain of muster's host. The design is muster's
+[docs/design/meetings.md](https://github.com/ZacxDev/muster/blob/main/docs/design/meetings.md).
 
-A **plugin** is a small program you run that connects muster to another
-system, such as an inbox or a chat. It brings that system's messages to your
-muster **chief** (or to an officer), and sends back the replies you approve.
-muster never calls the plugin: the plugin calls muster for everything.
+**What works today (phase 2a):** the tab opens the Meetings page inside
+muster; **New meeting** makes a meeting and shows its link with **Copy link**
+(and **Share** where the browser has it); the page lists your meetings, newest
+first, and an open meeting's row has its own **Copy link**, so the link is
+never lost to a reload. Calls, the guest page and the lobby are phase 2b, so a guest opening
+the link today gets a `404`. Transcripts, action items and recordings come
+later.
 
-This template does the whole round-trip against a **fake** system, so you can
-see it work before you write any real integration:
+For you, the owner, that is the whole feature: open **Meetings**, press
+**New meeting**, copy the link, send it.
 
-1. Every `ECHO_INTERVAL` a fake upstream produces a message (`echo-1`,
-   `echo-2`, …) and the plugin posts it to muster (`POST /plugin/v1/messages`).
-2. muster hands it to your chief. On Kubernetes the chief can draft a reply
-   itself; on the Docker Compose install it hands the message to one of your
-   mirrored Claude Code sessions, and that session writes the reply.
-3. You approve the draft in muster (**Asks → Drafts**).
-4. The plugin claims the approved draft (`POST /plugin/v1/drafts/claim`),
-   "sends" it by printing it to stdout, and reports the result
-   (`POST /plugin/v1/drafts/{id}/result`).
+## How it fits muster
 
-New to muster plugins? Read muster's
-[plugin quickstart](https://github.com/ZacxDev/muster/blob/main/docs/plugins-quickstart.md)
-first; the full API is [docs/plugins.md](https://github.com/ZacxDev/muster/blob/main/docs/plugins.md).
+muster never calls the plugin; the plugin calls muster.
 
-## Run it against a local muster
+1. muster's `/apps/<plugin id>` page frames
+   `https://meet.<muster host>/enter?muster_code=…&muster_plugin=…`, with a
+   one-time hand-off code it minted for you (muster's
+   [App tab](https://github.com/ZacxDev/muster/blob/main/docs/plugins.md#app-tab)).
+2. `/enter` redeems the code with the plugin token that `muster_plugin`
+   names (`POST /plugin/v1/handoffs/redeem`). It accepts the answer only when
+   its purpose is `app`, its target is an app target, and its owner is that
+   token's own owner; anything else is refused.
+3. It makes an **owner session** (32 random bytes, stored only as SHA-256,
+   8 hours) and renders the page with it in the page's memory. The page calls
+   `/api/*` with `Authorization: Bearer mmo_…`. **No cookie is set or read**:
+   in muster's frame a cookie is third-party (Safari blocks it, Chrome
+   partitions it). The page removes the code from its address with
+   `history.replaceState`, and every response says `Referrer-Policy:
+   no-referrer`. Reloading the frame says "Open Meetings from muster again";
+   reloading muster's page mints a new code.
+4. Every 60 s the plugin calls `GET /plugin/v1/self` with each token. When
+   muster answers `401` (you revoked the plugin, or your account was
+   disabled), it deletes every session minted through that token and ends your
+   open meetings. A token revoked while the plugin was down is applied the
+   same way when it starts.
 
-**Tested against** muster commit `be827a860` (after release `v0.246.0`): the
-whole run below, from the plugin's first message to its `SEND` and
-`muster recorded sent`, with the settings this section names and a
-`muster-mirror` set up as below. The chief's choice to route, and the Claude
-Code session's answer, were played by test stand-ins calling the same tools.
+## Set it up
 
-You need Go (the version in `go.mod`) and a muster you can sign in to. A
-local install answers at `http://localhost:8105`. Something has to write the
-reply, so you also need what the quickstart's
-[Before you start](https://github.com/ZacxDev/muster/blob/main/docs/plugins-quickstart.md#before-you-start) lists:
+You need a muster with plugins on, served over HTTPS on its own host, and a
+subdomain of that host for this plugin (one wildcard certificate covers
+both). Deployment manifests come in phase 2c; until then run the binary
+yourself behind your HTTPS proxy.
 
-- **A chief with a credential**: the `chief` profile and a Claude
-  subscription token (`claude setup-token`) or an OpenRouter key
-  ([features page, Chief](https://github.com/ZacxDev/muster/blob/main/docs/features.md#chief)).
-- **On the Docker Compose install, one mirrored Claude Code session** with
-  muster's tools. The Compose chief cannot draft a reply itself: it routes
-  the message to that session, and the session writes the reply. On
-  Kubernetes the chief drafts it, and you can skip this.
+On **muster**:
 
-  **The one-line install does not set this session up.** Its `muster-mirror`
-  is read-only, and a read-only host refuses the route: the chief's
-  `route_to_session` answers `host_not_interactive` ("This host is read-only
-  — its muster-mirror was not started with -interactive."). Do this once, on
-  the machine where the session runs (the quickstart's
-  [The session that writes the reply](https://github.com/ZacxDev/muster/blob/main/docs/plugins-quickstart.md#the-session-that-writes-the-reply)
-  explains each step):
+1. Add exactly `https://meet.<muster host>` to `MUSTER_PLUGIN_ORIGINS`
+   ([configuration.md](https://github.com/ZacxDev/muster/blob/main/docs/configuration.md#muster-server-optional-features)).
+   muster then refuses any request whose `Host` is that name, so the plugin
+   can never be served as muster.
+2. On `/plugins`, create a plugin with **App tab** checked: origin
+   `https://meet.<muster host>`, entry URL `https://meet.<muster host>/enter`,
+   a tab label (say `Meetings`) and an icon. Copy the `mpl_…` token: it is
+   shown once.
 
-  1. Add two lines to `~/.config/muster-mirror/env`:
+Then **configure and start the plugin**:
 
-     ```sh
-     MUSTER_MIRROR_INTERACTIVE=1                # muster may type into this host's windows: effectively a shell here
-     MUSTER_MIRROR_MCP_LISTEN=127.0.0.1:47823   # muster's tools for this host's Claude Code sessions
-     ```
+```sh
+cp .env.example .env
+# edit .env (below)
+set -a; . ./.env; set +a
+go run .
+```
 
-  2. Restart it: `systemctl --user restart muster-mirror` on Linux. On macOS
-     run the installer again instead, as
-     `curl -fsSL https://github.com/ZacxDev/muster/releases/latest/download/install.sh | MUSTER_MIRROR_INTERACTIVE=1 sh`
-     (its service keeps a copy of the settings from the last install). If
-     this machine joined a hub, add `MUSTER_JOIN_URL=<hub>` before `sh`, as
-     when you installed it: without it the installer would set up a muster
-     server here instead. On Linux without a systemd user session (WSL, a
-     container), stop the `muster-mirror` you started by hand and start it
-     again the same way. The log says `INTERACTIVE (-interactive)` and
-     `MCP endpoint for this host's Claude Code sessions at http://127.0.0.1:47823/mcp (secret in <path>)`.
-     Copy that `<path>`: it differs by OS, and `muster doctor` prints it too
-     ([where the secret is](https://github.com/ZacxDev/muster/blob/main/docs/features.md#where-the-mcp-secret-is)).
-  3. Register the endpoint with Claude Code by running the first line, and
-     add the second, with `<path>` the secret's path from step 2, to the
-     shell tmux starts (`~/.zshrc` or `~/.bashrc`):
+It logs `serving owner <id> through plugin <id>`, and the tab opens your
+Meetings page.
 
-     ```sh
-     claude mcp add-json --scope user muster '{"type":"http","url":"http://127.0.0.1:47823/mcp","headers":{"Authorization":"Bearer ${MUSTER_MIRROR_MCP_SECRET:-}","X-Muster-Pane":"${TMUX_PANE:-}","X-Muster-Tmux":"${TMUX:-}"}}'
-     export MUSTER_MIRROR_MCP_SECRET="$(cat '<path>')"
-     ```
-
-  4. Start Claude Code in a new tmux window. Its `/mcp` lists `muster`, with
-     `route_reply` among its tools.
-
-1. **Turn plugins on**, as in the quickstart's
-   [step 1](https://github.com/ZacxDev/muster/blob/main/docs/plugins-quickstart.md#1-turn-plugins-on). In the `.env` beside muster's
-   `docker-compose.yml` (`~/muster` for the one-line install) add
-
-   ```sh
-   MUSTER_PLUGINS=1
-   MUSTER_SESSION_ROUTING=1   # Compose: lets the chief hand the message to your session
-   ```
-
-   then run `docker compose up -d --wait` there. muster's log says
-   `plugins: ENABLED (MUSTER_PLUGINS=1)` and `session routing: ON`.
-2. **Create the plugin.** Open `http://localhost:8105/plugins` (it has no menu
-   link), give it a name such as `example-echo` and a label such as `Echo`,
-   and press **Create plugin token**. Copy the `mpl_…` token: it is shown once.
-3. **Configure and start the plugin:**
-
-   ```sh
-   cp .env.example .env
-   # edit .env: MUSTER_URL=http://localhost:8105, MUSTER_PLUGIN_TOKEN=<the token>, ECHO_INTERVAL=1m
-   set -a; . ./.env; set +a
-   go run .
-   ```
-
-   It logs the plugin's name and capabilities, then
-   `message echo-1 stored as <id> (queued)`.
-4. **Watch the message reach a writer**, as in the quickstart's
-   [step 4](https://github.com/ZacxDev/muster/blob/main/docs/plugins-quickstart.md#4-watch-the-chief-handle-it). Each message reaches your chief
-   in a conversation named after the plugin's label, marked as untrusted data.
-   - **On Compose** the chief routes it to your mirrored session
-     (`route_to_session`). It is queued in that session's window and pasted
-     once Claude Code is idle; the session answers with its `route_reply`
-     tool, and the answer becomes the reply draft. If the chief leaves it, ask
-     it in its chat to route the echo message to your session. If it reports
-     the route refused with `host_not_interactive`, that host's
-     `muster-mirror` is still read-only: do the setup above.
-   - **On Kubernetes** the chief can draft the reply itself (`reply_draft`).
-
-   Without a chief the messages wait, queued, on `/plugins`.
-5. **Approve the reply** on the **Asks** page's **Drafts** tab
-   (`/attention?tab=drafts`): **Approve and send**.
-6. Within a few seconds the plugin prints
-
-   ```
-   SEND draft <id> (reply to echo-1):
-   <the reply you approved>
-   ```
-
-   and logs `draft <id>: muster recorded sent`. The draft's card moves to
-   **Archived** as sent.
-
-Stop it with Ctrl-C. Keep `STATE_DIR` between runs (below).
+> **Before going live** on a muster other people use: muster's design gates
+> the `meet.` subdomain on two core releases, the central origin check for
+> cookie-authenticated writes and `__Host-` cookie names (design: "Order and
+> gates"). Run it only against a muster that carries both.
 
 ## Configuration
 
@@ -143,135 +84,110 @@ Read from the environment only; `.env.example` lists them.
 
 | variable | required | meaning |
 |---|---|---|
-| `MUSTER_URL` | yes | muster's address. `https://`, or `http://` to `localhost`, `127.0.0.1` or `[::1]` only; the address alone: no user, path, query or fragment |
-| `MUSTER_PLUGIN_TOKEN` | yes | the `mpl_…` token from `/plugins`. Never logged |
-| `ECHO_INTERVAL` | no | how often the fake upstream produces a message; default `30s` |
-| `STATE_DIR` | no | where the sent-drafts journal and the upstream cursor live; default `./state` |
+| `MUSTER_URL` | yes | where the plugin calls muster. `https://`, or `http://` to `localhost`, `127.0.0.1` or `[::1]` only; the address alone |
+| `MUSTER_PLUGIN_TOKEN` | yes | the `mpl_…` token from `/plugins`, with **App tab**. Several, comma-separated, to serve several owners (each owner's own token); one is the common case. Never logged |
+| `MUSTER_ORIGIN` | yes | muster's origin as browsers see it, e.g. `https://muster.example.test`. The only page allowed to frame the Meetings app |
+| `MEETINGS_PUBLIC_URL` | yes | this plugin's own origin, e.g. `https://meet.muster.example.test`. Guest links are built on it. Refused if it equals `MUSTER_ORIGIN` |
+| `MEETINGS_LINK_KEY` | yes | 32 random bytes, base64 (`openssl rand -base64 32`), from the plugin's own Secret. Every meeting's link code is derived from it (below), which is what lets you copy an open meeting's link again. The plugin refuses to start when it is missing or not exactly 32 bytes. **Changing it changes every open meeting's link.** Never logged |
+| `MEETINGS_LISTEN` | no | the public listener; default `:8080` |
+| `MEETINGS_INTERNAL_LISTEN` | no | the internal listener (`GET /healthz`); default `:8081`. Do not expose it |
+| `STATE_DIR` | no | where `meetings.db` (SQLite) lives; default `./state`. Keep it across restarts |
 
-## What it does on each answer
+The plugin refuses to start when a token lacks `app`, belongs to a team (an
+app tab is a person's), or when muster refuses every token.
 
-| call | answer | the plugin |
-|---|---|---|
-| any | `401` | stops: the token was revoked, or its owner disabled |
-| any | `404` | stops: plugins are off on that server (or, on a result, logs: not a draft it claimed) |
-| message | `202` / `200` | moves the cursor on and writes it to `STATE_DIR/echo-cursor` (`200` is a repeat muster already stored) |
-| message | `400` | logs and drops it: sending it again cannot help |
-| message | `409` | muster stored nothing (the officer the plugin delivers to is not defined): waits 5 s, doubling up to 5 min, and sends the **same** message again; the cursor does not move |
-| message | `429` | waits `Retry-After`, then sends the **same** message again |
-| message | network error, `5xx` | waits 5 s and sends the same message again |
-| claim | `204` | claims again (each claim waits up to 25 s) |
-| claim | `200` | journals the draft, sends it once, reports the result (none when the send's outcome is unknown: below) |
-| result | network error, `5xx` | posts the same result again (a repeat is safe) |
-| result | `409` | logs it: the draft already has the other result |
+## The HTTP API (phase 2a)
 
-**At most once.** Before sending a draft it writes the draft id to
-`STATE_DIR/journal.jsonl` and fsyncs it. A draft already in the journal is
-never sent again: if it was sent, only its result is reported again; if a
-crash left it claimed but not known to be sent, nothing is sent or reported,
-and muster marks it unconfirmed after its 2-minute lease (it never offers it
-again). This is muster's rule in
-[plugins.md, "At most once"](https://github.com/ZacxDev/muster/blob/main/docs/plugins.md#at-most-once).
+Owner routes take `Authorization: Bearer mmo_…`. A missing, unknown or
+expired session is `401`; another owner's meeting is the same `404` as one
+that does not exist.
 
-**Sent, not sent, or not known.** A sender returns one of three outcomes, and
-each is reported differently:
+| route | does |
+|---|---|
+| `GET /enter` | redeem muster's code, make the owner session, render the app |
+| `GET /api/meetings?limit=&cursor=` | your meetings, newest first: `{"meetings": [...], "next": <cursor or null>}`; `limit` 1–100, default 50 |
+| `POST /api/meetings` | New meeting: `201 {"id", "join_url", "meeting"}`. It takes no options (no body, or `{}`); record and AI are on |
+| `GET /api/meetings/{id}` | `{"meeting", "link"}`: `link` is the guest link while the meeting is open and under 24 hours old, `null` otherwise. This is how the page lets you copy an open meeting's link again |
+| `GET /healthz` | internal listener only |
 
-| `Sender.Send` returns | the plugin reports | muster then |
-|---|---|---|
-| the upstream's id, no error | `"ok": true` with it as `external_ref` | marks the draft sent |
-| an error wrapping `plugin.ErrUnknown` | **nothing** | marks it unconfirmed when its lease lapses; never offers it again, and you decide |
-| any other error | `"ok": false` with the error as `detail` | hands the reply back to whoever wrote it to try again |
+**The link** is `https://meet.<muster host>/j/<code>`. The code is
+HMAC-SHA256 under `MEETINGS_LINK_KEY` of the meeting's id, cut to 128 bits
+(22 base64url characters). It is **never stored**: the plugin keeps only its
+SHA-256, which a guest's `/j/<code>` is looked up by, and derives the code
+again when you ask for it. So you can copy an open meeting's link again at
+any time, from its row in the list or after re-opening Meetings, and only
+you can: another owner's meeting is a `404`, and once a meeting has ended or
+is 24 hours old there is no link to give. The link dies when the meeting
+ends, and at the latest 24 hours after it was made.
 
-`"ok": false` means "known **not** sent". Return it only when the upstream
-said so (a refusal, an error before anything left). A timeout after the
-request went out, or a connection lost mid-send, is `ErrUnknown`: reporting
-`ok: false` then could get the same reply sent twice.
+**Rotating `MEETINGS_LINK_KEY` changes every open meeting's link.** The
+links already sent stop matching what the plugin derives, so guests holding
+them are turned away once 2b checks them; send the new links. Meetings that
+have ended are unaffected (they have no link).
 
-**Long sends.** muster leases a claimed draft for 2 minutes. A sender that
-can take longer (a post made through a browser, say) should renew the lease
-about once a minute while it runs, with
-[`POST /plugin/v1/drafts/{id}/renew`](https://github.com/ZacxDev/muster/blob/main/docs/plugins.md#post-pluginv1draftsidrenew-keep-a-long-sends-claim),
-up to 10 minutes after the claim. This template does not renew: its "send" is
-a print. Without a renewal a slow success is marked unconfirmed under it.
+The code never appears in a log line, an error, the meetings list, or the
+database.
 
-**The journal grows.** `journal.jsonl` gains up to three short lines per draft
-and is never compacted (a few megabytes after tens of thousands of drafts). Do
-not delete it: a draft id missing from it is one the plugin would send again.
-To shrink it, stop the plugin and keep only the last line for each
-`draft_id`.
+## What it stores
+
+One SQLite file (`STATE_DIR/meetings.db`, mode `0600`): the owners it serves
+(muster's id and login, and which plugin token serves them), owner sessions
+(hashed), meetings (state, the record and AI switches, times, the link
+code's hash) and an audit trail of what happened, which never holds a code,
+a token, transcript text or a guest's name. Every owner-facing query goes
+through one repository layer that filters by the session's owner.
 
 ## Token scope
 
-The token this template needs has the `messages` capability, the default on
-`/plugins`. It opens muster's `/plugin/v1/*` routes and nothing else, and it
-acts as you, the owner who minted it: it can post messages to your chief,
-collect the replies **you approved**, and report what happened to them. It
-cannot read your sessions, approve anything, or call any other muster route.
-Revoke it on `/plugins` at any time; the plugin then stops at its next call.
+The token needs `app` (the tab and the hand-off redeem). Phase 6's
+**Make task** will also use `tasks`; without it that button is not drawn. It
+never needs `messages`: it cannot post to your chief, file drafts, or write
+chief instructions. Revoke it on `/plugins` at any time: the tab disappears,
+an open page loses its frame within 30 s (muster's own poll), and within
+60 s the plugin ends your sessions and open meetings.
 
-## Telemetry
+## Telemetry and data leaving your network
 
-None. The plugin talks only to the muster at `MUSTER_URL`.
-
-## Make it your own plugin
-
-1. **Use this template** on GitHub (or clone it) into a repository of your own.
-2. Change the module path in `go.mod` and every import
-   (`github.com/ZacxDev/muster-plugin-template/…`) to yours, and rename the
-   binary (the repository directory, `.gitignore`'s `/muster-plugin-template`,
-   and the `muster-plugin-template:` prefix of `main.go`'s log lines).
-3. Replace `internal/echo`, and the two lines of `main.go`'s `run` that wire
-   it in: `echo.OpenUpstream(cfg.StateDir)` and
-   `&echo.Sender{Out: os.Stdout}`. Rename `ECHO_INTERVAL` too (in `main.go`
-   and `.env.example`) if your upstream is not polled on a timer.
-   - `Upstream` becomes a reader of your system (`plugin.Upstream`): `Next`
-     returns the next message, the same one until `Advance`, and `Advance`
-     moves your cursor on durably. Give every message a stable `external_id`
-     (muster's idempotency key). The runner calls `Advance` only after muster
-     answers `2xx` (or a `400`).
-   - `Sender` becomes the call that delivers a reply there (`plugin.Sender`).
-     Return the upstream's id for what you sent; it is reported as
-     `external_ref`. Wrap `plugin.ErrUnknown` when you cannot tell whether it
-     went (above).
-4. Set the message fields your system knows: `sender_verified` only if you
-   authenticated the sender, `no_reply` for a message nobody can answer,
-   `thread` for a thread id
-   ([the message fields](https://github.com/ZacxDev/muster/blob/main/docs/plugins.md#post-pluginv1messages-an-inbound-message)).
-5. Pick the capabilities you need. `messages` is enough for this round-trip;
-   `draft_checks` lets the plugin refuse a reply its system cannot carry before
-   you are asked to approve it
-   ([capabilities](https://github.com/ZacxDev/muster/blob/main/docs/plugins.md#capabilities)).
-6. State your token scope and your telemetry in your README, as this one does,
-   and add your plugin to muster's
-   [ecosystem page](https://github.com/ZacxDev/muster/blob/main/docs/ecosystem.md).
-   Replace this README's **Tested against** line with the muster release (or
-   commit) you ran your plugin against, and update it each time you test
-   again: the listing asks for it.
-7. Keep the secret scan. CI runs gitleaks over the whole history with
-   `.gitleaks.toml`, which adds a rule for a muster plugin token (`mpl_`
-   and 43 base64url characters, which gitleaks' own rules do not know) and
-   allows one exact test fixture (`mpl_s3cretT0ken`) and nothing else;
-   remove that entry if you remove the fixture.
-
-## Layout
-
-| path | what |
-|---|---|
-| `main.go` | reads the environment, starts the loops |
-| `internal/muster` | the client for muster's plugin routes |
-| `internal/plugin` | the two loops: messages in, approved drafts out |
-| `internal/echo` | the fake upstream (with its cursor) and the stdout "sender": replace these |
-| `internal/journal` | the sent-drafts journal |
-| `internal/mustertest` | a fake muster for tests (`httptest`) |
+None. In phase 2a the plugin talks only to the muster at `MUSTER_URL`. Later
+phases send transcript **text** (never audio) to an AI service for action
+items, on by default and off per meeting; this README will say so in the
+release that adds it.
 
 ## Tests
 
 ```sh
 go test ./...
+go run ./scripts/mutate   # the security-gate mutation sweep
 ```
 
-The tests run against `internal/mustertest`, a fake muster that answers the
-four routes this plugin calls the way muster does. CI runs gitleaks, `gofmt`,
-`go vet` and `go test -race` on every push.
+The tests run against `internal/mustertest`, a fake muster that answers
+`GET /plugin/v1/self` and `POST /plugin/v1/handoffs/redeem` the way muster's
+[plugins.md](https://github.com/ZacxDev/muster/blob/main/docs/plugins.md)
+says (single-use 60-second codes, bound to the plugin they were minted for),
+for several tokens at once.
+
+`scripts/mutate` applies one mutation per security gate (accept a viewer
+code, drop the owner filter, set a cookie, ignore `/self`'s `401`, a 64-bit
+link, log the query string, …), runs the one test named to catch it, and
+requires that test to fail **with its expected message**; a mutant that fails
+to build or trips another assertion is reported, not counted. Each sweep
+also runs a known-caught mutant and a no-op edit that must survive. CI runs
+gitleaks, `gofmt`, `go vet`, `go test -race` and the sweep on every push.
+
+**Tested against:** the fake muster only, built to muster's documented
+hand-off at muster commit `3a5917fe2`. Not yet run against a live muster.
+
+## Layout
+
+| path | what |
+|---|---|
+| `main.go` | reads the environment, starts the listeners and loops |
+| `internal/muster` | the client for muster's plugin routes (`/self`, the redeem) |
+| `internal/mustertest` | a fake muster for tests (`httptest`) |
+| `internal/owners` | the plugin's tokens, the boot check and the `/self` poll |
+| `internal/store` | SQLite: schema, sessions, the owner-scoped repository, random codes |
+| `internal/server` | the HTTP routes, headers and the owner page (`web/`) |
+| `scripts/mutate` | the security-gate mutation sweep |
 
 ## Licence
 

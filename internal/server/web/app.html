@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<title>Meetings</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+{{- if .Session}}
+<main id="app" data-session="{{.Session}}"{{if .Ref}} data-ref="{{.Ref}}"{{end}}>
+  <header class="bar">
+    <h1>Meetings</h1>
+    <button id="new-meeting" type="button" class="primary">New meeting</button>
+  </header>
+  <p id="status" class="status" role="status" aria-live="polite"></p>
+  <section id="link-panel" class="link-panel" hidden aria-labelledby="link-title">
+    <h2 id="link-title">Meeting link</h2>
+    <p>Send this link to the people you want to meet. They ask to join, and you let them in.</p>
+    <div class="link-row">
+      <input id="join-url" type="text" readonly aria-label="Meeting link">
+      <button id="copy-link" type="button" class="primary">Copy link</button>
+      <button id="share-link" type="button" hidden>Share</button>
+    </div>
+  </section>
+  <section aria-labelledby="list-title">
+    <h2 id="list-title">Meetings</h2>
+    <p id="empty" class="muted" hidden>No meetings yet. Press <strong>New meeting</strong> to start one.</p>
+    <ul id="meetings" class="meetings"></ul>
+    <button id="more" type="button" hidden>Show older meetings</button>
+  </section>
+  <noscript><p>Meetings needs JavaScript.</p></noscript>
+</main>
+<script src="/static/app.js"></script>
+{{- else}}
+<main class="notice">
+  <h1>Meetings</h1>
+  <p id="message">{{.Message}}</p>
+</main>
+{{- end}}
+</body>
+</html>

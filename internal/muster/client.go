@@ -20,16 +20,13 @@ import (
 // TokenPrefix starts every plugin token.
 const TokenPrefix = "mpl_"
 
-// MaxClaimWait is the longest wait muster takes on a claim (seconds).
-const MaxClaimWait = 25
-
 // Kind classifies a refused or failed call by its HTTP status.
 type Kind string
 
 const (
 	KindAuth        Kind = "auth"         // 401: not a live plugin token (revoked, unknown, owner disabled)
 	KindCapability  Kind = "capability"   // 403: the token lacks the capability the route needs
-	KindOff         Kind = "not_found"    // 404: plugins are off on this server, or no such draft
+	KindOff         Kind = "not_found"    // 404: plugins are off on this server, or (on a redeem) no such code
 	KindBadRequest  Kind = "bad_request"  // 400 (and other 4xx)
 	KindConflict    Kind = "conflict"     // 409
 	KindRateLimited Kind = "rate_limited" // 429: see RetryAfter
@@ -74,7 +71,9 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("muster: %d %s: %s", e.Status, e.Kind, e.Message)
 }
 
-// Retryable says the same call is worth sending again.
+// Retryable says the same call is worth sending again. Kept, with
+// RetryAfter, for 2b's knock notification: POST /plugin/v1/notify answers
+// 429 with Retry-After (plugins.md, "Limits").
 func (e *Error) Retryable() bool {
 	return e.Kind == KindNetwork || e.Kind == KindServer || e.Kind == KindRateLimited
 }
@@ -127,8 +126,7 @@ func Redact(raw string) string {
 type Client struct {
 	base  string
 	token string
-	// HTTP is used for every call but the claim; Claim makes its own timeout
-	// of wait + 10 s (docs/plugins.md, "At most once").
+	// HTTP is used for every call.
 	HTTP *http.Client
 }
 
@@ -151,92 +149,47 @@ type SelfInfo struct {
 	DeliverTo    *string  `json:"deliver_to"`
 }
 
-// Message is POST /plugin/v1/messages' body (the fields this template uses).
-type Message struct {
-	ExternalID     string     `json:"external_id"`
-	Sender         string     `json:"sender,omitempty"`
-	Subject        string     `json:"subject,omitempty"`
-	Body           string     `json:"body"`
-	ReceivedAt     *time.Time `json:"received_at,omitempty"`
-	NoReply        bool       `json:"no_reply"`
-	SenderVerified bool       `json:"sender_verified"`
+// AppTarget is an app tab's hand-off target: {"app": {}}, or {"app": {"ref":
+// "<ref>"}} when muster's page was opened with ?ref=. muster passes Ref
+// through without reading it; it is a hint, never an authority.
+type AppTarget struct {
+	Ref string `json:"ref,omitempty"`
 }
 
-// MessageAck is the answer to a message: Created is true on 202 (stored now),
-// false on 200 (a repeat of this external_id: nothing new).
-type MessageAck struct {
-	ID      int64  `json:"id"`
-	Status  string `json:"status"`
-	Created bool   `json:"-"`
+// HandoffTarget is what a hand-off code was minted for. muster sets exactly
+// one of the two; Mirror is kept raw because an app plugin never accepts it.
+type HandoffTarget struct {
+	App    *AppTarget      `json:"app,omitempty"`
+	Mirror json.RawMessage `json:"mirror,omitempty"`
 }
 
-// Claim is one approved draft, leased to this plugin for 2 minutes.
-type Claim struct {
-	DraftID           int64     `json:"draft_id"`
-	Kind              string    `json:"kind"`
-	MessageExternalID string    `json:"message_external_id"`
-	Body              string    `json:"body"`
-	ApprovedAt        time.Time `json:"approved_at"`
+// Redeemed is POST /plugin/v1/handoffs/redeem's answer.
+type Redeemed struct {
+	OwnerID   int64         `json:"owner_id"`
+	Target    HandoffTarget `json:"target"`
+	Purpose   string        `json:"purpose"`
+	SteppedUp bool          `json:"stepped_up"`
+	MintedAt  time.Time     `json:"minted_at"`
 }
 
-// Result is POST /plugin/v1/drafts/{id}/result's body.
-type Result struct {
-	OK          bool   `json:"ok"`
-	ExternalRef string `json:"external_ref,omitempty"`
-	Detail      string `json:"detail,omitempty"`
-}
-
-// ResultAck is the recorded result: status "sent" or "failed".
-type ResultAck struct {
-	DraftID int64  `json:"draft_id"`
-	Status  string `json:"status"`
+// Redeem is POST /plugin/v1/handoffs/redeem: it spends a hand-off code once.
+// muster answers one 404 (KindOff) for a code that is unknown, spent,
+// expired, or minted for another plugin. The caller must still check the
+// purpose and target: muster answers a viewer code just as readily.
+func (c *Client) Redeem(ctx context.Context, code string) (Redeemed, error) {
+	var out Redeemed
+	_, err := c.do(ctx, http.MethodPost, "/plugin/v1/handoffs/redeem", map[string]string{"code": code}, &out)
+	return out, err
 }
 
 // Self is GET /plugin/v1/self.
 func (c *Client) Self(ctx context.Context) (SelfInfo, error) {
 	var out SelfInfo
-	_, err := c.do(ctx, c.HTTP, http.MethodGet, "/plugin/v1/self", nil, &out)
+	_, err := c.do(ctx, http.MethodGet, "/plugin/v1/self", nil, &out)
 	return out, err
 }
 
-// PostMessage is POST /plugin/v1/messages. Send the same message again when
-// no answer arrived: a repeat is answered 200 and stored once.
-func (c *Client) PostMessage(ctx context.Context, m Message) (MessageAck, error) {
-	var out MessageAck
-	status, err := c.do(ctx, c.HTTP, http.MethodPost, "/plugin/v1/messages", m, &out)
-	out.Created = status == http.StatusAccepted
-	return out, err
-}
-
-// Claim is POST /plugin/v1/drafts/claim: it waits up to wait seconds (0–25)
-// for an approved draft. nil, nil means none arrived (204).
-func (c *Client) Claim(ctx context.Context, wait int) (*Claim, error) {
-	wait = min(max(wait, 0), MaxClaimWait)
-	hc := *c.HTTP
-	hc.Timeout = time.Duration(wait+10) * time.Second
-	var out Claim
-	status, err := c.do(ctx, &hc, http.MethodPost, "/plugin/v1/drafts/claim", map[string]int{"wait_seconds": wait}, &out)
-	if err != nil {
-		return nil, err
-	}
-	if status == http.StatusNoContent {
-		return nil, nil
-	}
-	if out.DraftID <= 0 {
-		return nil, &Error{Kind: KindProtocol, Status: status, Message: "claim answered without a draft_id"}
-	}
-	return &out, nil
-}
-
-// Result is POST /plugin/v1/drafts/{id}/result. A repeat of the same result is
-// safe (200, nothing changes).
-func (c *Client) Result(ctx context.Context, draftID int64, r Result) (ResultAck, error) {
-	var out ResultAck
-	_, err := c.do(ctx, c.HTTP, http.MethodPost, "/plugin/v1/drafts/"+strconv.FormatInt(draftID, 10)+"/result", r, &out)
-	return out, err
-}
-
-func (c *Client) do(ctx context.Context, hc *http.Client, method, path string, in, out any) (int, error) {
+func (c *Client) do(ctx context.Context, method, path string, in, out any) (int, error) {
 	var body io.Reader
 	if in != nil {
 		b, err := json.Marshal(in)
@@ -253,7 +206,7 @@ func (c *Client) do(ctx context.Context, hc *http.Client, method, path string, i
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := hc.Do(req)
+	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		// net/http's error names the whole request URL; keep its scheme and
 		// host only, so a base that slipped past CheckBaseURL with a token in

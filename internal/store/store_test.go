@@ -3,10 +3,12 @@ package store_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,7 +22,7 @@ var t0 = time.Date(2031, 3, 14, 15, 9, 26, 535_000_000, time.UTC)
 func open(t *testing.T) (*store.Store, string) {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "sub", "meetings.db")
-	s, err := store.Open(p)
+	s, err := store.Open(p, keyA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,6 +31,12 @@ func open(t *testing.T) (*store.Store, string) {
 }
 
 var ctx = context.Background()
+
+// Two link keys, neither all zeros nor any pattern the code names.
+var (
+	keyA = func() []byte { h := sha256.Sum256([]byte("fixture link key A")); return h[:] }()
+	keyB = func() []byte { h := sha256.Sum256([]byte("fixture link key B")); return h[:] }()
+)
 
 // ---- the link: entropy and format ----
 
@@ -98,6 +106,9 @@ func TestJoinCodeIsStoredOnlyHashed(t *testing.T) {
 	}
 	if !bytes.Contains(all, []byte("budget sync")) {
 		t.Fatal("positive control: the title is not in the database files")
+	}
+	if sealed := s.SealedForTest(c.Meeting.ID); len(sealed) == 0 || !bytes.Contains(all, sealed) {
+		t.Fatal("positive control: the sealed link is not in the database files, so the scan never saw it")
 	}
 }
 
@@ -303,7 +314,7 @@ func TestReopenKeepsDataAndRefusesANewerSchema(t *testing.T) {
 	s, p := open(t)
 	c, _ := s.ForOwner(7).CreateMeeting(ctx, store.NewMeeting{Title: "kept"}, t0)
 	s.Close()
-	s2, err := store.Open(p)
+	s2, err := store.Open(p, keyA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,10 +325,142 @@ func TestReopenKeepsDataAndRefusesANewerSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	s2.Close()
-	if _, err := store.Open(p); err == nil {
+	if _, err := store.Open(p, keyA); err == nil {
 		t.Fatal("a database from a newer build was opened")
 	}
 	if fi, err := os.Stat(p); err != nil || fi.Mode().Perm() != 0o600 {
 		t.Fatalf("database mode = %v, %v; want 0600", fi.Mode().Perm(), err)
+	}
+}
+
+// ---- the link, sealed so its owner can copy it again ----
+
+func TestOnlyTheOwnerReadsTheLink(t *testing.T) {
+	s, _ := open(t)
+	c, _ := s.ForOwner(7).CreateMeeting(ctx, store.NewMeeting{}, t0)
+	if _, err := s.ForOwner(41).Link(ctx, c.Meeting.ID, t0); err != store.ErrNotFound {
+		t.Fatalf("another owner reading the link = %v, want ErrNotFound", err)
+	}
+	if got, err := s.ForOwner(7).Link(ctx, c.Meeting.ID, t0); err != nil || got != c.JoinCode {
+		t.Fatalf("positive control: the owner's link = %q, %v; want the code made with it", got, err)
+	}
+}
+
+func TestAnEndedMeetingHasNoLinkAndItsSealedCodeIsNull(t *testing.T) {
+	s, _ := open(t)
+	c, _ := s.ForOwner(7).CreateMeeting(ctx, store.NewMeeting{}, t0)
+	if _, err := s.RevokePlugin(ctx, 12, 7, true, t0.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if sealed := s.SealedForTest(c.Meeting.ID); sealed != nil {
+		t.Fatalf("ending the meeting left its sealed code (%d bytes)", len(sealed))
+	}
+	if _, err := s.ForOwner(7).Link(ctx, c.Meeting.ID, t0.Add(time.Minute)); err != store.ErrNoLink {
+		t.Fatalf("an ended meeting's link = %v, want ErrNoLink", err)
+	}
+}
+
+// An ended meeting whose sealed code is somehow still there (an end path
+// that forgot it): the lookup refuses it AND deletes it.
+func TestALookupOfAnEndedMeetingDeletesALeftoverSealedCode(t *testing.T) {
+	s, _ := open(t)
+	c, _ := s.ForOwner(7).CreateMeeting(ctx, store.NewMeeting{}, t0)
+	s.EndKeepingLinkForTest(c.Meeting.ID)
+	if s.SealedForTest(c.Meeting.ID) == nil {
+		t.Fatal("positive control: the fixture lost its sealed code before the lookup")
+	}
+	if _, err := s.ForOwner(7).Link(ctx, c.Meeting.ID, t0); err != store.ErrNoLink {
+		t.Fatalf("the link of an ended meeting = %v, want ErrNoLink", err)
+	}
+	if s.SealedForTest(c.Meeting.ID) != nil {
+		t.Fatal("the lookup refused the link but left the sealed code in the row")
+	}
+}
+
+func TestALinkPast24HoursIsGoneAndItsSealedCodeNulledByTheLookup(t *testing.T) {
+	s, _ := open(t)
+	c, _ := s.ForOwner(7).CreateMeeting(ctx, store.NewMeeting{}, t0)
+	r := s.ForOwner(7)
+	if got, err := r.Link(ctx, c.Meeting.ID, t0.Add(24*time.Hour-time.Millisecond)); err != nil || got != c.JoinCode {
+		t.Fatalf("one ms before 24 h = %q, %v; want the link", got, err)
+	}
+	if _, err := r.Link(ctx, c.Meeting.ID, t0.Add(24*time.Hour)); err != store.ErrNoLink {
+		t.Fatalf("at 24 h = %v, want ErrNoLink", err)
+	}
+	if s.SealedForTest(c.Meeting.ID) != nil {
+		t.Fatal("the lookup at 24 h left the sealed code in the row")
+	}
+}
+
+func TestTheSweepNullsTheSealedCodeAt24Hours(t *testing.T) {
+	s, _ := open(t)
+	c, _ := s.ForOwner(7).CreateMeeting(ctx, store.NewMeeting{}, t0)
+	if _, err := s.Sweep(ctx, t0.Add(24*time.Hour-time.Millisecond)); err != nil || s.SealedForTest(c.Meeting.ID) == nil {
+		t.Fatalf("a sweep one ms short of 24 h removed the sealed code (%v)", err)
+	}
+	if _, err := s.Sweep(ctx, t0.Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if s.SealedForTest(c.Meeting.ID) != nil {
+		t.Fatal("the sweep at 24 h left the sealed code in the row")
+	}
+}
+
+// The meeting id is the associated data: a sealed code moved onto another
+// meeting's row does not open there.
+func TestASealedCodeMovedOntoAnotherMeetingDoesNotOpen(t *testing.T) {
+	s, _ := open(t)
+	r := s.ForOwner(7)
+	a, _ := r.CreateMeeting(ctx, store.NewMeeting{Title: "a"}, t0)
+	b, _ := r.CreateMeeting(ctx, store.NewMeeting{Title: "b"}, t0)
+	s.SetSealedForTest(b.Meeting.ID, s.SealedForTest(a.Meeting.ID))
+	if got, err := r.Link(ctx, b.Meeting.ID, t0); err != store.ErrSealed {
+		t.Fatalf("a's sealed code on b's row = %q, %v; want ErrSealed", got, err)
+	}
+	if got, err := r.Link(ctx, a.Meeting.ID, t0); err != nil || got != a.JoinCode {
+		t.Fatalf("positive control: a's own = %q, %v", got, err)
+	}
+}
+
+func TestAnotherKeyDoesNotOpenTheLink(t *testing.T) {
+	s, p := open(t)
+	c, _ := s.ForOwner(7).CreateMeeting(ctx, store.NewMeeting{}, t0)
+	s.Close()
+	other, err := store.Open(p, keyB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := other.ForOwner(7).Link(ctx, c.Meeting.ID, t0); err != store.ErrSealed {
+		t.Fatalf("under another key = %q, %v; want ErrSealed", got, err)
+	}
+	other.Close()
+	same, err := store.Open(p, keyA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer same.Close()
+	if got, err := same.ForOwner(7).Link(ctx, c.Meeting.ID, t0); err != nil || got != c.JoinCode {
+		t.Fatalf("positive control: under the same key = %q, %v", got, err)
+	}
+}
+
+func TestOpenAndParseLinkKeyRefuseAnythingButThirtyTwoBytes(t *testing.T) {
+	dir := t.TempDir()
+	for _, n := range []int{0, 16, 31, 33} {
+		if _, err := store.Open(filepath.Join(dir, "x.db"), make([]byte, n)); err == nil {
+			t.Errorf("Open with a %d-byte key succeeded", n)
+		}
+		if _, err := store.ParseLinkKey(base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, n))); err == nil {
+			t.Errorf("ParseLinkKey accepted %d bytes", n)
+		}
+	}
+	for _, s := range []string{base64.StdEncoding.EncodeToString(keyA), base64.RawURLEncoding.EncodeToString(keyA), " " + base64.StdEncoding.EncodeToString(keyA) + "\n"} {
+		k, err := store.ParseLinkKey(s)
+		if err != nil || !bytes.Equal(k, keyA) {
+			t.Errorf("ParseLinkKey(%q) = %v", s, err)
+		}
+	}
+	if _, err := store.ParseLinkKey("not base64 at all!"); err == nil || strings.Contains(err.Error(), "not base64") {
+		t.Errorf("a malformed key: %v", err)
 	}
 }

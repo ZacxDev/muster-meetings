@@ -97,16 +97,26 @@ var migrations = []string{
 		event      TEXT    NOT NULL,
 		detail     TEXT    NOT NULL DEFAULT ''  -- never transcript text, item text, guest names or codes
 	) STRICT;`,
+	// 2: the link, sealed so its owner can copy it again while the meeting is
+	// open (AES-256-GCM under MEETINGS_LINK_KEY, the meeting id as associated
+	// data). NULL once the meeting ends or its link lifetime passes.
+	`ALTER TABLE meetings ADD COLUMN join_code_sealed BLOB;`,
 }
 
 // Store is the database.
 type Store struct {
-	db *sql.DB
+	db   *sql.DB
+	seal *sealer
 }
 
 // Open opens (or creates) the database at path and brings its schema up to
-// date. The directory is created 0700 and the file is 0600.
-func Open(path string) (*Store, error) {
+// date. The directory is created 0700 and the file is 0600. linkKey is
+// MEETINGS_LINK_KEY (ParseLinkKey): 32 bytes, or Open refuses.
+func Open(path string, linkKey []byte) (*Store, error) {
+	sl, err := newSealer(linkKey)
+	if err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
@@ -127,7 +137,7 @@ func Open(path string) (*Store, error) {
 	// One writer (design: one replica, one SQLite file). A single connection
 	// serialises every statement, so no request ever sees SQLITE_BUSY.
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db}
+	s := &Store{db: db, seal: sl}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
@@ -277,7 +287,7 @@ func (s *Store) RevokePlugin(ctx context.Context, pluginID, ownerID int64, endMe
 	}
 	out.Sessions, _ = r.RowsAffected()
 	if endMeetings {
-		r, err = tx.ExecContext(ctx, `UPDATE meetings SET state = 'ended', ended_at = ? WHERE owner_id = ? AND state = 'open'`, ms(now), ownerID)
+		r, err = tx.ExecContext(ctx, `UPDATE meetings SET state = 'ended', ended_at = ?, join_code_sealed = NULL WHERE owner_id = ? AND state = 'open'`, ms(now), ownerID)
 		if err != nil {
 			return out, err
 		}
@@ -305,7 +315,7 @@ func (s *Store) ReconcileLive(ctx context.Context, livePlugins, liveOwners []int
 		return out, err
 	}
 	out.Sessions, _ = r.RowsAffected()
-	r, err = tx.ExecContext(ctx, `UPDATE meetings SET state = 'ended', ended_at = ? WHERE state = 'open' AND owner_id NOT IN (SELECT value FROM json_each(?))`,
+	r, err = tx.ExecContext(ctx, `UPDATE meetings SET state = 'ended', ended_at = ?, join_code_sealed = NULL WHERE state = 'open' AND owner_id NOT IN (SELECT value FROM json_each(?))`,
 		ms(now), jsonInts(liveOwners))
 	if err != nil {
 		return out, err
@@ -327,8 +337,9 @@ func jsonInts(v []int64) string {
 	return "[" + strings.Join(parts, ",") + "]"
 }
 
-// Sweep ends every meeting open LinkLifetime past its creation, and deletes
-// expired sessions. It returns the number of meetings it ended.
+// Sweep ends every meeting open LinkLifetime past its creation, nulls the
+// sealed link of every meeting that is not open or is past its lifetime, and
+// deletes expired sessions. It returns the number of meetings it ended.
 func (s *Store) Sweep(ctx context.Context, now time.Time) (int64, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -364,6 +375,12 @@ func (s *Store) Sweep(ctx context.Context, now time.Time) (int64, error) {
 		if err := audit(ctx, tx, now, e.owner, e.id, "meeting.ended", "the 24 h cap"); err != nil {
 			return 0, err
 		}
+	}
+	// No sealed link outlives its meeting or its lifetime, whichever way the
+	// meeting ended.
+	if _, err := tx.ExecContext(ctx, `UPDATE meetings SET join_code_sealed = NULL WHERE join_code_sealed IS NOT NULL AND (state <> 'open' OR created_at <= ?)`,
+		ms(now.Add(-LinkLifetime))); err != nil {
+		return 0, err
 	}
 	return int64(len(all)), tx.Commit()
 }

@@ -11,6 +11,7 @@
 //	MUSTER_PLUGIN_TOKEN       the mpl_… token(s) minted on muster's /plugins with App tab checked, comma-separated
 //	MUSTER_ORIGIN             muster's origin as browsers see it: the only page that may frame the app
 //	MEETINGS_PUBLIC_URL       this plugin's own origin, e.g. https://meet.example.test
+//	MEETINGS_LINK_KEY         32 random bytes, base64: seals each meeting's link so its owner can copy it again
 //	MEETINGS_LISTEN           the public listener (default :8080)
 //	MEETINGS_INTERNAL_LISTEN  the internal listener, /healthz (default :8081)
 //	STATE_DIR                 where the SQLite database lives (default ./state)
@@ -51,6 +52,7 @@ type Config struct {
 	Tokens         []string
 	MusterOrigin   string
 	PublicURL      string
+	LinkKey        []byte
 	Listen         string
 	InternalListen string
 	StateDir       string
@@ -88,6 +90,9 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	// plugin may not be served from muster's exact origin").
 	if c.PublicURL == c.MusterOrigin {
 		return Config{}, errors.New("MEETINGS_PUBLIC_URL must be its own origin (e.g. https://meet.<muster host>), never MUSTER_ORIGIN")
+	}
+	if c.LinkKey, err = store.ParseLinkKey(getenv("MEETINGS_LINK_KEY")); err != nil {
+		return Config{}, err
 	}
 	if v := getenv("MEETINGS_LISTEN"); v != "" {
 		c.Listen = v
@@ -131,7 +136,7 @@ func run(logger *log.Logger) error {
 			return err
 		}
 	}
-	st, err := store.Open(filepath.Join(cfg.StateDir, "meetings.db"))
+	st, err := store.Open(filepath.Join(cfg.StateDir, "meetings.db"), cfg.LinkKey)
 	if err != nil {
 		return err
 	}

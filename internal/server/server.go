@@ -4,7 +4,7 @@
 //	GET  /enter                 redeem muster's hand-off code, mint an owner session, render the app
 //	GET  /api/meetings          the owner's meetings, newest first, paged
 //	POST /api/meetings          New meeting: answers {"id", "join_url"}
-//	GET  /api/meetings/{id}     one meeting and its participants
+//	GET  /api/meetings/{id}     one meeting, its participants, and its link while open
 //
 // Owner routes take `Authorization: Bearer mmo_…` and nothing else: no
 // cookie is ever set or read (muster's frame is a third-party context, where
@@ -428,7 +428,24 @@ func (s *Server) handleGetMeeting(w http.ResponseWriter, r *http.Request, repo *
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "the meeting could not be read"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"meeting": m, "participants": ps})
+	// link: the guest link again, while the meeting is open; null once it
+	// has ended or its lifetime has passed (Link deletes the sealed code then).
+	var link *string
+	code, err := repo.Link(r.Context(), m.ID, s.cfg.Now())
+	switch {
+	case err == nil:
+		u := s.JoinURL(code)
+		link = &u
+	case errors.Is(err, store.ErrNoLink):
+	case errors.Is(err, store.ErrSealed):
+		if s.cfg.Log != nil {
+			s.cfg.Log.Printf("meeting %s: its sealed link does not open (was MEETINGS_LINK_KEY changed?)", m.ID)
+		}
+	default:
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "the meeting could not be read"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"meeting": m, "participants": ps, "link": link})
 }
 
 // Internal is the internal port's handler: GET /healthz.

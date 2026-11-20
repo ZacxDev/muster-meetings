@@ -140,9 +140,9 @@ func (r *OwnerRepo) CreateMeeting(ctx context.Context, in NewMeeting, now time.T
 		return Created{}, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO meetings (id, owner_id, title, room, join_code_sha256, state, record, ai, created_at)
-		VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?)`,
-		id, r.ownerID, in.Title, "meeting-"+id, Hash(code), boolInt(record), boolInt(set.AIDefault), ms(now)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO meetings (id, owner_id, title, room, join_code_sha256, join_code_sealed, state, record, ai, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`,
+		id, r.ownerID, in.Title, "meeting-"+id, Hash(code), r.s.seal.seal(id, code), boolInt(record), boolInt(set.AIDefault), ms(now)); err != nil {
 		return Created{}, err
 	}
 	if err := audit(ctx, tx, now, r.ownerID, id, "meeting.created", ""); err != nil {
@@ -248,4 +248,43 @@ func (r *OwnerRepo) Meeting(ctx context.Context, id string) (Meeting, []Particip
 		ps = append(ps, p)
 	}
 	return m, ps, rows.Err()
+}
+
+// ErrNoLink is a meeting of the owner's whose link is gone: it has ended, or
+// its LinkLifetime has passed.
+var ErrNoLink = errors.New("the meeting's link is gone")
+
+// Link returns the join code of one of the owner's open meetings, so the
+// owner can copy the link again. Another owner's meeting, or one that does
+// not exist, is ErrNotFound. A meeting that has ended or is past its link
+// lifetime is ErrNoLink, and its sealed code is deleted here and now, not
+// only refused. A code that does not open (another key, a value moved from
+// another row) is ErrSealed and is left as it is.
+func (r *OwnerRepo) Link(ctx context.Context, id string, now time.Time) (string, error) {
+	if !ValidMeetingID(id) {
+		return "", ErrNotFound
+	}
+	var state string
+	var created int64
+	var sealed []byte
+	err := r.s.db.QueryRowContext(ctx, `SELECT state, created_at, join_code_sealed FROM meetings WHERE id = ? AND owner_id = ?`,
+		id, r.ownerID).Scan(&state, &created, &sealed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	if state != "open" || !now.Before(time.UnixMilli(created).Add(LinkLifetime)) {
+		if sealed != nil {
+			if _, err := r.s.db.ExecContext(ctx, `UPDATE meetings SET join_code_sealed = NULL WHERE id = ? AND owner_id = ?`, id, r.ownerID); err != nil {
+				return "", err
+			}
+		}
+		return "", ErrNoLink
+	}
+	if sealed == nil {
+		return "", ErrNoLink
+	}
+	return r.s.seal.open(id, sealed)
 }

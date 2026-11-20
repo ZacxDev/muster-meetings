@@ -35,6 +35,8 @@ var (
 	pA = mustertest.Plugin{Token: "mpl_tokenA_7f3c", PluginID: 12, PluginName: "meet-a", OwnerID: 7, OwnerLogin: "a@example.test", OwnerKind: "person", Capabilities: []string{"app", "tasks"}}
 	pB = mustertest.Plugin{Token: "mpl_tokenB_91e0", PluginID: 19, PluginName: "meet-b", OwnerID: 41, OwnerLogin: "b@example.test", OwnerKind: "person", Capabilities: []string{"app"}}
 	t0 = time.Date(2031, 3, 14, 15, 9, 26, 0, time.UTC)
+	// testLinkKey: 32 bytes, no pattern any code names.
+	testLinkKey = []byte("fixture link key 0f9e1d2c3b4a596")
 )
 
 type clock struct {
@@ -81,7 +83,7 @@ func newEnv(t *testing.T) *env {
 		}
 		cs = append(cs, c)
 	}
-	st, err := store.Open(filepath.Join(t.TempDir(), "meetings.db"))
+	st, err := store.Open(filepath.Join(t.TempDir(), "meetings.db"), testLinkKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -491,6 +493,70 @@ func TestAnotherOwnersMeetingsAreNeverVisible(t *testing.T) {
 	}
 }
 
+// ---- the link, again, for its owner only, while open ----
+
+func (e *env) meetingLink(sess, id string) (int, *string, string) {
+	e.t.Helper()
+	resp, raw := e.do("GET", "/api/meetings/"+id, sess, nil)
+	var one struct {
+		Link *string `json:"link"`
+	}
+	json.Unmarshal(raw, &one)
+	return resp.StatusCode, one.Link, string(raw)
+}
+
+func TestTheLinkIsTheOwnersOnlyAndOnlyWhileOpen(t *testing.T) {
+	e := newEnv(t)
+	sa, sb := e.enter(pA), e.enter(pB)
+	_, raw := e.do("POST", "/api/meetings", sa, map[string]any{})
+	var c struct {
+		ID      string `json:"id"`
+		JoinURL string `json:"join_url"`
+	}
+	json.Unmarshal(raw, &c)
+	code := joinURL.FindStringSubmatch(c.JoinURL)[1]
+	// Another owner: the same 404 as any unknown meeting, no code anywhere.
+	if st, link, body := e.meetingLink(sb, c.ID); st != 404 || link != nil || strings.Contains(body, code) {
+		t.Fatalf("B reading A's meeting = %d %s", st, body)
+	}
+	if _, raw := e.do("GET", "/api/meetings", sb, nil); strings.Contains(string(raw), code) {
+		t.Fatal("B's list names A's code")
+	}
+	// The owner, while open: the link.
+	if st, link, _ := e.meetingLink(sa, c.ID); st != 200 || link == nil || *link != c.JoinURL {
+		t.Fatalf("A's own open meeting: %d, link %v", st, link)
+	}
+	// At 24 h, before any sweep: no link (the 8 h session is gone, so the
+	// owner enters again).
+	e.clock.Add(24 * time.Hour)
+	sa = e.enter(pA)
+	if st, link, body := e.meetingLink(sa, c.ID); st != 200 || link != nil || strings.Contains(body, code) {
+		t.Fatalf("at 24 h = %d %s; want 200 with link null", st, body)
+	}
+}
+
+func TestAnEndedMeetingAnswersNoLink(t *testing.T) {
+	e := newEnv(t)
+	sb := e.enter(pB)
+	_, raw := e.do("POST", "/api/meetings", sb, map[string]any{})
+	var c struct {
+		ID      string `json:"id"`
+		JoinURL string `json:"join_url"`
+	}
+	json.Unmarshal(raw, &c)
+	// The 24 h sweep ends it (2a's end path the owner can still look at: a
+	// revocation ends the owner's sessions too).
+	e.clock.Add(24 * time.Hour)
+	if _, err := e.store.Sweep(context.Background(), e.clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	sb = e.enter(pB)
+	st, link, body := e.meetingLink(sb, c.ID)
+	if st != 200 || link != nil || !strings.Contains(body, `"state":"ended"`) || strings.Contains(body, joinURL.FindStringSubmatch(c.JoinURL)[1]) {
+		t.Fatalf("an ended meeting = %d %s; want 200, ended, link null", st, body)
+	}
+}
+
 // ---- New meeting and its link ----
 
 var joinURL = regexp.MustCompile(`^https://meet\.example\.test/j/([A-Za-z0-9_-]{22})$`)
@@ -521,11 +587,17 @@ func TestNewMeetingAnswersItsIDAndALinkOnThePluginsOrigin(t *testing.T) {
 		!c.Meeting.CreatedAt.Equal(t0) || !c.Meeting.LinkExpiresAt.Equal(t0.Add(24*time.Hour)) {
 		t.Fatalf("created = %s", raw)
 	}
-	// The code is in no later answer: not the list, not the meeting.
-	for _, p := range []string{"/api/meetings", "/api/meetings/" + c.ID} {
-		if _, raw := e.do("GET", p, sess, nil); strings.Contains(string(raw), m[1]) {
-			t.Fatalf("GET %s names the join code", p)
-		}
+	// The list never carries the code; the meeting itself gives the owner
+	// the same link back while it is open.
+	if _, raw := e.do("GET", "/api/meetings", sess, nil); strings.Contains(string(raw), m[1]) {
+		t.Fatalf("the list names the join code: %s", raw)
+	}
+	var one struct {
+		Link *string `json:"link"`
+	}
+	_, raw = e.do("GET", "/api/meetings/"+c.ID, sess, nil)
+	if json.Unmarshal(raw, &one); one.Link == nil || *one.Link != c.JoinURL {
+		t.Fatalf("GET one meeting's link = %s, want %q", raw, c.JoinURL)
 	}
 	// Two meetings, two links.
 	_, raw = e.do("POST", "/api/meetings", sess, map[string]any{"record": false})
@@ -660,6 +732,10 @@ func TestTheLogCarriesNoCodeTokenOrQuery(t *testing.T) {
 	}
 	json.Unmarshal(raw, &c)
 	join := joinURL.FindStringSubmatch(c.JoinURL)[1]
+	_, raw = e.do("GET", "/api/meetings", sess, nil)
+	var l struct{ Meetings []struct{ ID string } }
+	json.Unmarshal(raw, &l)
+	e.do("GET", "/api/meetings/"+l.Meetings[0].ID, sess, nil)
 	e.do("GET", "/j/"+join, "", nil)
 	e.do("GET", "/j/"+join+"/wait", "", nil)
 	// A refused enter logs its reason: still no code.

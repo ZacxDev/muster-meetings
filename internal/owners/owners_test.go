@@ -20,6 +20,8 @@ import (
 var (
 	ctx = context.Background()
 	t0  = time.Date(2031, 3, 14, 15, 9, 26, 0, time.UTC)
+	// testLinkKey: 32 bytes, no pattern any code names.
+	testLinkKey = []byte("fixture link key 7a6b5c4d3e2f109")
 	// Fixture ids that equal no constant the code or the fake names (the
 	// fake's Default is plugin 3, owner 1).
 	pA = mustertest.Plugin{Token: "mpl_tokenA_7f3c", PluginID: 12, PluginName: "meet-a", OwnerID: 7, OwnerLogin: "a@example.test", OwnerKind: "person", Capabilities: []string{"app", "tasks"}}
@@ -39,7 +41,7 @@ func setup(t *testing.T, ps ...mustertest.Plugin) (*mustertest.Fake, *store.Stor
 		}
 		cs = append(cs, c)
 	}
-	st, err := store.Open(filepath.Join(t.TempDir(), "m.db"))
+	st, err := store.Open(filepath.Join(t.TempDir(), "m.db"), testLinkKey)
 	if err != nil {
 		t.Fatal(err)
 	}

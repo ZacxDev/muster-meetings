@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 )
@@ -20,18 +21,22 @@ func TestTheStartupLineNamesTheHostOnly(t *testing.T) {
 	}
 }
 
+// fixtureKey is 32 bytes with no pattern the code names.
+var fixtureKey = []byte("main fixture key 5e4d3c2b1a09f8e")
+
 func env(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
 
 func base() map[string]string {
 	return map[string]string{"MUSTER_URL": "http://localhost:8105/", "MUSTER_PLUGIN_TOKEN": "mpl_x",
-		"MUSTER_ORIGIN": "https://example.test", "MEETINGS_PUBLIC_URL": "https://Meet.Example.Test/"}
+		"MUSTER_ORIGIN": "https://example.test", "MEETINGS_PUBLIC_URL": "https://Meet.Example.Test/",
+		"MEETINGS_LINK_KEY": base64.StdEncoding.EncodeToString(fixtureKey)}
 }
 
 func TestLoadConfig(t *testing.T) {
 	c, err := LoadConfig(env(base()))
 	if err != nil || c.URL != "http://localhost:8105" || len(c.Tokens) != 1 || c.Tokens[0] != "mpl_x" ||
 		c.MusterOrigin != "https://example.test" || c.PublicURL != "https://meet.example.test" ||
-		c.Listen != ":8080" || c.InternalListen != ":8081" || c.StateDir != "./state" {
+		c.Listen != ":8080" || c.InternalListen != ":8081" || c.StateDir != "./state" || string(c.LinkKey) != string(fixtureKey) {
 		t.Fatalf("defaults = %+v, %v", c, err)
 	}
 	m := base()
@@ -55,6 +60,15 @@ func TestLoadConfig(t *testing.T) {
 		// The plugin served from muster's own origin would be muster, framed
 		// with allow-same-origin.
 		"public URL is muster's origin": func(m map[string]string) { m["MEETINGS_PUBLIC_URL"] = "https://EXAMPLE.test" },
+		// The link key: missing, short (16 bytes), long, not base64.
+		"missing link key": func(m map[string]string) { delete(m, "MEETINGS_LINK_KEY") },
+		"short link key": func(m map[string]string) {
+			m["MEETINGS_LINK_KEY"] = base64.StdEncoding.EncodeToString([]byte("s3cretT0ken 16 b"))
+		},
+		"long link key": func(m map[string]string) {
+			m["MEETINGS_LINK_KEY"] = base64.StdEncoding.EncodeToString([]byte("s3cretT0ken thirty-three bytes!!!"))
+		},
+		"malformed link key": func(m map[string]string) { m["MEETINGS_LINK_KEY"] = "s3cretT0ken-not-base64!!" },
 	} {
 		m := base()
 		mut(m)
@@ -63,7 +77,7 @@ func TestLoadConfig(t *testing.T) {
 			t.Errorf("%s: LoadConfig accepted it", name)
 			continue
 		}
-		if strings.Contains(err.Error(), "s3cretT0ken") {
+		if strings.Contains(err.Error(), "s3cretT0ken") || strings.Contains(err.Error(), "czNjcmV0VDBr") {
 			t.Errorf("%s: the refusal echoes a token: %v", name, err)
 		}
 	}

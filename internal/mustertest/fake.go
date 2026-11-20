@@ -1,25 +1,50 @@
-// Package mustertest is a fake muster for tests: the four /plugin/v1 routes
-// this template calls, with muster's answers (docs/plugins.md, "The plugin
-// author's contract"), recording every request it was sent.
+// Package mustertest is a fake muster for tests: the two /plugin/v1 routes an
+// app plugin calls (GET /plugin/v1/self and POST /plugin/v1/handoffs/redeem),
+// with muster's answers (docs/plugins.md, "App tab" and "Viewer hand-off"),
+// for any number of plugin tokens, recording every request it was sent.
+//
+// It follows muster where muster's rules are the plugin's security boundary:
+// a code is single use, lives 60 s, and redeems only with the token of the
+// plugin it was minted for; the purpose comes from the target; a token with
+// neither viewer nor app is 403; a revoked token is 401 on every route.
 package mustertest
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
+	"slices"
 	"strings"
 	"sync"
+	"time"
 )
 
-// Token is the plugin token the fake accepts.
+// Token is the plugin token of the fake's default plugin (New adds it).
 const Token = "mpl_test_token_0123456789"
 
-// Result is one POST /plugin/v1/drafts/{id}/result the fake received.
-type Result struct {
-	DraftID int64
-	Body    string // the raw JSON body, exactly as sent
+// Plugin is one plugin token the fake serves: what GET /plugin/v1/self says.
+type Plugin struct {
+	Token        string
+	PluginID     int64
+	PluginName   string
+	OwnerID      int64
+	OwnerLogin   string
+	OwnerKind    string
+	Capabilities []string
+}
+
+// Default is the plugin New registers under Token.
+var Default = Plugin{Token: Token, PluginID: 3, PluginName: "example-meetings", OwnerID: 1,
+	OwnerLogin: "operator@example.test", OwnerKind: "person", Capabilities: []string{"app"}}
+
+type code struct {
+	pluginID int64
+	answer   string // the redeem answer, exactly
+	mintedAt time.Time
+	spent    bool
 }
 
 // Fake is a fake muster server.
@@ -27,68 +52,105 @@ type Fake struct {
 	*httptest.Server
 
 	mu sync.Mutex
-	// Messages are the raw bodies of every POST /plugin/v1/messages.
-	Messages []string
-	// Results are every result call, in order.
-	Results []Result
-	// Auth is every Authorization header seen.
-	Auth []string
-	// Claims counts claim calls.
-	Claims int
-	// RateLimit answers the next n message posts 429 with Retry-After: 7.
-	RateLimit int
-	// Conflict answers the next n message posts 409 and stores nothing, as
-	// muster does when the officer a bound plugin delivers to is not defined.
-	Conflict int
-	// Revoked makes every route answer 401, as muster does for a revoked token.
-	Revoked bool
+	// Now is the fake's clock (a code lives 60 s by it); default time.Now.
+	Now func() time.Time
 	// Off makes every route answer 404, as muster does with plugins off.
 	Off bool
 
-	stored   map[string]int64 // external_id → message id
-	queue    []string         // approved drafts' claim bodies, served in order
-	claimed  map[int64]bool
-	nextID   int64
-	settled  map[int64]bool // result recorded (sent or failed)
-	settleOK map[int64]bool
+	plugins map[string]*Plugin // token → plugin
+	revoked map[string]bool
+	codes   map[string]*code
+	// calls is every request, as "METHOD path token".
+	calls []string
 }
 
-// New starts a fake muster; Close it when done.
+// New starts a fake muster with Default registered; Close it when done.
 func New() *Fake {
-	f := &Fake{stored: map[string]int64{}, claimed: map[int64]bool{}, settled: map[int64]bool{}, settleOK: map[int64]bool{}}
+	f := &Fake{plugins: map[string]*Plugin{}, revoked: map[string]bool{}, codes: map[string]*code{}, Now: time.Now}
+	f.AddPlugin(Default)
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /plugin/v1/self", f.gate(func(w http.ResponseWriter, r *http.Request) {
-		write(w, 200, `{"plugin_id":3,"plugin_name":"example-echo","owner_id":1,"owner_login":"operator","owner_kind":"person","capabilities":["messages"],"deliver_to":null}`)
-	}))
-	mux.HandleFunc("POST /plugin/v1/messages", f.gate(f.message))
-	mux.HandleFunc("POST /plugin/v1/drafts/claim", f.gate(f.claim))
-	mux.HandleFunc("POST /plugin/v1/drafts/{id}/result", f.gate(f.result))
+	mux.HandleFunc("GET /plugin/v1/self", f.gate(f.self))
+	mux.HandleFunc("POST /plugin/v1/handoffs/redeem", f.gate(f.redeem))
 	f.Server = httptest.NewServer(mux)
 	return f
 }
 
-// Approve queues one approved draft for the next claim. claimJSON is the
-// claim body muster answers, e.g.
-// {"draft_id":17,"kind":"reply","message_external_id":"echo-1","body":"Hi","approved_at":"2000-01-02T03:04:05Z"}.
-func (f *Fake) Approve(claimJSON string) {
+// AddPlugin registers another token.
+func (f *Fake) AddPlugin(p Plugin) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.queue = append(f.queue, claimJSON)
+	cp := p
+	f.plugins[p.Token] = &cp
 }
 
-// MarkClaimed records draft id as claimed by this plugin, as if an earlier
-// process had claimed it (its result is then answered 200, not 404).
-func (f *Fake) MarkClaimed(id int64) {
+// Revoke makes token answer 401 on every route from now on.
+func (f *Fake) Revoke(token string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.claimed[id] = true
+	f.revoked[token] = true
 }
 
-// Snapshot returns copies of what the fake recorded.
-func (f *Fake) Snapshot() (messages []string, results []Result, auth []string, claims int) {
+// MintApp mints a code for an app target, as muster's /apps/{id} page does:
+// purpose "app", the owner the plugin's own. ref "" is {"app": {}}.
+func (f *Fake) MintApp(pluginID int64, ref string) string {
+	f.mu.Lock()
+	var owner int64
+	for _, p := range f.plugins {
+		if p.PluginID == pluginID {
+			owner = p.OwnerID
+		}
+	}
+	f.mu.Unlock()
+	target := map[string]any{"app": map[string]any{}}
+	if ref != "" {
+		target["app"] = map[string]any{"ref": ref}
+	}
+	return f.MintRaw(pluginID, map[string]any{"owner_id": owner, "target": target, "purpose": "app"})
+}
+
+// MintRaw mints a code for pluginID whose redeem answers exactly answer
+// (stepped_up and minted_at are added when missing). Tests use it to play a
+// muster answer the plugin must refuse: a view purpose, a mirror target, an
+// owner other than the token's.
+func (f *Fake) MintRaw(pluginID int64, answer map[string]any) string {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
+	c := base64.RawURLEncoding.EncodeToString(b)
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]string(nil), f.Messages...), append([]Result(nil), f.Results...), append([]string(nil), f.Auth...), f.Claims
+	now := f.Now()
+	if _, ok := answer["stepped_up"]; !ok {
+		answer["stepped_up"] = false
+	}
+	if _, ok := answer["minted_at"]; !ok {
+		answer["minted_at"] = now.UTC().Format(time.RFC3339)
+	}
+	raw, err := json.Marshal(answer)
+	if err != nil {
+		panic(err)
+	}
+	f.codes[c] = &code{pluginID: pluginID, answer: string(raw), mintedAt: now}
+	return c
+}
+
+// Calls returns every request so far, as "METHOD path token".
+func (f *Fake) Calls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.calls)
+}
+
+// CountCalls counts the requests to path (any token).
+func (f *Fake) CountCalls(method, path string) int {
+	n := 0
+	for _, c := range f.Calls() {
+		if strings.HasPrefix(c, method+" "+path+" ") {
+			n++
+		}
+	}
+	return n
 }
 
 func write(w http.ResponseWriter, code int, body string) {
@@ -97,108 +159,56 @@ func write(w http.ResponseWriter, code int, body string) {
 	io.WriteString(w, body)
 }
 
-func (f *Fake) gate(next http.HandlerFunc) http.HandlerFunc {
+func (f *Fake) gate(next func(http.ResponseWriter, *http.Request, Plugin)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		f.mu.Lock()
-		f.Auth = append(f.Auth, r.Header.Get("Authorization"))
-		off, revoked := f.Off, f.Revoked
+		f.calls = append(f.calls, r.Method+" "+r.URL.Path+" "+tok)
+		off := f.Off
+		p, ok := f.plugins[tok]
+		revoked := f.revoked[tok]
+		var cp Plugin
+		if ok {
+			cp = *p
+		}
 		f.mu.Unlock()
 		if off {
 			http.NotFound(w, r)
 			return
 		}
-		if revoked || r.Header.Get("Authorization") != "Bearer "+Token {
+		if !ok || revoked || !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
 			write(w, 401, `{"error":"this route takes a plugin token (mpl_…), minted at /plugins"}`)
 			return
 		}
-		next(w, r)
+		next(w, r, cp)
 	}
 }
 
-func (f *Fake) message(w http.ResponseWriter, r *http.Request) {
-	raw, _ := io.ReadAll(r.Body)
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.Messages = append(f.Messages, string(raw))
-	if f.RateLimit > 0 {
-		f.RateLimit--
-		w.Header().Set("Retry-After", "7")
-		write(w, 429, `{"error":"rate limited: 60 new messages in the last hour"}`)
-		return
-	}
-	if f.Conflict > 0 {
-		f.Conflict--
-		write(w, 409, `{"error":"the officer this plugin delivers to is not defined for its owner (or the built-in officer store is off): nothing was stored; send it again once the officer is back"}`)
-		return
-	}
-	var in struct {
-		ExternalID string `json:"external_id"`
-		Body       string `json:"body"`
-	}
-	if json.Unmarshal(raw, &in) != nil || in.ExternalID == "" || strings.ContainsAny(in.ExternalID, " \t\n") || in.Body == "" {
-		write(w, 400, `{"error":"external_id and body are required"}`)
-		return
-	}
-	if id, ok := f.stored[in.ExternalID]; ok {
-		write(w, 200, `{"id":`+strconv.FormatInt(id, 10)+`,"status":"queued"}`)
-		return
-	}
-	f.nextID++
-	f.stored[in.ExternalID] = f.nextID
-	write(w, 202, `{"id":`+strconv.FormatInt(f.nextID, 10)+`,"status":"queued"}`)
+func (f *Fake) self(w http.ResponseWriter, _ *http.Request, p Plugin) {
+	b, _ := json.Marshal(map[string]any{"plugin_id": p.PluginID, "plugin_name": p.PluginName, "owner_id": p.OwnerID,
+		"owner_login": p.OwnerLogin, "owner_kind": p.OwnerKind, "capabilities": p.Capabilities, "deliver_to": nil})
+	write(w, 200, string(b))
 }
 
-func (f *Fake) claim(w http.ResponseWriter, r *http.Request) {
-	raw, _ := io.ReadAll(r.Body)
-	var in struct {
-		WaitSeconds *int `json:"wait_seconds"`
+func (f *Fake) redeem(w http.ResponseWriter, r *http.Request, p Plugin) {
+	if !slices.Contains(p.Capabilities, "app") && !slices.Contains(p.Capabilities, "viewer") {
+		write(w, 403, `{"error":"this plugin token lacks the viewer or app capability"}`)
+		return
 	}
-	if len(raw) > 0 && json.Unmarshal(raw, &in) != nil {
-		write(w, 400, `{"error":"the body is {\"wait_seconds\": 0-25}"}`)
+	var in struct {
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&in); err != nil {
+		write(w, 400, `{"error":"the body is {\"code\": \"<muster_code>\"}"}`)
 		return
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.Claims++
-	if len(f.queue) == 0 {
-		w.WriteHeader(http.StatusNoContent)
+	c, ok := f.codes[strings.TrimSpace(in.Code)]
+	if !ok || c.spent || c.pluginID != p.PluginID || f.Now().Sub(c.mintedAt) > 60*time.Second {
+		write(w, 404, `{"error":"no such hand-off code (unknown, used, expired, or another plugin's)"}`)
 		return
 	}
-	body := f.queue[0]
-	f.queue = f.queue[1:]
-	var c struct {
-		DraftID int64 `json:"draft_id"`
-	}
-	_ = json.Unmarshal([]byte(body), &c)
-	f.claimed[c.DraftID] = true
-	write(w, 200, body)
-}
-
-func (f *Fake) result(w http.ResponseWriter, r *http.Request) {
-	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	raw, _ := io.ReadAll(r.Body)
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.Results = append(f.Results, Result{DraftID: id, Body: string(raw)})
-	var in struct {
-		OK *bool `json:"ok"`
-	}
-	if json.Unmarshal(raw, &in) != nil || in.OK == nil {
-		write(w, 400, `{"error":"the body is {\"ok\": true|false, \"external_ref\", \"detail\"}"}`)
-		return
-	}
-	if !f.claimed[id] {
-		write(w, 404, `{"error":"no such draft claimed by this plugin"}`)
-		return
-	}
-	status := "sent"
-	if !*in.OK {
-		status = "failed"
-	}
-	if f.settled[id] && f.settleOK[id] != *in.OK {
-		write(w, 409, `{"error":"the draft already settled with the other result"}`)
-		return
-	}
-	f.settled[id], f.settleOK[id] = true, *in.OK
-	write(w, 200, `{"draft_id":`+strconv.FormatInt(id, 10)+`,"status":"`+status+`"}`)
+	c.spent = true
+	write(w, 200, c.answer)
 }

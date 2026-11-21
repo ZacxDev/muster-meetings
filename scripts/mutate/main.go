@@ -111,6 +111,7 @@ const (
 	knocker = "internal/lobby/knocker.go"
 	limiter = "internal/lobby/limiter.go"
 	appJS   = "internal/server/web/static/app.js"
+	streams = "internal/server/streams.go"
 )
 
 var mutants = []mutant{
@@ -457,7 +458,7 @@ var mutants = []mutant{
 		pkg: "./internal/store", test: "TestASwitchGoesBackOnOnlyBeforeAnyGuestKnocked", want: "a new meeting: record false, ai true; want both on"},
 	{name: "notice is current: the guest stream keeps the notice it opened with", file: guest, from: `snap := map[string]any{"notice": lobby.NoticeFor(cur.Notice.Record, cur.Notice.AI)}`,
 		to:  `snap := map[string]any{"notice": lobby.NoticeFor(g.Notice.Record, g.Notice.AI)}`,
-		pkg: "./internal/server", test: "TestTheAdmittedGuestSeesTheCurrentNotice", want: `no "meeting" event (the stream so far: "event: meeting`},
+		pkg: "./internal/server", test: "TestTheAdmittedGuestSeesTheCurrentNotice", want: `no "meeting" event (the stream so far: "event: token`},
 
 	// ---- 🔴 the guest name ----
 	{name: "name: format (bidi) characters accepted", file: name, from: `case unicode.Is(unicode.Cf, r) && r != '\u200D':`, to: `case false:`,
@@ -476,7 +477,7 @@ var mutants = []mutant{
 	// ---- 🔴 knock limits ----
 	{name: "knock limits: no per-meeting cap", file: parts, from: "if waiting >= MaxWaiting {", to: "if false {",
 		pkg: "./internal/server", test: "TestKnockLimits", want: "the 21st waiting knock = 201"},
-	{name: "knock limits: no per-address cap", file: guest, from: "if !s.limiter.Allow(lobby.ClientAddr(r, s.cfg.TrustedProxies), now) {", to: "if false {",
+	{name: "knock limits: no per-address cap", file: guest, from: "if !s.limiter.Allow(s.clientAddr(r), now) {", to: "if false {",
 		pkg: "./internal/server", test: "TestKnockLimits", want: "the 11th knock from one address = 201"},
 	{name: "knock limits: an untrusted peer's X-Forwarded-For is believed", file: limiter, from: "\tif inAny(addr, trusted) {\n", to: "\tif true {\n",
 		pkg: "./internal/lobby", test: "TestClientAddr", want: `peer 198.51.100.7:4000, XFF "203.0.113.9": 203.0.113.9, want 198.51.100.7`},
@@ -513,6 +514,34 @@ var mutants = []mutant{
 		pkg: "./internal/server", test: "TestThePagesPoliciesArePinned", want: "the owner page's CSP ="},
 	{name: "csp: the guest page may be framed", file: srv, from: "func (s *Server) guestPageCSP() string { return s.pageCSP(\"'none'\") }", to: "func (s *Server) guestPageCSP() string { return s.pageCSP(\"*\") }",
 		pkg: "./internal/server", test: "TestThePagesPoliciesArePinned", want: "the guest page's CSP ="},
+
+	// ---- 🔴 round 1: stream caps, reconnects, proxies, names, knock counts ----
+	{name: "streams: a new stream of a ticket does not replace the old", file: streams, from: "if old := g.byTicket[ticket]; ticket != \"\" && old != nil {", to: "if old := g.byTicket[ticket]; false && ticket != \"\" && old != nil {",
+		pkg: "./internal/server", test: "TestOneStreamPerTicket", want: "a replaced stream still holds its slot"},
+	{name: "streams: no per-address cap", file: streams, from: "if g.total >= s.cfg.MaxStreams || g.perAddr[addr] >= s.cfg.StreamsPerAddress {", to: "if g.total >= s.cfg.MaxStreams {",
+		pkg: "./internal/server", test: "TestStreamsPerAddressAreCapped", want: "the 4th stream from one address (the owner's) = 200, want 429"},
+	{name: "streams: no total cap", file: streams, from: "if g.total >= s.cfg.MaxStreams || g.perAddr[addr] >= s.cfg.StreamsPerAddress {", to: "if g.perAddr[addr] >= s.cfg.StreamsPerAddress {",
+		pkg: "./internal/server", test: "TestStreamsAreCappedInAll", want: "the 4th stream in all, from a fresh address = 200, want 429"},
+	{name: "reconnect: participant_left revokes the admission", file: machine, from: "\tcase \"participant_left\":\n", to: "\tcase \"participant_left\":\n\t\tif ev.Participant != nil {\n\t\t\ts.store.MarkLeft(ctx, room, ev.Participant.Identity, s.cfg.Now())\n\t\t}\n",
+		pkg: "./internal/server", test: "TestAnAdmittedGuestWhoDropsReconnectsWithoutKnocking", want: `no "token" event`},
+	{name: "reconnect (real LiveKit): participant_left revokes the admission", file: machine, from: "\tcase \"participant_left\":\n", to: "\tcase \"participant_left\":\n\t\tif ev.Participant != nil {\n\t\t\ts.store.MarkLeft(ctx, room, ev.Participant.Identity, s.cfg.Now())\n\t\t}\n", realLiveKit: true,
+		pkg: "./internal/server", test: "TestAgainstARealLiveKitServer", want: "the admitted guest"},
+	{name: "reconnect: /events mints no fresh token", file: guest, from: "\t\tif !minted {", to: "\t\tif false && !minted {",
+		pkg: "./internal/server", test: "TestAnAdmittedGuestWhoDropsReconnectsWithoutKnocking", want: `no "token" event`},
+	{name: "leave: the guest's Leave does not spend the ticket", file: guest, from: "if _, _, err := s.store.MarkLeft(r.Context(), g.Room, g.Identity, s.cfg.Now()); err != nil {", to: "if err := error(nil); err != nil {",
+		pkg: "./internal/server", test: "TestAGuestWhoLeavesMustKnockAgain", want: "a left ticket's /wait = 200"},
+	{name: "proxies: no warning for an undeclared proxy", file: streams, from: "len(r.Header.Values(\"X-Forwarded-For\")) > 0 && s.xffUntrusted.CompareAndSwap(false, true) {", to: "len(r.Header.Values(\"X-Forwarded-For\")) > 0 && false {",
+		pkg: "./internal/server", test: "TestXForwardedForWithoutTrustedProxiesIsWarnedOnce", want: "the warning was logged 0 times"},
+	{name: "proxies: /healthz does not say so", file: srv, from: "\t\tif s.xffUntrusted.Load() {", to: "\t\tif false {",
+		pkg: "./internal/server", test: "TestXForwardedForWithoutTrustedProxiesIsWarnedOnce", want: "/healthz ="},
+	{name: "proxies: a catch-all trusted proxy boots", file: mainGo, from: "if p.Bits() == 0 {", to: "if false {",
+		pkg: ".", test: "TestLoadConfig", want: "every IPv4 address trusted: LoadConfig accepted it"},
+	{name: "proxies: X-Forwarded-For walked from the left", file: limiter, from: "for i := len(hops) - 1; i >= 0; i-- {", to: "for i := 0; i < len(hops); i++ {",
+		pkg: "./internal/lobby", test: "TestClientAddr", want: `XFF "198.51.100.1, 203.0.113.9, 10.9.9.9": 198.51.100.1, want 203.0.113.9`},
+	{name: "name: nothing visible is accepted", file: name, from: "\tif !seen {", to: "\tif false {",
+		pkg: "./internal/lobby", test: "TestCleanNameTrimsAndRefusesControlAndBidiCharacters", want: "only zero-width joiners: CleanName"},
+	{name: "knock push: a fall is not tracked (2 → 1 → 2 is silent)", file: knocker, from: "if waiting > 0 && waiting < s.sent {", to: "if false {",
+		pkg: "./internal/server", test: "TestAKnockCountThatFallsAndRisesIsPushedAgain", want: "2 → 1 → 2 did not push again"},
 
 	// ---- configuration ----
 	{name: "config: allow the plugin on muster's own origin", file: mainGo, from: `if c.PublicURL == c.MusterOrigin {`, to: `if false {`,

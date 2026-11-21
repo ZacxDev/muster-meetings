@@ -33,7 +33,7 @@
     </section>
   </section>
 
-  <section id="call-view" class="call" hidden aria-label="Meeting">
+  <section id="call-view" class="call" hidden aria-label="Meeting" data-conn="none">
     <div class="call-top">
       <div id="lobby" class="lobby" aria-live="polite"></div>
       <div class="call-link">
@@ -46,6 +46,7 @@
         <label class="switch"><input id="sw-ai" type="checkbox"> AI action items <span class="muted">(sends the transcript text, never audio, to an AI service)</span></label>
       </div>
       <p id="call-status" class="status" role="status" aria-live="polite"></p>
+      <button id="btn-use-here" type="button" class="primary" hidden>Use here</button>
     </div>
     <div class="stage-wrap">
       <div id="stage" class="stage"></div>

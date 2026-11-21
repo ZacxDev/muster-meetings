@@ -35,7 +35,9 @@ func (s *Server) Run(ctx context.Context) {
 //     meeting has ended) is removed at once. That is the backstop that ends
 //     a removed guest's still-valid token (design: "Removed guest cannot
 //     rejoin").
-//   - participant_left: an admitted guest becomes left; their ticket dies.
+//   - participant_left: nothing. A dropped connection is not a revocation;
+//     the guest reconnects (design: "an admitted control guest who
+//     reconnects is not" disconnected).
 //   - room_finished: the room sat empty for its timeout (or was deleted):
 //     the meeting ends and its link dies.
 func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
@@ -57,14 +59,11 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 		s.admitOrRemove(ctx, room, ev.Participant.Identity)
 	case "participant_left":
-		if ev.Participant == nil || room == "" {
-			break
-		}
-		if id, changed, err := s.store.MarkLeft(ctx, room, ev.Participant.Identity, s.cfg.Now()); err != nil {
-			s.cfg.Log.Printf("webhook: participant_left: %v", err)
-		} else if changed {
-			s.hub.Changed(id)
-		}
+		// 🔴 Not a revocation: a connection that drops (a network blink, a
+		// reload) must not cost an admitted guest their admission. They
+		// reconnect with a fresh token from /events. An admission ends only by
+		// the owner's Remove, the guest's own Leave (/j/{code}/leave), or the
+		// meeting's end.
 	case "room_finished":
 		if room == "" {
 			break

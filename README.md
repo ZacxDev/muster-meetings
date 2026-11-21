@@ -158,7 +158,7 @@ Read from the environment only; `.env.example` lists them.
 | `MEETINGS_LIVEKIT_API_URL` | yes | LiveKit's server API as the plugin reaches it, e.g. `http://livekit:7880` (inside the cluster; plain http allowed) |
 | `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | yes | LiveKit's API key and secret. The secret signs every participant token and the plugin's own API calls, and verifies the webhook; it never reaches a browser and is never logged |
 | `MEETINGS_LIVEKIT_ICE` | no | `relay` (default): the browser uses only TURN relay candidates, since TURN over TLS on 443 is the deployment's only media path. `all` for a local LiveKit with no TURN |
-| `MEETINGS_TRUSTED_PROXIES` | no | comma-separated CIDRs of the ingress in front of the plugin. A knock from one of them is counted against the `X-Forwarded-For` client it names (the right-most hop that is not itself trusted); without it every knock counts against the ingress's own address |
+| `MEETINGS_TRUSTED_PROXIES` | no | comma-separated CIDRs of the ingress in front of the plugin. A knock or stream from one of them is counted against the `X-Forwarded-For` client it names (the right-most hop that is not itself trusted); without it every one counts against the ingress's own address, and a request carrying the header is warned about once (log and `/healthz`). `0.0.0.0/0` or `::/0` refuses to start |
 | `STATE_DIR` | no | where `meetings.db` (SQLite) lives; default `./state`. Keep it across restarts |
 
 The plugin refuses to start when muster answers the token `401`
@@ -190,7 +190,8 @@ that does not exist.
 | `GET /j/{code}` | the guest page; `410` once the meeting has ended or is 24 hours old, `404` for an unknown code |
 | `POST /j/{code}/knock` `{"name", "notice": {"record", "ai"}}` | `201 {"ticket"}`. `notice` is what the page showed; another one is `409 {"notice": <the current one>}` |
 | `POST /j/{code}/wait` `{"ticket"}` | an event stream: `waiting` (with the current notice), then `admitted {"livekit_url", "token", "identity", "ice"}`, `denied` or `ended` |
-| `POST /j/{code}/events` `{"ticket"}` | an admitted guest's stream: the current notice (its badge), then `removed` or `ended` |
+| `POST /j/{code}/events` `{"ticket"}` | an admitted guest's stream: a fresh `token` (the reconnect after a drop), the current notice (its badge), then `removed` or `ended` |
+| `POST /j/{code}/leave` `{"ticket"}` | the guest's own Leave: `204`, dropped from the room, the ticket spent |
 | `POST /livekit/webhook` | internal listener only: LiveKit's signed webhook |
 | `GET /healthz` | internal listener only |
 
@@ -228,6 +229,12 @@ database.
   `canPublishData` (written as `false`: LiveKit reads an absent one as
   true), not hidden, not a recorder, and the guest cannot rename itself.
   The owner's adds `roomAdmin` and `canPublishData`.
+- **A dropped connection is not a revocation.** An admitted guest stays
+  admitted until the owner removes them, they press **Leave**, or the
+  meeting ends. When their connection fails or drops, the page shows
+  "Can't connect media" with **Retry**: a fresh token from their `/events`
+  stream, and the call again, without knocking. LiveKit's
+  `participant_left` changes nothing.
 - **Removing a guest** marks their identity removed in the plugin's
   database, then drops them through LiveKit's `RemoveParticipant`; their
   ticket is dead. A LiveKit token stays valid for its two minutes, so the
@@ -236,7 +243,11 @@ database.
   guest's, and every 15 s a **reconcile loop** lists each live meeting's
   room and does the same, in case a webhook was lost. The loop also deletes
   the room of any meeting no longer live (ended, 24 hours old, its owner's
-  grant revoked). A guest who leaves knocks again to come back.
+  grant revoked). A guest who pressed **Leave** knocks again to come back.
+- **You on two devices.** You are one identity in your call (`owner`: no
+  subject of yours reaches a guest), so opening the meeting on a second
+  device moves the call there; the first page says "Opened on another
+  device" with **Use here** to take it back, and never rejoins by itself.
 - **End meeting** ends it for everyone: the link answers `410`, waiting
   guests are told it ended, the room is deleted (which disconnects
   everyone), and no identity of it passes the admission check any more, so
@@ -246,10 +257,20 @@ database.
   with the API secret by the API key, is within its life, and carries the
   SHA-256 of the exact body; anything else is `401` and changes nothing.
 - **Limits:** 20 guests waiting per meeting, 10 knocks per source address
-  per 10 minutes, 8 people in the call. Over any of them is `429`.
+  per 10 minutes, 8 people in the call; and open event streams: one per
+  ticket (a new one closes the old), 16 per client address across the
+  guests' and the owner's streams, 2000 in all. Over any of them is `429`.
+- **Behind a proxy:** set `MEETINGS_TRUSTED_PROXIES` to the ingress's CIDRs.
+  The client is then the right-most `X-Forwarded-For` hop that is not a
+  trusted proxy, never anything left of an untrusted hop. Unset, the header
+  is ignored, and the first request that carries one is logged as a warning
+  and shown on `/healthz`, since every client is then counted as the proxy.
+  A catch-all (`0.0.0.0/0`, `::/0`) refuses to start.
 - **The guest's name** is trimmed and must be 1 to 40 characters with no
   control, format (which holds every text-direction control) or separator
-  characters. It is shown with "(guest)" after it, and every page writes it
+  characters, and at least one character that shows (not only joiners,
+  Hangul fillers, the blank Braille pattern, other default-ignorable
+  characters, or combining marks with no base). It is shown with "(guest)" after it, and every page writes it
   with `textContent`, never as markup. It is never logged or audited.
 - **The consent notice.** Record and AI action items are on for a new
   meeting. Before the name field the guest reads one sentence per switch
@@ -264,8 +285,9 @@ database.
 - **The knock notification:** when a guest knocks and you do not have the
   meeting open, muster pushes "Someone is waiting to join your meeting" to
   your phone (muster writes the words; the guest's name is never sent).
-  Again only when the count of waiting guests rises; withdrawn when you open
-  the meeting or nobody waits any more.
+  Again only when the count of waiting guests rises above the last count
+  pushed, which follows the count down, so 2 → 1 → 2 is pushed again;
+  withdrawn when you open the meeting or nobody waits any more.
 - **Mobile:** below 40rem the call is one column: the active speaker or a
   shared screen on top, the others in a strip, the controls in a bottom bar
   of 44 px targets, the lobby rows and the badge pinned at the top.
@@ -322,13 +344,19 @@ app opens and makes a meeting. The other, on a 390×844 screen, has a guest
 knock with a name that looks like markup, checks the notice comes first and
 the owner's lobby row shows the name as text and fits the screen, admits
 them, and checks at the fake LiveKit that the guest connected with a valid
-guest token.
+guest token; the fake refuses the media, and **Retry** reconnects with a
+fresh token and no new knock. A third, against a real `livekit-server`
+(`scripts/e2e-harness -livekit=real`), opens one meeting on two owner pages:
+the newer takes the call, the older shows "Opened on another device" and
+**Use here** takes it back.
 
 **Against a real LiveKit:** `internal/server/livekit_integration_test.go`
 starts `livekit-server` and joins with LiveKit's CLI (`lk room join`): the
 plugin's rooms, tokens and webhook verification against the real server; two
 admitted guests in the room; a removed guest rejoining with a valid
-credential and being thrown out by the plugin (`PARTICIPANT_REMOVED`); End
+credential and being thrown out by the plugin (`PARTICIPANT_REMOVED`); an
+admitted guest whose connection drops reconnecting and staying; two `owner`
+connections, the newer one winning and neither removed by the plugin; End
 meeting deleting the room; a real `room_finished` ending a meeting. It runs
 when `livekit-server` and `lk` are on `PATH` (`nix-shell -p livekit
 livekit-cli`) or named by `MEETINGS_LIVEKIT_SERVER` and `MEETINGS_LK_CLI`,

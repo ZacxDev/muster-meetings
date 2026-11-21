@@ -215,5 +215,12 @@
     if (b) b.textContent = notice && notice.badge ? notice.badge : '';
   }
 
-  window.MeetingsCall = { join: join, readEvents: readEvents, showBadge: showBadge };
+  // replacedElsewhere says a disconnect reason is LiveKit's "the same
+  // identity joined again": the owner opened the meeting on another device,
+  // and the newer join won.
+  function replacedElsewhere(reason) {
+    return !!LK && reason === LK.DisconnectReason.DUPLICATE_IDENTITY;
+  }
+
+  window.MeetingsCall = { join: join, readEvents: readEvents, showBadge: showBadge, replacedElsewhere: replacedElsewhere };
 })();

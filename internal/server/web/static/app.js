@@ -230,13 +230,35 @@
     });
   }
 
+  function connState(s) { $('call-view').setAttribute('data-conn', s); }
+
+  // connect joins the call. You are one identity ("owner") in your meeting,
+  // so opening it on a second device makes the newer join win: LiveKit
+  // disconnects this page with DUPLICATE_IDENTITY, and it says so, with Use
+  // here to take the call back (which in turn moves the other device here),
+  // instead of rejoining on its own and kicking the other back and forth.
   function connect(id) {
+    $('btn-use-here').hidden = true;
+    connState('connecting');
     api('POST', '/api/meetings/' + encodeURIComponent(id) + '/token').then(function (t) {
       if (!call || call.id !== id) return;
       return MeetingsCall.join({ url: t.livekit_url, token: t.token, ice: t.ice, media: true, onStatus: callSay,
-        onGone: function () { if (call && call.id === id && !call.ended) callSay('The call disconnected. Press Back, then Open, to rejoin.'); } })
-        .then(function (conn) { if (call && call.id === id) call.conn = conn; else conn.leave(); });
-    }).catch(function (e) { if (token && call && call.id === id && !call.conn) callSay(e.message === "Can't connect media" ? e.message : callStatusOf(e)); });
+        onGone: function (reason) {
+          if (!call || call.id !== id || call.ended) return;
+          call.conn = null;
+          if (MeetingsCall.replacedElsewhere(reason)) {
+            connState('elsewhere');
+            callSay('Opened on another device.');
+            $('btn-use-here').hidden = false;
+            return;
+          }
+          connState('none');
+          callSay('The call disconnected. Press Back, then Open, to rejoin.');
+        } })
+        .then(function (conn) { if (call && call.id === id) { call.conn = conn; connState('connected'); } else conn.leave(); });
+    }).catch(function (e) {
+      if (token && call && call.id === id && !call.conn) { connState('none'); callSay(e.message === "Can't connect media" ? e.message : callStatusOf(e)); }
+    });
   }
 
   function callStatusOf(e) {
@@ -250,6 +272,7 @@
     $('call-view').hidden = false;
     $('call-url').value = url || '';
     $('lobby').textContent = '';
+    $('btn-use-here').hidden = true;
     callSay('');
     watch(id, call.abort).catch(function (e) { if (token && call && call.id === id && e.name !== 'AbortError') callSay('Lost touch with the meeting: ' + e.message); });
     connect(id);
@@ -292,6 +315,7 @@
         .catch(function (e) { box.checked = !box.checked; if (token) callSay(e.message); });
     });
   });
+  $('btn-use-here').addEventListener('click', function () { if (call && !call.ended) connect(call.id); });
   $('call-copy').addEventListener('click', function () { copyText($('call-url').value, $('call-url'), callSay); });
 
   $('new-meeting').addEventListener('click', function () {

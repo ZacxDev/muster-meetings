@@ -94,16 +94,18 @@ func TestLoadConfig(t *testing.T) {
 		"malformed link key": func(m map[string]string) { m["MEETINGS_LINK_KEY"] = "s3cretT0ken-not-base64!!" },
 		// LiveKit: the browser URL wss (ws only to loopback), the API http(s),
 		// both keys, a known ICE policy, real CIDRs.
-		"no LiveKit URL":            func(m map[string]string) { delete(m, "MEETINGS_LIVEKIT_URL") },
-		"ws LiveKit URL off-host":   func(m map[string]string) { m["MEETINGS_LIVEKIT_URL"] = "ws://meet-rtc.example.test" },
-		"https LiveKit URL":         func(m map[string]string) { m["MEETINGS_LIVEKIT_URL"] = "https://meet-rtc.example.test" },
-		"LiveKit URL with a path":   func(m map[string]string) { m["MEETINGS_LIVEKIT_URL"] = "wss://meet-rtc.example.test/rtc" },
-		"no LiveKit API URL":        func(m map[string]string) { delete(m, "MEETINGS_LIVEKIT_API_URL") },
-		"LiveKit API URL with user": func(m map[string]string) { m["MEETINGS_LIVEKIT_API_URL"] = "http://k:s3cretT0ken@livekit:7880" },
-		"no LiveKit key":            func(m map[string]string) { delete(m, "LIVEKIT_API_KEY") },
-		"no LiveKit secret":         func(m map[string]string) { m["LIVEKIT_API_SECRET"] = " " },
-		"unknown ICE policy":        func(m map[string]string) { m["MEETINGS_LIVEKIT_ICE"] = "udp" },
-		"a proxy that is no CIDR":   func(m map[string]string) { m["MEETINGS_TRUSTED_PROXIES"] = "ingress.example.test" },
+		"no LiveKit URL":             func(m map[string]string) { delete(m, "MEETINGS_LIVEKIT_URL") },
+		"ws LiveKit URL off-host":    func(m map[string]string) { m["MEETINGS_LIVEKIT_URL"] = "ws://meet-rtc.example.test" },
+		"https LiveKit URL":          func(m map[string]string) { m["MEETINGS_LIVEKIT_URL"] = "https://meet-rtc.example.test" },
+		"LiveKit URL with a path":    func(m map[string]string) { m["MEETINGS_LIVEKIT_URL"] = "wss://meet-rtc.example.test/rtc" },
+		"no LiveKit API URL":         func(m map[string]string) { delete(m, "MEETINGS_LIVEKIT_API_URL") },
+		"LiveKit API URL with user":  func(m map[string]string) { m["MEETINGS_LIVEKIT_API_URL"] = "http://k:s3cretT0ken@livekit:7880" },
+		"no LiveKit key":             func(m map[string]string) { delete(m, "LIVEKIT_API_KEY") },
+		"no LiveKit secret":          func(m map[string]string) { m["LIVEKIT_API_SECRET"] = " " },
+		"unknown ICE policy":         func(m map[string]string) { m["MEETINGS_LIVEKIT_ICE"] = "udp" },
+		"a proxy that is no CIDR":    func(m map[string]string) { m["MEETINGS_TRUSTED_PROXIES"] = "ingress.example.test" },
+		"every IPv4 address trusted": func(m map[string]string) { m["MEETINGS_TRUSTED_PROXIES"] = "10.0.0.0/8, 0.0.0.0/0" },
+		"every IPv6 address trusted": func(m map[string]string) { m["MEETINGS_TRUSTED_PROXIES"] = "::/0" },
 	} {
 		m := base()
 		mut(m)

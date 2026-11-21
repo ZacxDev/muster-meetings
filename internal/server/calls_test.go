@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -105,7 +106,7 @@ type stream struct {
 }
 
 // open starts method path with bearer and body, and reads its events.
-func (e *env) open(method, path, bearer string, body any) *stream {
+func (e *env) open(method, path, bearer string, body any, hdr ...string) *stream {
 	e.t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	var rd io.Reader
@@ -116,6 +117,9 @@ func (e *env) open(method, path, bearer string, body any) *stream {
 	req, _ := http.NewRequestWithContext(ctx, method, e.srv.URL+path, rd)
 	if bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	for i := 0; i+1 < len(hdr); i += 2 {
+		req.Header.Add(hdr[i], hdr[i+1])
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -483,22 +487,205 @@ func TestARemovedGuestIsRevokedKickedAndKeptOut(t *testing.T) {
 	}
 }
 
-// A guest who left is spent: their ticket is dead, and their old token is
-// thrown out on a rejoin.
-func TestAGuestWhoLeftMustKnockAgain(t *testing.T) {
+// 🔴 A dropped connection is not a revocation (design: "an admitted control
+// guest who reconnects is not" disconnected): after participant_left the
+// guest is still admitted, their /events stream gives a fresh token, and a
+// rejoin with it is left alone.
+func TestAnAdmittedGuestWhoDropsReconnectsWithoutKnocking(t *testing.T) {
 	e := newEnv(t)
 	c := e.meeting(ada)
 	gt := e.knock(c.Code, grace)
 	e.admit(c, grace)
 	tok := admittedToken(t, e.wait(c.Code, gt))
+	e.lk.Join(tok["token"])
 	e.lk.Webhook(e.internal.URL+"/livekit/webhook", "participant_left", c.Room, tok["identity"])
-	if resp, _ := e.do("POST", "/j/"+c.Code+"/wait", "", map[string]string{"ticket": gt}); resp.StatusCode != 403 {
-		t.Errorf("a left ticket's wait = %d, want 403", resp.StatusCode)
+	ev := e.guestEvents(c.Code, gt)
+	tev := ev.want("token")
+	var fresh map[string]string
+	json.Unmarshal([]byte(tev.Data), &fresh)
+	if claims, err := livekittest.Keys.Verify(fresh["token"], e.clock.Now()); err != nil || claims.Subject != tok["identity"] {
+		t.Fatalf("the reconnect token from /events: %v, %+v; want a valid token for the same identity", err, claims)
+	}
+	if _, _, err := e.lk.Join(fresh["token"]); err != nil {
+		t.Fatal(err)
+	}
+	e.lk.Webhook(e.internal.URL+"/livekit/webhook", "participant_joined", c.Room, tok["identity"])
+	if !slices.Contains(e.lk.InRoom(c.Room), tok["identity"]) {
+		t.Fatalf("an admitted guest who dropped and reconnected was removed: the room holds %v", e.lk.InRoom(c.Room))
+	}
+	e.server.Reconcile(context.Background())
+	if !slices.Contains(e.lk.InRoom(c.Room), tok["identity"]) {
+		t.Fatal("the reconcile loop removed the reconnected guest")
+	}
+}
+
+// The guest's own Leave spends the ticket: they are dropped from the room,
+// their streams are refused, and their old token is thrown out on a rejoin.
+func TestAGuestWhoLeavesMustKnockAgain(t *testing.T) {
+	e := newEnv(t)
+	c := e.meeting(ada)
+	gt := e.knock(c.Code, grace)
+	e.admit(c, grace)
+	tok := admittedToken(t, e.wait(c.Code, gt))
+	e.lk.Join(tok["token"])
+	if resp, raw := e.do("POST", "/j/"+c.Code+"/leave", "", map[string]string{"ticket": gt}); resp.StatusCode != 204 {
+		t.Fatalf("leave = %d %s", resp.StatusCode, raw)
+	}
+	if slices.Contains(e.lk.InRoom(c.Room), tok["identity"]) {
+		t.Fatal("Leave did not drop the guest from the room")
+	}
+	for _, p := range []string{"/wait", "/events"} {
+		if resp, _ := e.do("POST", "/j/"+c.Code+p, "", map[string]string{"ticket": gt}); resp.StatusCode != 403 {
+			t.Errorf("a left ticket's %s = %d, want 403", p, resp.StatusCode)
+		}
 	}
 	e.lk.Join(tok["token"])
 	e.lk.Webhook(e.internal.URL+"/livekit/webhook", "participant_joined", c.Room, tok["identity"])
 	if len(e.lk.InRoom(c.Room)) != 0 {
 		t.Errorf("a guest who left is back with their old token: %v", e.lk.InRoom(c.Room))
+	}
+}
+
+// ---- 🔴 the event-stream caps ----
+
+// One stream per ticket: a second /wait for the same ticket closes the
+// first, so a ticket can never hold more than one slot.
+func TestOneStreamPerTicket(t *testing.T) {
+	e := newEnv(t)
+	e.server.SetStreamCapsForTest(2, 100)
+	c := e.meeting(ada)
+	ticket := e.knock(c.Code, grace)
+	first := e.wait(c.Code, ticket)
+	first.want("waiting")
+	var last *stream
+	for i := 0; i < 5; i++ { // five more, under a cap of two per address
+		last = e.wait(c.Code, ticket)
+		if last.status != 200 {
+			t.Fatalf("stream %d of one ticket = %d: a replaced stream still holds its slot", i+2, last.status)
+		}
+		last.want("waiting")
+	}
+	select {
+	case <-first.done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the first stream of the ticket stayed open after a newer one replaced it")
+	}
+}
+
+// Per client address, across the guests' and the owner's streams: past the
+// cap 429 with Retry-After; another address is not affected; a closed
+// stream frees its place.
+func TestStreamsPerAddressAreCapped(t *testing.T) {
+	e := newEnv(t)
+	e.server.SetStreamCapsForTest(3, 100)
+	c := e.meeting(ada)
+	var open []*stream
+	for i := 0; i < 3; i++ {
+		tk := e.knock(c.Code, fmt.Sprintf("Guest %d", i))
+		s := e.open("POST", "/j/"+c.Code+"/wait", "", map[string]string{"ticket": tk}, "X-Forwarded-For", "198.51.100.40")
+		if s.status != 200 {
+			t.Fatalf("stream %d from one address = %d", i+1, s.status)
+		}
+		open = append(open, s)
+	}
+	owner := e.open("GET", "/api/meetings/"+c.ID+"/events", c.Sess, nil, "X-Forwarded-For", "198.51.100.40")
+	if owner.status != 429 {
+		t.Fatalf("the 4th stream from one address (the owner's) = %d, want 429", owner.status)
+	}
+	if other := e.open("GET", "/api/meetings/"+c.ID+"/events", c.Sess, nil, "X-Forwarded-For", "203.0.113.41"); other.status != 200 {
+		t.Fatalf("a stream from another address = %d, want 200", other.status)
+	}
+	open[0].cancel()
+	<-open[0].done
+	eventually(t, 5*time.Second, "a closed stream frees its place", func() bool {
+		s := e.open("GET", "/api/meetings/"+c.ID+"/events", c.Sess, nil, "X-Forwarded-For", "198.51.100.40")
+		s.cancel()
+		return s.status == 200
+	})
+}
+
+// In all: past MaxStreams every address gets 429.
+func TestStreamsAreCappedInAll(t *testing.T) {
+	e := newEnv(t)
+	e.server.SetStreamCapsForTest(100, 3)
+	c := e.meeting(ada)
+	for i := 0; i < 3; i++ {
+		if s := e.open("GET", "/api/meetings/"+c.ID+"/events", c.Sess, nil, "X-Forwarded-For", fmt.Sprintf("198.51.100.%d", 50+i)); s.status != 200 {
+			t.Fatalf("stream %d = %d", i+1, s.status)
+		}
+	}
+	if s := e.open("GET", "/api/meetings/"+c.ID+"/events", c.Sess, nil, "X-Forwarded-For", "203.0.113.60"); s.status != 429 {
+		t.Fatalf("the 4th stream in all, from a fresh address = %d, want 429", s.status)
+	}
+}
+
+// ---- 🔴 X-Forwarded-For with no trusted proxy ----
+
+// A proxy nobody declared: warned once, loudly, and /healthz says so; the
+// header is not believed.
+func TestXForwardedForWithoutTrustedProxiesIsWarnedOnce(t *testing.T) {
+	e := newEnv(t)
+	e.server.SetTrustedProxiesForTest(nil)
+	health := func() string {
+		resp, err := http.Get(e.internal.URL + "/healthz")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return string(b)
+	}
+	c := e.meeting(ada)
+	e.do("POST", "/j/"+c.Code+"/knock", "", map[string]any{"name": grace, "notice": bothOn}) // no header: no warning (the control)
+	if strings.Contains(e.log.String(), "WARNING") || strings.Contains(health(), "warning") {
+		t.Fatal("a warning with no X-Forwarded-For seen")
+	}
+	for i := 0; i < 3; i++ {
+		e.knockFrom(c.Code, fmt.Sprintf("Guest %d", i), bothOn, "198.51.100.70")
+	}
+	if n := strings.Count(e.log.String(), "WARNING: a request carried X-Forwarded-For but MEETINGS_TRUSTED_PROXIES is unset"); n != 1 {
+		t.Fatalf("the warning was logged %d times, want once", n)
+	}
+	if h := health(); !strings.Contains(h, "ok\nwarning: a request carried X-Forwarded-For") {
+		t.Fatalf("/healthz = %q: want ok and the warning", h)
+	}
+	// Not believed: all of them count against the peer, so the limit binds
+	// at 10 whatever the header says.
+	for i := 0; i < 10; i++ {
+		e.knockFrom(c.Code, fmt.Sprintf("Spread %d", i), bothOn, fmt.Sprintf("203.0.113.%d", 100+i))
+	}
+	if resp, _ := e.knockFrom(c.Code, "Spread 11", bothOn, "203.0.113.200"); resp.StatusCode != 429 {
+		t.Fatalf("with no trusted proxy, a forged X-Forwarded-For got past the per-address limit: %d", resp.StatusCode)
+	}
+}
+
+// 🔴 "2 → 1 → 2 pushes again": the last pushed count follows the count
+// down, so a rise after a fall is a rise.
+func TestAKnockCountThatFallsAndRisesIsPushedAgain(t *testing.T) {
+	e := newEnv(t)
+	c := e.meeting(ada)
+	pushes := func() []mustertest.Push {
+		e.server.SettleKnocksForTest(t)
+		return e.fake.Pushes()
+	}
+	e.knock(c.Code, grace)
+	if p := pushes(); len(p) != 1 {
+		t.Fatalf("after the first knock: %+v", p)
+	}
+	e.clock.Add(31 * time.Second)
+	e.knockFrom(c.Code, linus, bothOn, "203.0.113.2")
+	if p := pushes(); len(p) != 2 || p[1].Count != 2 {
+		t.Fatalf("after two knocks: %+v", p)
+	}
+	e.clock.Add(31 * time.Second)
+	e.do("POST", "/api/meetings/"+c.ID+"/lobby/"+e.pid(c, linus)+"/deny", c.Sess, nil)
+	if p := pushes(); len(p) != 2 {
+		t.Fatalf("a fall pushed: %+v", p)
+	}
+	e.clock.Add(31 * time.Second)
+	e.knockFrom(c.Code, "Ines W.", bothOn, "203.0.113.3")
+	if p := pushes(); len(p) != 3 || p[2].Kind != "knock" || p[2].Count != 2 {
+		t.Fatalf("2 → 1 → 2 did not push again: %+v", p)
 	}
 }
 
@@ -890,6 +1077,10 @@ func TestTheKnockIsPushedOnlyWhileTheOwnerIsNotLooking(t *testing.T) {
 	}
 	s.cancel()
 	<-s.done
+	// The client has stopped reading; the server's handler unregisters the
+	// owner from the hub when it returns, a moment later. Wait for THAT, or
+	// the next knock can still see the owner watching.
+	eventually(t, 5*time.Second, "the server no longer counts the owner as watching", func() bool { return !e.server.OwnerWatchingForTest(c.ID) })
 	// The owner looks away; a new knock raises the count past what was sent.
 	e.clock.Add(31 * time.Second)
 	e.knockFrom(c.Code, "Omar K.", bothOn, "203.0.113.5")

@@ -20,7 +20,8 @@ import (
 //	GET  /j/{code}          the guest page; 410 once the meeting has ended or is 24 h old
 //	POST /j/{code}/knock    {"name", "notice": {"record", "ai"}} → 201 {"ticket", "notice"}
 //	POST /j/{code}/wait     {"ticket"} → an event stream ending in admitted, denied or ended
-//	POST /j/{code}/events   {"ticket"} → an admitted guest's event stream: the notice, removed, ended
+//	POST /j/{code}/events   {"ticket"} → an admitted guest's event stream: a fresh token, the notice, removed, ended
+//	POST /j/{code}/leave    {"ticket"} → the guest leaves; their ticket is spent
 
 // The guest page's sentences.
 const (
@@ -117,7 +118,7 @@ func (s *Server) handleKnock(w http.ResponseWriter, r *http.Request) {
 		guestErr(w, http.StatusBadRequest, lobby.ErrName.Error())
 		return
 	}
-	if !s.limiter.Allow(lobby.ClientAddr(r, s.cfg.TrustedProxies), now) {
+	if !s.limiter.Allow(s.clientAddr(r), now) {
 		w.Header().Set("Retry-After", "600")
 		guestErr(w, http.StatusTooManyRequests, GuestTooMany)
 		return
@@ -209,12 +210,17 @@ func (s *Server) handleWait(w http.ResponseWriter, r *http.Request) {
 		guestErr(w, http.StatusForbidden, GuestRemoved)
 		return
 	}
+	ctx, release, ok := s.acquireStream(w, r, g.ParticipantID)
+	if !ok {
+		return
+	}
+	defer release()
 	f, ok := sseStart(w)
 	if !ok {
 		return
 	}
 	var lastNotice string
-	s.stream(r.Context(), w, f, g.MeetingID, false, func() (bool, error) {
+	s.stream(ctx, w, f, g.MeetingID, false, func() (bool, error) {
 		cur, err := s.store.GuestByParticipant(r.Context(), g.ParticipantID, s.cfg.Now())
 		if err != nil {
 			return true, err
@@ -261,12 +267,18 @@ func (s *Server) handleGuestEvents(w http.ResponseWriter, r *http.Request) {
 		guestErr(w, http.StatusForbidden, GuestRemoved)
 		return
 	}
+	ctx, release, ok := s.acquireStream(w, r, g.ParticipantID)
+	if !ok {
+		return
+	}
+	defer release()
 	f, ok := sseStart(w)
 	if !ok {
 		return
 	}
 	var last string
-	s.stream(r.Context(), w, f, g.MeetingID, false, func() (bool, error) {
+	minted := false
+	s.stream(ctx, w, f, g.MeetingID, false, func() (bool, error) {
 		cur, err := s.store.GuestByParticipant(r.Context(), g.ParticipantID, s.cfg.Now())
 		if err != nil {
 			return true, err
@@ -277,6 +289,22 @@ func (s *Server) handleGuestEvents(w http.ResponseWriter, r *http.Request) {
 		if cur.State != store.StAdmitted {
 			return true, sse(w, f, "removed", map[string]any{"message": GuestRemoved})
 		}
+		// A fresh token at the start of every stream: an admitted guest whose
+		// connection dropped opens /events again (the page's Retry) and
+		// reconnects without knocking. guestToken asks the admission
+		// predicate, so only a still-admitted guest gets one.
+		if !minted {
+			minted = true
+			tok, ok, err := s.guestToken(r.Context(), cur)
+			if err != nil {
+				return true, err
+			}
+			if ok {
+				if err := sse(w, f, "token", tok); err != nil {
+					return true, err
+				}
+			}
+		}
 		snap := map[string]any{"notice": lobby.NoticeFor(cur.Notice.Record, cur.Notice.AI)}
 		if b, _ := json.Marshal(snap); string(b) != last {
 			last = string(b)
@@ -284,4 +312,29 @@ func (s *Server) handleGuestEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		return false, nil
 	})
+}
+
+// handleLeave is the guest's own Leave: an admitted guest becomes left, is
+// dropped from the room, and their ticket is spent (they knock to come back).
+// Only this, a removal, or the meeting's end ends an admission: a connection
+// that drops (LiveKit's participant_left) does not, so a guest whose network
+// blinked reconnects with a fresh token from /events.
+func (s *Server) handleLeave(w http.ResponseWriter, r *http.Request) {
+	g, ok := s.ticketOf(w, r)
+	if !ok {
+		return
+	}
+	if g.State != store.StAdmitted {
+		guestErr(w, http.StatusConflict, GuestRemoved)
+		return
+	}
+	if _, _, err := s.store.MarkLeft(r.Context(), g.Room, g.Identity, s.cfg.Now()); err != nil {
+		s.guestMeetingErr(w, err)
+		return
+	}
+	if err := s.cfg.LiveKit.RemoveParticipant(r.Context(), g.Room, g.Identity); err != nil {
+		s.cfg.Log.Printf("leave: LiveKit: %v (the reconcile loop retries)", err)
+	}
+	s.hub.Changed(g.MeetingID)
+	w.WriteHeader(http.StatusNoContent)
 }

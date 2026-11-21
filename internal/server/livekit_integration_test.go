@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/ZacxDev/muster-meetings/internal/livekit"
+	"github.com/ZacxDev/muster-meetings/internal/store"
 )
 
 // The integration test runs the plugin against a REAL livekit-server (design:
@@ -166,15 +167,20 @@ logging:
 	// join connects identity to room with LiveKit's CLI: a real participant.
 	// The CLI mints its own token with the API secret, so this is a client
 	// holding a valid credential, whatever the plugin's state says.
-	join := func(room, identity string) *syncBuffer {
+	type joined struct {
+		out *syncBuffer
+		cmd *exec.Cmd
+	}
+	joinCmd := func(room, identity string) joined {
 		out := &syncBuffer{}
 		cmd := exec.Command(cliBin, "room", "join", "--identity", identity, room)
 		cmd.Env = append(os.Environ(), "LIVEKIT_URL="+ws, "LIVEKIT_API_KEY="+keys.Key, "LIVEKIT_API_SECRET="+keys.Secret, "LK_NO_SKILLS_PROMPT=1")
 		cmd.Stdout, cmd.Stderr = out, out
 		started(t, cmd)
 		go cmd.Wait()
-		return out
+		return joined{out, cmd}
 	}
+	join := func(room, identity string) *syncBuffer { return joinCmd(room, identity).out }
 
 	// New meeting makes the room in the real server, with the design's settings.
 	c := e.meeting(ada)
@@ -214,7 +220,8 @@ logging:
 	ltok := admittedToken(t, e.wait(c.Code, lt))
 	gid, lid := gtok["identity"], ltok["identity"]
 	join(c.Room, gid)
-	linusOut := join(c.Room, lid)
+	linus := joinCmd(c.Room, lid)
+	linusOut := linus.out
 	eventually(t, 10*time.Second, "both admitted guests are in the room", func() bool {
 		in := inRoom(c.Room)
 		return slices.Contains(in, gid) && slices.Contains(in, lid)
@@ -247,6 +254,33 @@ logging:
 	}
 	if strings.Contains(linusOut.String(), "PARTICIPANT_REMOVED") {
 		t.Fatal("Linus, admitted, was removed")
+	}
+
+	// 🔴 An admitted guest whose connection drops reconnects and is NOT
+	// removed (design: "an admitted control guest who reconnects is not"):
+	// the real participant_left arrives, and changes nothing.
+	linus.cmd.Process.Kill()
+	eventually(t, 30*time.Second, "the dropped guest leaves the real room (participant_left)", func() bool { return !slices.Contains(inRoom(c.Room), lid) })
+	back := join(c.Room, lid)
+	eventually(t, 10*time.Second, "the admitted guest reconnects", func() bool { return slices.Contains(inRoom(c.Room), lid) })
+	time.Sleep(2 * time.Second)
+	if !slices.Contains(inRoom(c.Room), lid) || strings.Contains(back.String(), "PARTICIPANT_REMOVED") {
+		t.Fatalf("the admitted guest who reconnected was removed: room %v", inRoom(c.Room))
+	}
+	linusOut = back
+
+	// Two "owner" connections (the owner opened the meeting on a second
+	// device): the newer join wins (LiveKit's DUPLICATE_IDENTITY to the
+	// older), and the plugin removes neither.
+	first := join(c.Room, store.OwnerIdentity)
+	eventually(t, 10*time.Second, "the owner's first device joins", func() bool { return slices.Contains(inRoom(c.Room), store.OwnerIdentity) })
+	second := join(c.Room, store.OwnerIdentity)
+	eventually(t, 10*time.Second, "the older owner connection is replaced (DUPLICATE_IDENTITY)", func() bool {
+		return strings.Contains(first.String(), "DUPLICATE_IDENTITY")
+	})
+	time.Sleep(2 * time.Second)
+	if !slices.Contains(inRoom(c.Room), store.OwnerIdentity) || strings.Contains(second.String(), "PARTICIPANT_REMOVED") || strings.Contains(second.String(), "disconnected from room") {
+		t.Fatalf("the owner's newer device did not stay: room %v\n%s", inRoom(c.Room), second.String())
 	}
 
 	// End meeting deletes the real room, which disconnects Linus.

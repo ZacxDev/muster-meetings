@@ -147,6 +147,11 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		if err != nil {
 			return Config{}, fmt.Errorf("MEETINGS_TRUSTED_PROXIES: %q is not a CIDR such as 10.0.0.0/8", v)
 		}
+		// Trusting every address would let any client name itself in
+		// X-Forwarded-For and walk past the knock and stream limits.
+		if p.Bits() == 0 {
+			return Config{}, fmt.Errorf("MEETINGS_TRUSTED_PROXIES: %q trusts every address; list only the ingress's own CIDRs", v)
+		}
 		c.TrustedProxies = append(c.TrustedProxies, p.Masked())
 	}
 	return c, nil

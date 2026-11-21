@@ -37,6 +37,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/ZacxDev/muster-meetings/internal/livekit"
@@ -91,6 +92,11 @@ type Config struct {
 	// Heartbeat is how often an idle event stream sends a comment, so
 	// proxies keep it open; default 15 s.
 	Heartbeat time.Duration
+	// StreamsPerAddress and MaxStreams cap the open event streams per client
+	// address and in all (streams.go); defaults DefaultStreamsPerAddress and
+	// DefaultMaxStreams.
+	StreamsPerAddress int
+	MaxStreams        int
 }
 
 // Server is the plugin's public handler.
@@ -105,6 +111,10 @@ type Server struct {
 	// rtcOrigins is the LiveKit signalling origin and its https twin, for
 	// connect-src.
 	rtcOrigins string
+	streams    *streamReg
+	// xffUntrusted: a request carried X-Forwarded-For with no trusted
+	// proxies configured (clientAddr).
+	xffUntrusted atomic.Bool
 }
 
 // New builds the handler.
@@ -121,6 +131,12 @@ func New(cfg Config, st *store.Store, app *owners.App) *Server {
 	if cfg.Heartbeat <= 0 {
 		cfg.Heartbeat = 15 * time.Second
 	}
+	if cfg.StreamsPerAddress <= 0 {
+		cfg.StreamsPerAddress = DefaultStreamsPerAddress
+	}
+	if cfg.MaxStreams <= 0 {
+		cfg.MaxStreams = DefaultMaxStreams
+	}
 	if cfg.ICE == "" {
 		cfg.ICE = "relay"
 	}
@@ -128,7 +144,7 @@ func New(cfg Config, st *store.Store, app *owners.App) *Server {
 		cfg.Log = log.New(io.Discard, "", 0)
 	}
 	s := &Server{cfg: cfg, store: st, app: app, mux: http.NewServeMux(), hub: lobby.NewHub(), limiter: lobby.NewLimiter(),
-		rtcOrigins: RTCOrigins(cfg.LiveKitURL)}
+		rtcOrigins: RTCOrigins(cfg.LiveKitURL), streams: newStreamReg()}
 	s.knocker = lobby.NewKnocker(app.Client, s.hub, st.LobbyCount, cfg.Log, cfg.Now)
 	static, err := fs.Sub(webFS, "web/static")
 	if err != nil {
@@ -151,6 +167,7 @@ func New(cfg Config, st *store.Store, app *owners.App) *Server {
 	s.mux.HandleFunc("POST /j/{code}/knock", s.handleKnock)
 	s.mux.HandleFunc("POST /j/{code}/wait", s.handleWait)
 	s.mux.HandleFunc("POST /j/{code}/events", s.handleGuestEvents)
+	s.mux.HandleFunc("POST /j/{code}/leave", s.handleLeave)
 	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
 	})
@@ -604,6 +621,9 @@ func (s *Server) Internal() http.Handler {
 			return
 		}
 		io.WriteString(w, "ok\n")
+		if s.xffUntrusted.Load() {
+			io.WriteString(w, "warning: "+XFFWarning+"\n")
+		}
 	})
 	return mux
 }

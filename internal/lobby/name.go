@@ -16,7 +16,7 @@ const MaxNameRunes = 40
 
 // ErrName is a guest name that cannot be shown. Its text is what the guest
 // page says.
-var ErrName = errors.New("Type a name of 1 to 40 characters, without control or text-direction characters.")
+var ErrName = errors.New("Type a name of 1 to 40 characters that shows something, without control or text-direction characters.")
 
 // CleanName checks a guest's typed name and returns it trimmed: valid UTF-8,
 // trimmed of white space, 1 to MaxNameRunes characters, and no control
@@ -37,7 +37,9 @@ func CleanName(s string) (string, error) {
 	if n < 1 || n > MaxNameRunes {
 		return "", ErrName
 	}
+	seen := false
 	for _, r := range s {
+		seen = seen || visible(r)
 		switch {
 		case unicode.Is(unicode.Cc, r), unicode.Is(unicode.Zl, r), unicode.Is(unicode.Zp, r):
 			return "", ErrName
@@ -45,5 +47,27 @@ func CleanName(s string) (string, error) {
 			return "", ErrName
 		}
 	}
+	if !seen {
+		return "", ErrName
+	}
 	return s, nil
+}
+
+// visible says r draws something by itself: a graphic character that is not
+// white space, not a combining mark (a mark needs a visible base, and only
+// the base counts), not a format character, not default-ignorable (the
+// Hangul fillers U+115F, U+1160, U+3164 and U+FFA0, the combining grapheme
+// joiner, the variation selectors), and not the blank Braille pattern
+// U+2800. A name must hold at least one, so a name of only joiners, fillers,
+// blanks or marks, which shows as nothing in the owner's lobby, is refused.
+func visible(r rune) bool {
+	switch {
+	case !unicode.IsGraphic(r), unicode.IsSpace(r), r == '\u2800':
+		return false
+	case unicode.In(r, unicode.Mn, unicode.Mc, unicode.Me, unicode.Cf, unicode.Zs):
+		return false
+	case unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r), unicode.Is(unicode.Variation_Selector, r):
+		return false
+	}
+	return true
 }

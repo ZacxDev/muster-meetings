@@ -105,6 +105,20 @@ test('at 390×844 a guest knocks, the lobby row shows their name as text, and Ad
   await expect(guest.locator('#badge')).toHaveText('Recording · Transcribing · AI');
   // The owner's row moved from waiting to in the call.
   await expect(app.locator('.lobby-row.admitted .who')).toHaveText(`${typed} (guest)`);
+
+  // The fake LiveKit carries no media, so the guest's connection fails:
+  // "Can't connect media" with Retry (design: "Failure modes"). Retry gets a
+  // fresh guest token from /events and connects again, with no new knock.
+  await expect(guest.locator('#btn-retry')).toBeVisible({ timeout: 30_000 });
+  await expect(guest.locator('#call-status')).toContainText("Can't connect media");
+  const beforeRetry = (await joins(browser)).filter((j) => j.Claims.sub?.startsWith('guest-')).length;
+  await guest.locator('#btn-retry').click();
+  await expect.poll(async () => (await joins(browser)).filter((j) => j.Claims.sub?.startsWith('guest-')).length, { timeout: 15_000 }).toBeGreaterThan(beforeRetry);
+  const after = (await joins(browser)).filter((j) => j.Claims.sub?.startsWith('guest-'));
+  expect(new Set(after.map((j) => j.Claims.sub)).size).toBe(1); // the same identity: no new knock
+  await expect(guest.locator('#guest')).toHaveAttribute('data-state', 'admitted');
+  await expect(app.locator('.lobby-row')).toHaveCount(1);
+  await expect(app.locator('.lobby-row.waiting')).toHaveCount(0);
   await guestCtx.close();
   await owner.close();
 });

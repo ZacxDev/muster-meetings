@@ -288,12 +288,17 @@ func (s *Server) handleOwnerEvents(w http.ResponseWriter, r *http.Request, repo 
 		s.meetingErr(w, err)
 		return
 	}
+	ctx, release, ok := s.acquireStream(w, r, "")
+	if !ok {
+		return
+	}
+	defer release()
 	f, ok := sseStart(w)
 	if !ok {
 		return
 	}
 	var last []byte
-	s.stream(r.Context(), w, f, id, true, func() (bool, error) {
+	s.stream(ctx, w, f, id, true, func() (bool, error) {
 		// 🔴 The session is checked again before every send, not only when
 		// the stream opened: an expired grant deletes the owner's sessions
 		// and keeps the meeting running, and a stream opened before that must

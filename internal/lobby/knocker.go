@@ -139,6 +139,11 @@ func (k *Knocker) decide(ctx context.Context, id string) {
 			k.mu.Unlock()
 		}
 	}()
+	// The count fell (a guest admitted or denied): what is pushed now is
+	// measured from here, so a later rise (2 → 1 → 2) is pushed again.
+	if waiting > 0 && waiting < s.sent {
+		s.sent = waiting
+	}
 	switch {
 	case waiting == 0:
 		// The lobby emptied (everyone admitted or denied, or the meeting

@@ -15,6 +15,10 @@
 //	GET /apps/<id>[?code=…]    muster's page: frames /enter with that code, or a fresh one
 //	GET /livekit-joins         every token a browser presented to the fake LiveKit, verified
 //
+// With -livekit=real it starts a real livekit-server instead (the binary in
+// MEETINGS_LIVEKIT_SERVER, or on PATH) and says "real_livekit": true; with
+// no binary it says false and the spec that needs one decides.
+//
 // LiveKit is a fake (internal/livekittest): rooms and participants over its
 // server API, and a signalling endpoint that records, verified, the token a
 // browser connects with and refuses the connection (it carries no media).
@@ -23,6 +27,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
 	"html"
 	"io"
@@ -31,9 +37,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -51,7 +59,10 @@ var (
 	ada = mustertest.Person{ID: 4093716825, Email: "ada.lovelace@example.test", DisplayName: "Ada L."}
 )
 
+var lkMode = flag.String("livekit", "fake", "fake, or real (a livekit-server binary)")
+
 func main() {
+	flag.Parse()
 	logger := log.New(os.Stderr, "e2e-harness: ", 0)
 	if err := run(logger); err != nil {
 		logger.Fatal(err)
@@ -100,22 +111,32 @@ func run(logger *log.Logger) error {
 	}
 	lk := livekittest.New()
 	defer lk.Close()
-	lkc, err := livekit.NewClient(lk.URL, livekittest.Keys)
+	lkAPI, lkWS, lkKeys := lk.URL, lk.WSURL(), livekittest.Keys
+	internalLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return err
+	}
+	real := false
+	if *lkMode == "real" {
+		if api, stop, err := startLiveKit(logger, "http://"+internalLn.Addr().String()); err != nil {
+			logger.Printf("no real LiveKit: %v", err)
+		} else {
+			defer stop()
+			real, lkAPI, lkWS, lkKeys = true, api, "ws"+strings.TrimPrefix(api, "http"), realKeys
+		}
+	}
+	lkc, err := livekit.NewClient(lkAPI, lkKeys)
 	if err != nil {
 		return err
 	}
 	srv := server.New(server.Config{PublicURL: pluginURL, MusterOrigin: parentOrigin, Log: logger,
-		LiveKit: lkc, LiveKitURL: lk.WSURL(), ICE: "all"}, st, a)
+		LiveKit: lkc, LiveKitURL: lkWS, ICE: "all"}, st, a)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go srv.Run(ctx)
 	plugin := &http.Server{Handler: srv}
 	go plugin.Serve(pluginLn)
 	internal := &http.Server{Handler: srv.Internal()}
-	internalLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return err
-	}
 	go internal.Serve(internalLn)
 
 	mux := http.NewServeMux()
@@ -132,7 +153,8 @@ func run(logger *log.Logger) error {
 	mux.HandleFunc("GET /apps/{id}", func(w http.ResponseWriter, r *http.Request) {
 		code := r.URL.Query().Get("code")
 		if code == "" {
-			code = fake.MintApp(app.PluginID, ada.ID, "")
+			// ?ref= as muster passes it from a knock notification's tap.
+			code = fake.MintApp(app.PluginID, ada.ID, r.URL.Query().Get("ref"))
 		}
 		src := pluginURL + "/enter?muster_code=" + url.QueryEscape(code) + "&muster_plugin=" + strconv.FormatInt(app.PluginID, 10)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -148,7 +170,7 @@ func run(logger *log.Logger) error {
 	parent := &http.Server{Handler: mux}
 	go parent.Serve(parentLn)
 
-	b, _ := json.Marshal(map[string]any{"plugin": pluginURL, "parent": parentOrigin, "plugin_id": app.PluginID})
+	b, _ := json.Marshal(map[string]any{"plugin": pluginURL, "parent": parentOrigin, "plugin_id": app.PluginID, "real_livekit": real})
 	fmt.Println(string(b))
 
 	done := make(chan struct{})
@@ -165,4 +187,82 @@ func run(logger *log.Logger) error {
 	parent.Shutdown(sctx)
 	internal.Shutdown(sctx)
 	return nil
+}
+
+var realKeys = livekit.Keys{Key: "APIe2eharness", Secret: "an-e2e-harness-livekit-secret-0123456789"}
+
+// startLiveKit runs livekit-server on free loopback ports, its webhook
+// pointed at the plugin's internal listener, and waits until it answers.
+func startLiveKit(logger *log.Logger, internalURL string) (string, func(), error) {
+	bin := os.Getenv("MEETINGS_LIVEKIT_SERVER")
+	if bin == "" {
+		bin, _ = exec.LookPath("livekit-server")
+	}
+	if bin == "" {
+		return "", nil, errors.New("livekit-server not found (MEETINGS_LIVEKIT_SERVER or PATH)")
+	}
+	free := func(network string) int {
+		if network == "udp" {
+			c, _ := net.ListenPacket("udp", "127.0.0.1:0")
+			defer c.Close()
+			return c.LocalAddr().(*net.UDPAddr).Port
+		}
+		l, _ := net.Listen("tcp", "127.0.0.1:0")
+		defer l.Close()
+		return l.Addr().(*net.TCPAddr).Port
+	}
+	port := free("tcp")
+	dir, err := os.MkdirTemp("", "meetings-e2e-livekit-")
+	if err != nil {
+		return "", nil, err
+	}
+	// The media address LiveKit advertises: the host's own address, not
+	// 127.0.0.1. Chromium does not reach a loopback ICE candidate on every
+	// host (measured on the CI runner: signalling connected, then "could not
+	// establish pc connection"), while LiveKit's CLI (pion) does.
+	nodeIP := hostIP()
+	cfg := fmt.Sprintf("port: %d\nbind_addresses: [\"127.0.0.1\"]\nrtc:\n  tcp_port: %d\n  udp_port: %d\n  use_external_ip: false\n  node_ip: %s\nkeys:\n  %s: %s\nwebhook:\n  api_key: %s\n  urls: [\"%s/livekit/webhook\"]\n",
+		port, free("tcp"), free("udp"), nodeIP, realKeys.Key, realKeys.Secret, realKeys.Key, internalURL)
+	path := filepath.Join(dir, "livekit.yaml")
+	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
+		return "", nil, err
+	}
+	cmd := exec.Command(bin, "--config", path)
+	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+	if err := cmd.Start(); err != nil {
+		return "", nil, err
+	}
+	stop := func() { cmd.Process.Kill(); cmd.Wait(); os.RemoveAll(dir) }
+	api := "http://127.0.0.1:" + strconv.Itoa(port)
+	for end := time.Now().Add(20 * time.Second); ; {
+		if resp, err := http.Get(api); err == nil {
+			resp.Body.Close()
+			break
+		}
+		if time.Now().After(end) {
+			stop()
+			return "", nil, errors.New("livekit-server did not answer in 20 s")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	logger.Printf("real livekit-server on %s (media on %s)", api, nodeIP)
+	return api, stop, nil
+}
+
+// hostIP is the first IPv4 address of an interface that is up and not
+// loopback, or 127.0.0.1 when there is none.
+func hostIP() string {
+	ifs, _ := net.Interfaces()
+	for _, i := range ifs {
+		if i.Flags&net.FlagUp == 0 || i.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, _ := i.Addrs()
+		for _, a := range addrs {
+			if n, ok := a.(*net.IPNet); ok && n.IP.To4() != nil && !n.IP.IsLinkLocalUnicast() {
+				return n.IP.String()
+			}
+		}
+	}
+	return "127.0.0.1"
 }

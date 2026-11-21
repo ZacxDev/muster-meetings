@@ -22,6 +22,8 @@ func TestCleanNameTrimsAndRefusesControlAndBidiCharacters(t *testing.T) {
 		"Ada \U0001F469\u200D\U0001F4BB": "Ada \U0001F469\u200D\U0001F4BB", // the zero-width joiner inside an emoji sequence is allowed
 		"<img src=x onerror=1>":          "<img src=x onerror=1>",          // markup is just text: every page renders it as text
 		"李小龙":                            "李小龙",
+		"e\u0301":                        "e\u0301",   // a base and its combining mark
+		"\u3164Ada":                      "\u3164Ada", // one visible character is enough
 	} {
 		got, err := lobby.CleanName(in)
 		if err != nil || got != want {
@@ -44,6 +46,19 @@ func TestCleanNameTrimsAndRefusesControlAndBidiCharacters(t *testing.T) {
 		"ZERO WIDTH SPACE":       "Gr\u200Bace",
 		"LINE SEPARATOR":         "Grace\u2028H",
 		"invalid UTF-8":          "Grace\xff",
+		// Nothing visible (the audit's cases): blank in the owner's lobby.
+		"only zero-width joiners":           "\u200D\u200D\u200D",
+		"HANGUL FILLER U+3164":              "\u3164\u3164",
+		"HANGUL CHOSEONG FILLER U+115F":     "\u115F",
+		"HANGUL JUNGSEONG FILLER U+1160":    "\u1160",
+		"HALFWIDTH HANGUL FILLER U+FFA0":    "\uFFA0",
+		"BRAILLE PATTERN BLANK U+2800":      "\u2800\u2800\u2800",
+		"combining marks with no base":      "\u0301\u0308",
+		"a space then a combining mark":     " \u0301",
+		"COMBINING GRAPHEME JOINER":         "\u034F",
+		"a variation selector alone":        "\uFE0F",
+		"an ideographic space and a filler": "\u3000\u3164",
+		"fillers around a joiner":           "\u3164\u200D\u3164",
 	} {
 		if got, err := lobby.CleanName(in); err == nil {
 			t.Errorf("%s: CleanName(%q) = %q, want refused", name, in, got)
@@ -108,6 +123,9 @@ func TestClientAddr(t *testing.T) {
 		{"10.1.2.3:4000", "203.0.113.9", trusted, "203.0.113.9"},          // the ingress's word
 		{"10.1.2.3:4000", "6.6.6.6, 203.0.113.9", trusted, "203.0.113.9"}, // a forged left-most hop is not believed
 		{"10.1.2.3:4000", "203.0.113.9, 10.9.9.9", trusted, "203.0.113.9"},
+		// The right-most hop that is not a trusted proxy, never the left-most
+		// past an untrusted hop: 198.51.100.1 is the client's own claim.
+		{"10.1.2.3:4000", "198.51.100.1, 203.0.113.9, 10.9.9.9", trusted, "203.0.113.9"},
 		{"10.1.2.3:4000", "", trusted, "10.1.2.3"},
 		{"[2001:db8:1:2:3:4:5:6]:4000", "", nil, "2001:db8:1:2::"},
 	} {

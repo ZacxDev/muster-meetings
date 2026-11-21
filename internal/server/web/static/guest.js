@@ -69,32 +69,59 @@
     document.body.appendChild(m);
   }
 
+  // needToken: the page wants the next token /events sends (a Retry).
+  var needToken = false;
+
+  function connect(t) {
+    var r = $('btn-retry');
+    r.hidden = true;
+    MeetingsCall.join({ url: t.livekit_url, token: t.token, ice: t.ice, media: wantMedia, onStatus: callSay,
+      onGone: function () {
+        conn = null;
+        if (root.getAttribute('data-state') === 'admitted') { callSay('The call disconnected.'); r.hidden = false; }
+      } })
+      .then(function (c) { conn = c; }, function () { r.hidden = false; /* the status says "Can't connect media" */ });
+  }
+
+  var wantMedia = false;
   function onAdmitted(t) {
     state('admitted');
-    var media = !!preview;
+    wantMedia = !!preview;
     stopPreview();
     $('join-view').hidden = true;
     $('call-view').hidden = false;
     events();
-    MeetingsCall.join({ url: t.livekit_url, token: t.token, ice: t.ice, media: media, onStatus: callSay,
-      onGone: function () { if (root.getAttribute('data-state') === 'admitted') callSay('The call disconnected.'); } })
-      .then(function (c) { conn = c; }, function () { /* the status says so */ });
+    connect(t);
   }
 
-  // events follows the admitted guest's stream: the CURRENT notice (its
-  // badge), and the end or a removal.
+  // events follows the admitted guest's stream: a fresh token at its start
+  // (used on a Retry), the CURRENT notice (its badge), and the end or a
+  // removal.
   function events() {
+    if (abort) abort.abort();
     abort = new AbortController();
     post('/events', { ticket: ticket }, abort.signal).then(function (res) {
       if (res.status === 410) { finish('ended', 'This meeting has ended.'); return; }
       if (!res.ok) { finish('removed', 'You are no longer in this meeting.'); return; }
       return MeetingsCall.readEvents(res, function (name, data) {
-        if (name === 'meeting') MeetingsCall.showBadge(data.notice);
+        if (name === 'token') { if (needToken) { needToken = false; connect(data); } }
+        else if (name === 'meeting') MeetingsCall.showBadge(data.notice);
         else if (name === 'ended') finish('ended', 'This meeting has ended.');
         else if (name === 'removed') finish('removed', 'You are no longer in this meeting.');
       });
-    }).catch(function () { /* left, or the network: the call's own status says so */ });
+    }).catch(function () { /* left, replaced by a Retry, or the network: the call's own status says so */ });
   }
+
+  // Retry (design: "Can't connect media" with a retry): a fresh token from
+  // /events, and the call again, without knocking: the guest is still
+  // admitted until the owner removes them, they leave, or the meeting ends.
+  $('btn-retry').addEventListener('click', function () {
+    this.hidden = true;
+    if (conn) { conn.leave(); conn = null; }
+    callSay('Connecting…');
+    needToken = true;
+    events();
+  });
 
   function wait() {
     state('waiting');
@@ -139,5 +166,9 @@
     }).catch(function () { say('Could not reach the meeting. Try again.'); b.disabled = false; });
   });
 
-  $('btn-leave').addEventListener('click', function () { finish('left', 'You left the meeting.'); });
+  $('btn-leave').addEventListener('click', function () {
+    var t = ticket;
+    if (t) post('/leave', { ticket: t }).catch(function () { /* gone already */ });
+    finish('left', 'You left the meeting.');
+  });
 })();

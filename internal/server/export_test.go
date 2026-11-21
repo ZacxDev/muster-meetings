@@ -35,3 +35,6 @@ func (s *Server) SetStreamCapsForTest(perAddress, total int) {
 
 // SetTrustedProxiesForTest replaces the trusted proxies.
 func (s *Server) SetTrustedProxiesForTest(p []netip.Prefix) { s.cfg.TrustedProxies = p }
+
+// SetClientIPHeaderForTest sets the client-address header's name.
+func (s *Server) SetClientIPHeaderForTest(h string) { s.cfg.ClientIPHeader = h }

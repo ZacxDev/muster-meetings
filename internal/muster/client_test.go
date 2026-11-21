@@ -444,3 +444,44 @@ func TestKindForStatus(t *testing.T) {
 		}
 	}
 }
+
+// 🔴 Plain http to muster is allowed only where the call cannot leave the
+// host or the cluster: a loopback address, or a Kubernetes Service name
+// (`<svc>.<ns>.svc`, `<svc>.<ns>.svc.cluster.local`). Every other http
+// address, including names that merely contain ".svc", is refused, and https
+// is accepted everywhere.
+func TestCheckBaseURLAllowsHTTPOnlyInsideTheCluster(t *testing.T) {
+	for in, want := range map[string]string{
+		"http://muster-web.tenant-b.svc:8105":               "http://muster-web.tenant-b.svc:8105",
+		"http://muster-web.tenant-b.svc.cluster.local:8105": "http://muster-web.tenant-b.svc.cluster.local:8105",
+		"http://Muster-Web.Tenant-B.SVC":                    "http://Muster-Web.Tenant-B.SVC",
+		"https://muster-web.tenant-b.svc":                   "https://muster-web.tenant-b.svc",
+		"https://muster.example.test":                       "https://muster.example.test",
+	} {
+		got, err := muster.CheckBaseURL(in)
+		if err != nil || got != want {
+			t.Errorf("in-cluster: CheckBaseURL(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{
+		"http://muster.example.test",     // plain http over a network
+		"http://muster.svc.example.test", // .svc, but not at the end
+		"http://muster.tenant-b.svc.cluster.local.example.test",
+		"http://muster.tenant-b.svc.example.test.svc.evil.test",
+		"http://muster.tenant-b.cluster.local", // cluster.local without .svc
+		"http://muster-svc",                    // no dot
+		"http://mustersvc",                     // the suffix without its dot
+		"http://.svc",                          // no label before it
+		"http://muster..svc",                   // an empty label
+		"http://muster_web.tenant-b.svc",       // not a DNS label
+		"http://muster-web.tenant-b.svc.",      // a trailing dot
+		"http://192.0.2.10",                    // an address that is not loopback
+		"ws://muster-web.tenant-b.svc",         // the wrong scheme
+	} {
+		if got, err := muster.CheckBaseURL(bad); err == nil {
+			t.Errorf("not in-cluster: CheckBaseURL(%q) = %q, want a refusal", bad, got)
+		} else if !strings.Contains(err.Error(), "must be https://") {
+			t.Errorf("not in-cluster: CheckBaseURL(%q) refused for another reason: %v", bad, err)
+		}
+	}
+}

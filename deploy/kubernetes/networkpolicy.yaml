@@ -1,0 +1,97 @@
+# NetworkPolicies (design: "Deployment"), phase 2c's part. Both pods are
+# default-deny in both directions, then:
+#
+#   muster-meetings  in:  :8080 from the ingress controller's namespace
+#                         :8081 from LiveKit (the webhook) only
+#                    out: muster's pods (its API), LiveKit's API (:7880), DNS
+#   livekit          in:  :7880 and :5349 from anywhere: both are reached
+#                         through the NodePort (whose source is a node
+#                         address) and both authenticate every client (a
+#                         signed join token; TURN credentials from it)
+#                    out: the plugin's :8081 (the webhook), DNS
+#
+# The STT service, the object store and the internet (OpenRouter) join the
+# plugin's egress in the phases that use them; muster's own pods gain no
+# egress to any of these. muster's own NetworkPolicy, if it has one, must
+# admit the plugin's pods to its API port: that is muster's manifest, not
+# this one.
+#
+# PATCH TARGETS for the tenant: the ingress controller's namespace label
+# (`ingress-controller` below), muster's pod labels and port (8105 below), and
+# the DNS selector if the cluster's DNS pods are labelled differently.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: muster-meetings
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: muster-meetings
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-controller
+      ports:
+        - {protocol: TCP, port: 8080}
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: livekit
+      ports:
+        - {protocol: TCP, port: 8081}
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: muster
+      ports:
+        - {protocol: TCP, port: 8105}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: livekit
+      ports:
+        - {protocol: TCP, port: 7880}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: livekit
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: livekit
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports:
+        - {protocol: TCP, port: 7880}
+        - {protocol: TCP, port: 5349}
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: muster-meetings
+      ports:
+        - {protocol: TCP, port: 8081}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}

@@ -3,6 +3,7 @@ package livekit_test
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -86,7 +87,12 @@ func TestVerifyRefusesEveryOtherToken(t *testing.T) {
 	future, _ := keys.Sign(livekit.Claims{Issuer: keys.Key, NotBefore: t0.Add(time.Minute).Unix(), Expires: t0.Add(2 * time.Minute).Unix()})
 	noExp, _ := keys.Sign(livekit.Claims{Issuer: keys.Key})
 	none := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`)) + "." + part(good, 1) + "."
-	hs512 := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS512","typ":"JWT"}`)) + "." + part(good, 1) + "." + part(good, 2)
+	// A header that names another algorithm over a signature that IS the
+	// secret's HS256: only the algorithm check refuses it.
+	hs512Unsigned := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS512","typ":"JWT"}`)) + "." + part(good, 1)
+	mac := hmac.New(sha256.New, []byte(keys.Secret))
+	mac.Write([]byte(hs512Unsigned))
+	hs512 := hs512Unsigned + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 	tamperedBody := part(good, 0) + "." + base64.RawURLEncoding.EncodeToString([]byte(`{"iss":"APIk7q2","exp":9999999999}`)) + "." + part(good, 2)
 	for name, tok := range map[string]string{
 		"another secret": otherSecret, "another issuer": otherKey, "expired": expired, "not yet valid": future, "no expiry": noExp,

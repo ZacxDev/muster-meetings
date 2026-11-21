@@ -76,6 +76,11 @@ type mutant struct {
 	want string // a substring of the killing failure's message
 	// survive marks the no-op control: it must NOT be killed.
 	survive bool
+	// realLiveKit marks a mutant killed by the integration test against a
+	// real livekit-server: the sweep needs the binaries (and refuses to start
+	// without them, so it can never pass by skipping), and runs the test with
+	// MEETINGS_REQUIRE_LIVEKIT=1.
+	realLiveKit bool
 	// more are further replacements applied with this one, for a mutant
 	// that needs a few lines in several files (in order; each from must
 	// occur exactly once when it is applied).
@@ -350,7 +355,7 @@ var mutants = []mutant{
 		to:   "tok, _ := s.cfg.LiveKit.Keys().Mint(livekit.Participant{Identity: \"guest-\" + k.ParticipantID}, livekit.GuestGrant(store.RoomName(k.MeetingID)), now)\n\twriteJSON(w, http.StatusCreated, map[string]any{\"ticket\": k.Ticket, \"token\": tok})",
 		more: []edit{{guest, "\t\"github.com/ZacxDev/muster-meetings/internal/lobby\"\n", "\t\"github.com/ZacxDev/muster-meetings/internal/livekit\"\n\t\"github.com/ZacxDev/muster-meetings/internal/lobby\"\n"}},
 		pkg:  "./internal/server", test: "TestNoGuestTokenBeforeAdmissionAndItsGrantIsExact", want: "want 201 with the ticket and nothing else"},
-	{name: "lobby: the token gate skips the admission predicate", file: calls, from: "if err != nil || !ok {\n\t\treturn tokenAnswer{}, false, err", to: "if err != nil {\n\t\treturn tokenAnswer{}, false, err",
+	{name: "lobby: the token gate skips the admission predicate", file: calls, from: "if err != nil || !ok {\n\t\treturn tokenAnswer{}, false, err", to: "if err != nil || (!ok && false) {\n\t\treturn tokenAnswer{}, false, err",
 		pkg: "./internal/server", test: "TestNoGuestTokenBeforeAdmissionAndItsGrantIsExact", want: `no "waiting" event (the stream so far: "event: admitted`},
 	{name: "lobby: an event stream for a ticket that is not admitted", file: guest, from: `if g.State != store.StAdmitted || !g.MeetingLive {`, to: `if !g.MeetingLive {`,
 		pkg: "./internal/server", test: "TestADeniedGuestGetsNoToken", want: "a denied ticket's event stream = 200"},
@@ -398,7 +403,7 @@ var mutants = []mutant{
 		pkg: "./internal/server", test: "TestNoGuestTokenBeforeAdmissionAndItsGrantIsExact", want: "the guest's grant ="},
 
 	// ---- 🔴 removal: revoked and kicked ----
-	{name: "removal: LiveKit is not called", file: calls, from: "err := s.cfg.LiveKit.RemoveParticipant(r.Context(), mv.Room, mv.Identity)", to: "var err error",
+	{name: "removal: LiveKit is not called", file: calls, from: "err := s.cfg.LiveKit.RemoveParticipant(r.Context(), mv.Room, mv.Identity)", to: "err := error(nil)\n\t\t\t_ = mv",
 		pkg: "./internal/server", test: "TestARemovedGuestIsRevokedKickedAndKeptOut", want: "after the removal the room holds"},
 	{name: "removal: the identity is not revoked", file: parts, from: "EvRemove: {[]string{StAdmitted}, StRemoved},", to: "EvRemove: {[]string{StAdmitted}, StAdmitted},",
 		pkg: "./internal/server", test: "TestARemovedGuestIsRevokedKickedAndKeptOut", want: `no "removed" event`},
@@ -406,15 +411,17 @@ var mutants = []mutant{
 		pkg: "./internal/server", test: "TestARemovedGuestIsRevokedKickedAndKeptOut", want: "the removed ticket's /wait = 200"},
 	{name: "rejoin: the participant_joined check is removed", file: machine, from: "\t\ts.admitOrRemove(ctx, room, ev.Participant.Identity)\n", to: "\t\t_ = 0\n",
 		pkg: "./internal/server", test: "TestARemovedGuestIsRevokedKickedAndKeptOut", want: "is back in the LiveKit room after rejoining with the old token"},
-	{name: "rejoin: anyone joining is removed (control)", file: machine, from: "\tif ok {\n\t\treturn\n\t}\n\tif err := s.cfg.LiveKit.RemoveParticipant", to: "\tif false {\n\t\treturn\n\t}\n\tif err := s.cfg.LiveKit.RemoveParticipant",
+	{name: "rejoin (real LiveKit): the participant_joined check is removed", file: machine, from: "\t\ts.admitOrRemove(ctx, room, ev.Participant.Identity)\n", to: "\t\t_ = 0\n", realLiveKit: true,
+		pkg: "./internal/server", test: "TestAgainstARealLiveKitServer", want: "the rejoining removed guest is disconnected by the plugin (PARTICIPANT_REMOVED)"},
+	{name: "rejoin: anyone joining is removed (control)", file: machine, from: "\tif ok {\n\t\treturn\n\t}\n\tif err := s.cfg.LiveKit.RemoveParticipant", to: "\tif ok && false {\n\t\treturn\n\t}\n\tif err := s.cfg.LiveKit.RemoveParticipant",
 		pkg: "./internal/server", test: "TestARemovedGuestIsRevokedKickedAndKeptOut", want: "an admitted guest's join was removed (the positive control)"},
 
 	// ---- 🔴 the webhook ----
-	{name: "webhook: the body hash is not compared", file: lkHook, from: "if subtle.ConstantTimeCompare(got[:], want) != 1 {", to: "if false {",
+	{name: "webhook: the body hash is not compared", file: lkHook, from: "if subtle.ConstantTimeCompare(got[:], want) != 1 {", to: "if subtle.ConstantTimeCompare(got[:], want) != 1 && false {",
 		pkg: "./internal/server", test: "TestTheWebhookActsOnlyOnAVerifiedRequest", want: "a tampered body: 200"},
-	{name: "webhook: the signature is not compared", file: lkToken, from: "if subtle.ConstantTimeCompare(m.Sum(nil), sig) != 1 {", to: "if false {",
+	{name: "webhook: the signature is not compared", file: lkToken, from: "if subtle.ConstantTimeCompare(m.Sum(nil), sig) != 1 {", to: "if subtle.ConstantTimeCompare(m.Sum(nil), sig) != 1 && false {",
 		pkg: "./internal/server", test: "TestTheWebhookActsOnlyOnAVerifiedRequest", want: "a wrong secret: 200"},
-	{name: "webhook: the handler ignores the verification", file: machine, from: "if err != nil {\n\t\ts.cfg.Log.Printf(\"webhook: refused: does not verify\")", to: "if false {\n\t\ts.cfg.Log.Printf(\"webhook: refused: does not verify\")",
+	{name: "webhook: the handler ignores the verification", file: machine, from: "if err != nil {\n\t\ts.cfg.Log.Printf(\"webhook: refused: does not verify\")", to: "if err != nil && false {\n\t\ts.cfg.Log.Printf(\"webhook: refused: does not verify\")",
 		pkg: "./internal/server", test: "TestTheWebhookActsOnlyOnAVerifiedRequest", want: "no header: 200"},
 	{name: "token: the algorithm is not checked", file: lkToken, from: `json.Unmarshal(hb, &hdr) != nil || hdr.Alg != "HS256"`, to: `json.Unmarshal(hb, &hdr) != nil`,
 		pkg: "./internal/livekit", test: "TestVerifyRefusesEveryOtherToken", want: "alg HS512: verified"},
@@ -450,10 +457,10 @@ var mutants = []mutant{
 		pkg: "./internal/store", test: "TestASwitchGoesBackOnOnlyBeforeAnyGuestKnocked", want: "a new meeting: record false, ai true; want both on"},
 	{name: "notice is current: the guest stream keeps the notice it opened with", file: guest, from: `snap := map[string]any{"notice": lobby.NoticeFor(cur.Notice.Record, cur.Notice.AI)}`,
 		to:  `snap := map[string]any{"notice": lobby.NoticeFor(g.Notice.Record, g.Notice.AI)}`,
-		pkg: "./internal/server", test: "TestTheAdmittedGuestSeesTheCurrentNotice", want: "after AI off the admitted guest's notice"},
+		pkg: "./internal/server", test: "TestTheAdmittedGuestSeesTheCurrentNotice", want: `no "meeting" event (the stream so far: "event: meeting`},
 
 	// ---- 🔴 the guest name ----
-	{name: "name: format (bidi) characters accepted", file: name, from: `case unicode.Is(unicode.Cf, r) && r != '‍':`, to: `case false:`,
+	{name: "name: format (bidi) characters accepted", file: name, from: `case unicode.Is(unicode.Cf, r) && r != '\u200D':`, to: `case false:`,
 		pkg: "./internal/lobby", test: "TestCleanNameTrimsAndRefusesControlAndBidiCharacters", want: "RIGHT-TO-LEFT OVERRIDE: CleanName"},
 	{name: "name: control characters accepted", file: name, from: `case unicode.Is(unicode.Cc, r), unicode.Is(unicode.Zl, r), unicode.Is(unicode.Zp, r):`, to: `case false:`,
 		pkg: "./internal/lobby", test: "TestCleanNameTrimsAndRefusesControlAndBidiCharacters", want: "a NUL: CleanName"},
@@ -487,14 +494,14 @@ var mutants = []mutant{
 	// ---- 🔴 the reconcile loop ----
 	{name: "reconcile: the ListParticipants loop is removed", file: machine, from: "\t\tfor _, p := range ps {\n\t\t\ts.admitOrRemove(ctx, room, p.Identity)\n\t\t}", to: "\t\t_ = ps",
 		pkg: "./internal/server", test: "TestTheReconcileLoopRemovesWhoIsNotAdmittedAndDeletesEndedRooms", want: "after one pass the room holds"},
-	{name: "reconcile: ended meetings' rooms are kept", file: machine, from: "if strings.HasPrefix(rm.Name, \"meeting-\") {", to: "if false {",
+	{name: "reconcile: ended meetings' rooms are kept", file: machine, from: "if strings.HasPrefix(rm.Name, \"meeting-\") {", to: "if strings.HasPrefix(rm.Name, \"meeting-\") && false {",
 		pkg: "./internal/server", test: "TestTheReconcileLoopRemovesWhoIsNotAdmittedAndDeletesEndedRooms", want: "the reconcile pass left an ended meeting's room"},
 
 	// ---- 🔴 ownership of the call ----
 	{name: "ownership: a lobby move without the owner filter", file: parts, from: "`SELECT room, state, created_at FROM meetings WHERE id = ? AND subject = ?`", to: "`SELECT room, state, created_at FROM meetings WHERE id = ? AND ? IS NOT NULL`",
 		pkg: "./internal/server", test: "TestAnotherPersonCannotDriveTheCall", want: "/admit = 200"},
 	{name: "ownership: End without the owner filter", file: parts, from: "WHERE id = ? AND subject = ? AND state = 'open' RETURNING room`", to: "WHERE id = ? AND ? IS NOT NULL AND state = 'open' RETURNING room`",
-		pkg: "./internal/server", test: "TestAnotherPersonCannotDriveTheCall", want: "/end = 200"},
+		pkg: "./internal/server", test: "TestAnotherPersonCannotDriveTheCall", want: "Bea's calls changed Ada's meeting: {ID:"},
 
 	// ---- 🔴 no ticket in a URL; the pages' policies ----
 	{name: "ticket in query: accepted", file: guest, from: "if r.URL.RawQuery != \"\" || r.URL.ForceQuery {", to: "if false {",
@@ -531,6 +538,11 @@ func main() {
 			fmt.Println(m.name)
 		}
 		return
+	}
+	for _, m := range mutants {
+		if m.realLiveKit && (lookup("MEETINGS_LIVEKIT_SERVER", "livekit-server") == "" || lookup("MEETINGS_LK_CLI", "lk") == "") {
+			fatalf("mutant %q is killed by the test against a real LiveKit: set MEETINGS_LIVEKIT_SERVER and MEETINGS_LK_CLI, or run under `nix-shell -p livekit livekit-cli` (the sweep never passes a mutant by skipping its test)", m.name)
+		}
 	}
 	out, err := exec.Command("git", "status", "--porcelain").Output()
 	if err != nil {
@@ -610,6 +622,9 @@ func run(m mutant) (string, string) {
 		}
 	}
 	cmd := exec.Command("go", "test", "-count=1", "-run", "^"+m.test+"$", m.pkg)
+	if m.realLiveKit {
+		cmd.Env = append(os.Environ(), "MEETINGS_REQUIRE_LIVEKIT=1")
+	}
 	out, err := cmd.CombinedOutput()
 	s := string(out)
 	if err == nil {
@@ -628,6 +643,15 @@ func run(m mutant) (string, string) {
 		return "ERROR", fmt.Sprintf("the test failed, but not with %q: %s", m.want, failLine(s))
 	}
 	return "KILLED", failLine(s)
+}
+
+// lookup is a binary named by env, or found on PATH; "" for neither.
+func lookup(env, name string) string {
+	if p := os.Getenv(env); p != "" {
+		return p
+	}
+	p, _ := exec.LookPath(name)
+	return p
 }
 
 func firstLine(s string) string {

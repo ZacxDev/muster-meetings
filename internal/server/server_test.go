@@ -54,9 +54,19 @@ var (
 type clock struct {
 	mu sync.Mutex
 	t  time.Time
+	// real: the wall clock (the integration test, against a real LiveKit
+	// that checks token times against its own).
+	real bool
 }
 
-func (c *clock) Now() time.Time { c.mu.Lock(); defer c.mu.Unlock(); return c.t }
+func (c *clock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.real {
+		return time.Now()
+	}
+	return c.t
+}
 func (c *clock) Add(d time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -85,9 +95,18 @@ type syncBuf struct {
 func (s *syncBuf) Write(p []byte) (int, error) { s.mu.Lock(); defer s.mu.Unlock(); return s.b.Write(p) }
 func (s *syncBuf) String() string              { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }
 
-func newEnv(t *testing.T) *env {
+// liveKitAt points an env at a real LiveKit instead of the fake.
+type liveKitAt struct {
+	API, WS   string
+	Keys      livekit.Keys
+	RealClock bool
+}
+
+func newEnv(t *testing.T) *env { return newEnvWith(t, nil) }
+
+func newEnvWith(t *testing.T, real *liveKitAt) *env {
 	t.Helper()
-	e := &env{t: t, fake: mustertest.New(), clock: &clock{t: t0}, log: &syncBuf{}}
+	e := &env{t: t, fake: mustertest.New(), clock: &clock{t: t0, real: real != nil && real.RealClock}, log: &syncBuf{}}
 	t.Cleanup(e.fake.Close)
 	e.fake.Now = e.clock.Now
 	e.fake.Install(app)
@@ -109,16 +128,22 @@ func newEnv(t *testing.T) *env {
 	if e.app, err = owners.Boot(context.Background(), c, st, lg, e.clock.Now); err != nil {
 		t.Fatal(err)
 	}
-	e.lk = livekittest.New()
-	t.Cleanup(e.lk.Close)
-	e.lk.Now = e.clock.Now
-	lkc, err := livekit.NewClient(e.lk.URL, livekittest.Keys)
+	lkAPI, lkWS, lkKeys := "", "", livekittest.Keys
+	if real == nil {
+		e.lk = livekittest.New()
+		t.Cleanup(e.lk.Close)
+		e.lk.Now = e.clock.Now
+		lkAPI, lkWS = e.lk.URL, e.lk.WSURL()
+	} else {
+		lkAPI, lkWS, lkKeys = real.API, real.WS, real.Keys
+	}
+	lkc, err := livekit.NewClient(lkAPI, lkKeys)
 	if err != nil {
 		t.Fatal(err)
 	}
 	lkc.Now = e.clock.Now
 	e.server = server.New(server.Config{PublicURL: publicURL, MusterOrigin: musterOrigin, Now: e.clock.Now, Log: lg,
-		LiveKit: lkc, LiveKitURL: e.lk.WSURL(), ICE: "relay",
+		LiveKit: lkc, LiveKitURL: lkWS, ICE: "relay",
 		// The test client is the "ingress": a knock's address comes from
 		// X-Forwarded-For, so a test can knock from many addresses.
 		TrustedProxies: []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128")},

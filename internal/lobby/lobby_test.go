@@ -36,13 +36,13 @@ func TestCleanNameTrimsAndRefusesControlAndBidiCharacters(t *testing.T) {
 		"a newline inside":       "Grace\nHopper",
 		"DEL":                    "Grace\x7f",
 		"a C1 control":           "Gra\u0085ce",
-		"RIGHT-TO-LEFT OVERRIDE": "Grace‮H",
-		"LEFT-TO-RIGHT ISOLATE":  "Grace⁦H",
-		"POP DIRECTIONAL":        "Grace⁩",
-		"RIGHT-TO-LEFT MARK":     "Grace‏",
-		"ARABIC LETTER MARK":     "Grace؜",
-		"ZERO WIDTH SPACE":       "Gr​ace",
-		"LINE SEPARATOR":         "Grace H",
+		"RIGHT-TO-LEFT OVERRIDE": "Grace\u202EH",
+		"LEFT-TO-RIGHT ISOLATE":  "Grace\u2066H",
+		"POP DIRECTIONAL":        "Grace\u2069",
+		"RIGHT-TO-LEFT MARK":     "Grace\u200F",
+		"ARABIC LETTER MARK":     "Grace\u061C",
+		"ZERO WIDTH SPACE":       "Gr\u200Bace",
+		"LINE SEPARATOR":         "Grace\u2028H",
 		"invalid UTF-8":          "Grace\xff",
 	} {
 		if got, err := lobby.CleanName(in); err == nil {

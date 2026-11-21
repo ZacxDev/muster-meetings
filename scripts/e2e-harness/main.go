@@ -13,6 +13,11 @@
 //	GET /mint                  a fresh hand-off code, as the person's browser mints one
 //	GET /redeems               how many redeems the fake muster has answered
 //	GET /apps/<id>[?code=…]    muster's page: frames /enter with that code, or a fresh one
+//	GET /livekit-joins         every token a browser presented to the fake LiveKit, verified
+//
+// LiveKit is a fake (internal/livekittest): rooms and participants over its
+// server API, and a signalling endpoint that records, verified, the token a
+// browser connects with and refuses the connection (it carries no media).
 package main
 
 import (
@@ -32,6 +37,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ZacxDev/muster-meetings/internal/livekit"
+	"github.com/ZacxDev/muster-meetings/internal/livekittest"
 	"github.com/ZacxDev/muster-meetings/internal/muster"
 	"github.com/ZacxDev/muster-meetings/internal/mustertest"
 	"github.com/ZacxDev/muster-meetings/internal/owners"
@@ -91,8 +98,25 @@ func run(logger *log.Logger) error {
 	if err != nil {
 		return err
 	}
-	plugin := &http.Server{Handler: server.New(server.Config{PublicURL: pluginURL, MusterOrigin: parentOrigin, Log: logger}, st, a)}
+	lk := livekittest.New()
+	defer lk.Close()
+	lkc, err := livekit.NewClient(lk.URL, livekittest.Keys)
+	if err != nil {
+		return err
+	}
+	srv := server.New(server.Config{PublicURL: pluginURL, MusterOrigin: parentOrigin, Log: logger,
+		LiveKit: lkc, LiveKitURL: lk.WSURL(), ICE: "all"}, st, a)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go srv.Run(ctx)
+	plugin := &http.Server{Handler: srv}
 	go plugin.Serve(pluginLn)
+	internal := &http.Server{Handler: srv.Internal()}
+	internalLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return err
+	}
+	go internal.Serve(internalLn)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /mint", func(w http.ResponseWriter, r *http.Request) {
@@ -100,6 +124,10 @@ func run(logger *log.Logger) error {
 	})
 	mux.HandleFunc("GET /redeems", func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, strconv.Itoa(fake.CountCalls("POST", "/plugin/v1/handoffs/redeem")))
+	})
+	mux.HandleFunc("GET /livekit-joins", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(lk.RTCs())
 	})
 	mux.HandleFunc("GET /apps/{id}", func(w http.ResponseWriter, r *http.Request) {
 		code := r.URL.Query().Get("code")
@@ -110,9 +138,12 @@ func run(logger *log.Logger) error {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		// muster's frame attributes for an app tab (internal/ui/app_page.go:
 		// PluginChipSandbox, referrerpolicy no-referrer).
-		fmt.Fprintf(w, `<!doctype html><title>muster</title><h1>muster</h1>
-<iframe id="app" src="%s" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads allow-modals" allow="camera %s; microphone %s; display-capture %s" referrerpolicy="no-referrer" style="width:900px;height:600px"></iframe>`,
-			html.EscapeString(src), pluginURL, pluginURL, pluginURL)
+		// The frame fills the page, as muster's /apps/{id} draws it below a
+		// slim header (design: "one frame fills the rest of the viewport").
+		fmt.Fprintf(w, `<!doctype html><meta name="viewport" content="width=device-width, initial-scale=1"><title>muster</title>
+<body style="margin:0"><header style="height:44px;font:16px system-ui;line-height:44px;padding:0 8px">muster</header>
+<iframe id="app" src="%s" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads allow-modals" allow="camera %s; microphone %s; display-capture %s; fullscreen %s; autoplay %s; clipboard-write %s" referrerpolicy="no-referrer" style="display:block;border:0;width:100%%;height:calc(100dvh - 44px)"></iframe></body>`,
+			html.EscapeString(src), pluginURL, pluginURL, pluginURL, pluginURL, pluginURL, pluginURL)
 	})
 	parent := &http.Server{Handler: mux}
 	go parent.Serve(parentLn)
@@ -128,9 +159,10 @@ func run(logger *log.Logger) error {
 	case <-done:
 	case <-sig:
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	plugin.Shutdown(ctx)
-	parent.Shutdown(ctx)
+	sctx, scancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer scancel()
+	plugin.Shutdown(sctx)
+	parent.Shutdown(sctx)
+	internal.Shutdown(sctx)
 	return nil
 }

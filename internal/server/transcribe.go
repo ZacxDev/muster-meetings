@@ -38,9 +38,13 @@ import (
 // With no engine (MEETINGS_STT_ENGINE unset or "off") transcription is off:
 // no egress is started and the ingest refuses every stream.
 
-// The transcript panel's status lines.
+// The transcript panel's status lines (design: "Segments", "Failure
+// modes"): "Transcript paused" when no engine can take a track's audio (a
+// gap), which wins over "Captions delayed" while a track is on the
+// nemotron engine's fallback.
 const (
 	TranscriptPaused = "Transcript paused"
+	CaptionsDelayed  = "Captions delayed"
 )
 
 // DefaultEgressBackoff is the wait before each retry of a refused track
@@ -56,12 +60,16 @@ type transcriber struct {
 	conns    map[string]*liveConn          // track → its ingest stream
 	partials map[string]map[string]partial // meeting → track → the partial
 	paused   map[string]bool               // track → the engine dropped audio, until its next final
+	delayed  map[string]bool               // track → on the nemotron engine's fallback (stt.EngineSwitch)
 	meetings map[string]string             // track → meeting, for paused
 	// restarts counts a track's egress restarts since its last healthy
 	// stretch; audioAt is when its current stream's audio began.
 	restarts map[string]int
 	audioAt  map[string]time.Time
 	textOnce atomic.Bool
+	// flags counts the silent-start check's flags (stt.Flag) since the
+	// plugin started: /healthz says so.
+	flags atomic.Int64
 	// gapMu makes "is a current stream connected? if not, open a gap"
 	// (egressLoop) and "a current stream's first audio closes the gap"
 	// (serveIngest) one step each, so neither can fall between the other's
@@ -98,7 +106,7 @@ type partial struct {
 
 func newTranscriber() *transcriber {
 	return &transcriber{runs: map[string]*run{}, conns: map[string]*liveConn{},
-		partials: map[string]map[string]partial{}, paused: map[string]bool{}, meetings: map[string]string{},
+		partials: map[string]map[string]partial{}, paused: map[string]bool{}, delayed: map[string]bool{}, meetings: map[string]string{},
 		restarts: map[string]int{}, audioAt: map[string]time.Time{}}
 }
 
@@ -242,6 +250,7 @@ func (s *Server) forgetTrack(meetingID, track string) {
 	s.tr.mu.Lock()
 	defer s.tr.mu.Unlock()
 	delete(s.tr.paused, track)
+	delete(s.tr.delayed, track)
 	delete(s.tr.meetings, track)
 	delete(s.tr.restarts, track)
 	delete(s.tr.audioAt, track)
@@ -580,6 +589,9 @@ func (s *Server) serveIngest(conn *ingest.Conn, t store.Track) {
 		s.tr.mu.Lock()
 		if s.tr.conns[t.Track] == lc {
 			delete(s.tr.conns, t.Track)
+			// The engine's stream ended with it: the next starts on the
+			// configured engine, and says so if it falls back.
+			delete(s.tr.delayed, t.Track)
 		}
 		if m := s.tr.partials[t.MeetingID]; m != nil {
 			delete(m, t.Track)
@@ -701,18 +713,46 @@ func (s *Server) storeSegment(ctx context.Context, t store.Track, base int64, se
 		base = 0
 	}
 	start, end := base+seg.StartMS, base+seg.EndMS
+	engine := seg.Engine
+	if engine == "" {
+		engine = s.cfg.Engine.Name()
+	}
 	switch seg.Kind {
 	case stt.Partial:
+		// 🔴 A partial is a caption: sent, NEVER stored. An empty one
+		// clears the track's caption (its connection dropped, or the
+		// utterance had no words).
 		s.tr.mu.Lock()
 		m := s.tr.partials[t.MeetingID]
 		if m == nil {
 			m = map[string]partial{}
 			s.tr.partials[t.MeetingID] = m
 		}
-		m[t.Track] = partial{Speaker: t.Speaker, StartMS: start, Text: seg.Text}
+		if seg.Text == "" {
+			delete(m, t.Track)
+		} else {
+			m[t.Track] = partial{Speaker: t.Speaker, StartMS: start, Text: seg.Text}
+		}
 		s.tr.mu.Unlock()
+	case stt.EngineSwitch:
+		// "Captions delayed" exactly while the track is not on the
+		// configured engine (the nemotron engine's fallback).
+		s.tr.mu.Lock()
+		if seg.Engine != s.cfg.Engine.Name() {
+			s.tr.delayed[t.Track] = true
+			s.tr.meetings[t.Track] = t.MeetingID
+		} else {
+			delete(s.tr.delayed, t.Track)
+		}
+		s.tr.mu.Unlock()
+	case stt.Flag:
+		// The silent-start check: telemetry only (the track, never its
+		// speaker or any text).
+		s.tr.flags.Add(1)
+		s.cfg.Log.Printf("transcript: track %s flagged %s (speech energy or a constant level and no words for %s)", t.Track, seg.Text, stt.SilentStart)
+		return
 	case stt.Final:
-		if _, err := s.store.AddSegment(ctx, t.Track, store.SegText, start, end, seg.Text, s.cfg.Engine.Name()); err != nil {
+		if _, err := s.store.AddSegment(ctx, t.Track, store.SegText, start, end, seg.Text, engine); err != nil {
 			s.cfg.Log.Printf("transcript: a line was not stored: %v", err)
 		}
 		s.tr.mu.Lock()
@@ -722,7 +762,7 @@ func (s *Server) storeSegment(ctx context.Context, t store.Track, base int64, se
 		delete(s.tr.paused, t.Track)
 		s.tr.mu.Unlock()
 	case stt.Gap:
-		if _, err := s.store.AddSegment(ctx, t.Track, store.SegGap, start, end, "", s.cfg.Engine.Name()); err != nil {
+		if _, err := s.store.AddSegment(ctx, t.Track, store.SegGap, start, end, "", engine); err != nil {
 			s.cfg.Log.Printf("transcript: a gap marker was not stored: %v", err)
 		}
 		s.tr.mu.Lock()
@@ -752,7 +792,8 @@ func (s *Server) partialsOf(meetingID string) []partial {
 
 // transcriptStatus is the panel's status line: "Transcript paused" while a
 // track of the meeting has an open gap (open: no egress streaming) or its
-// engine dropped audio since its last line; "" otherwise.
+// engine dropped audio since its last line; else "Captions delayed" while a
+// track of the meeting is on the nemotron engine's fallback; "" otherwise.
 func (s *Server) transcriptStatus(meetingID string, open []int64) string {
 	if len(open) > 0 {
 		return TranscriptPaused
@@ -764,5 +805,14 @@ func (s *Server) transcriptStatus(meetingID string, open []int64) string {
 			return TranscriptPaused
 		}
 	}
+	for track, d := range s.tr.delayed {
+		if d && s.tr.meetings[track] == meetingID {
+			return CaptionsDelayed
+		}
+	}
 	return ""
 }
+
+// SilentStartFlags is how many silent-start flags the engines raised since
+// the plugin started.
+func (s *Server) SilentStartFlags() int64 { return s.tr.flags.Load() }

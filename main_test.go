@@ -206,13 +206,13 @@ func TestTheProxySettingsReachTheServer(t *testing.T) {
 // The transcript's settings (design: "Three engines, one interface"): off by
 // default and needing nothing; utterance needs the STT service and the
 // ingest's secret and URL; fake refuses to start unless
-// MEETINGS_TEST_MODE=1; nemotron is phase 3c and refused by this build.
+// MEETINGS_TEST_MODE=1; nemotron is TestLoadConfigNemotronNeedsAllFour's.
 func TestLoadConfigTranscript(t *testing.T) {
 	c, err := LoadConfig(env(base()))
 	if err != nil || c.Engine != "" || c.IngestListen != ":8082" || c.IngestKey != nil {
 		t.Fatalf("unset: engine %q, listen %q, key %v, %v; want off", c.Engine, c.IngestListen, c.IngestKey, err)
 	}
-	if eng, err := c.engine(); eng != nil || err != nil {
+	if eng, err := c.engine(nil); eng != nil || err != nil {
 		t.Fatalf("unset: engine() = %v, %v; want none", eng, err)
 	}
 	secret := base64.StdEncoding.EncodeToString([]byte("main fixture ingest secret 0a9b8c7d"))
@@ -233,7 +233,7 @@ func TestLoadConfigTranscript(t *testing.T) {
 	if err != nil || c.Engine != "utterance" || c.STTURL != "http://stt-cohere:8000" || c.IngestURL != "ws://muster-meetings:8082" || c.IngestListen != "10.1.2.3:8082" || len(c.IngestKey) != 35 {
 		t.Fatalf("utterance: %+v, %v", c, err)
 	}
-	if eng, err := c.engine(); err != nil || eng == nil || eng.Name() != "utterance" {
+	if eng, err := c.engine(nil); err != nil || eng == nil || eng.Name() != "utterance" {
 		t.Fatalf("utterance: engine() = %v, %v", eng, err)
 	}
 	if sc := c.serverConfig(nil, nil); sc.IngestURL != "ws://muster-meetings:8082" || len(sc.IngestKey) != 35 {
@@ -249,7 +249,6 @@ func TestLoadConfigTranscript(t *testing.T) {
 	for name, extra := range map[string]map[string]string{
 		"fake without test mode":    {"MEETINGS_STT_ENGINE": "fake"},
 		"fake with test mode 0":     {"MEETINGS_STT_ENGINE": "fake", "MEETINGS_TEST_MODE": "0"},
-		"nemotron (phase 3c)":       {"MEETINGS_STT_ENGINE": "nemotron"},
 		"an unknown engine":         {"MEETINGS_STT_ENGINE": "whisper"},
 		"utterance without a URL":   {"MEETINGS_STT_URL": ""},
 		"utterance with a path":     {"MEETINGS_STT_URL": "http://stt-cohere:8000/v1"},
@@ -266,6 +265,69 @@ func TestLoadConfigTranscript(t *testing.T) {
 			continue
 		}
 		if strings.Contains(err.Error(), "s3cretT0ken") || strings.Contains(err.Error(), "czNjcmV0VDBr") {
+			t.Errorf("%s: the refusal echoes a secret: %v", name, err)
+		}
+	}
+}
+
+// 🔴 The boot check (design: the engines table): nemotron needs ALL FOUR of
+// MEETINGS_STREAM_STT_URL, MEETINGS_STREAM_STT_TOKEN, and its fallback's
+// MEETINGS_STT_URL and MEETINGS_STT_TOKEN, or the plugin refuses to boot;
+// each one missing is refused BY NAME, and no refusal shows a token.
+func TestLoadConfigNemotronNeedsAllFour(t *testing.T) {
+	secret := base64.StdEncoding.EncodeToString([]byte("main fixture ingest secret 0a9b8c7d"))
+	all := func(extra map[string]string) map[string]string {
+		m := base()
+		m["MEETINGS_STT_ENGINE"] = "nemotron"
+		m["MEETINGS_STREAM_STT_URL"], m["MEETINGS_STREAM_STT_TOKEN"] = "ws://stt-nemotron:8000/v1/stream", "s3cretT0ken-stream"
+		m["MEETINGS_STT_URL"], m["MEETINGS_STT_TOKEN"] = "http://stt-cohere:8000", "s3cretT0ken-stt"
+		m["MEETINGS_INGEST_SECRET"], m["MEETINGS_INGEST_URL"] = secret, "ws://muster-meetings:8082"
+		for k, v := range extra {
+			if v == "" {
+				delete(m, k)
+			} else {
+				m[k] = v
+			}
+		}
+		return m
+	}
+	c, err := LoadConfig(env(all(nil)))
+	if err != nil || c.Engine != "nemotron" || c.StreamURL != "ws://stt-nemotron:8000/v1/stream" || c.StreamToken != "s3cretT0ken-stream" ||
+		c.STTURL != "http://stt-cohere:8000" || c.STTToken != "s3cretT0ken-stt" {
+		t.Fatalf("all four: %+v, %v", c, err)
+	}
+	if eng, err := c.engine(nil); err != nil || eng == nil || eng.Name() != "nemotron" {
+		t.Fatalf("all four: engine() = %v, %v", eng, err)
+	}
+	if line := startupLine(c, "meet", 1, false); strings.Contains(line, "s3cretT0ken") || !strings.Contains(line, "nemotron engine via ws://stt-nemotron:8000") {
+		t.Fatalf("the startup line: %s", line)
+	}
+	// The path may be left off (it is added); wss to any host.
+	if c, err := LoadConfig(env(all(map[string]string{"MEETINGS_STREAM_STT_URL": "wss://stt.example.test"}))); err != nil || c.StreamURL != "wss://stt.example.test/v1/stream" {
+		t.Fatalf("no path: %q, %v", c.StreamURL, err)
+	}
+	for name, c := range map[string]struct {
+		extra map[string]string
+		want  string
+	}{
+		"no stream URL":                   {map[string]string{"MEETINGS_STREAM_STT_URL": ""}, "MEETINGS_STREAM_STT_URL"},
+		"no stream token":                 {map[string]string{"MEETINGS_STREAM_STT_TOKEN": ""}, "MEETINGS_STREAM_STT_TOKEN"},
+		"no fallback URL":                 {map[string]string{"MEETINGS_STT_URL": ""}, "MEETINGS_STT_URL"},
+		"no fallback token":               {map[string]string{"MEETINGS_STT_TOKEN": ""}, "MEETINGS_STT_TOKEN"},
+		"an http stream URL":              {map[string]string{"MEETINGS_STREAM_STT_URL": "http://stt-nemotron:8000/v1/stream"}, "MEETINGS_STREAM_STT_URL"},
+		"another path":                    {map[string]string{"MEETINGS_STREAM_STT_URL": "ws://stt-nemotron:8000/v1/other"}, "MEETINGS_STREAM_STT_URL"},
+		"a query":                         {map[string]string{"MEETINGS_STREAM_STT_URL": "ws://stt-nemotron:8000/v1/stream?token=s3cretT0ken"}, "MEETINGS_STREAM_STT_URL"},
+		"credentials in the URL":          {map[string]string{"MEETINGS_STREAM_STT_URL": "ws://u:s3cretT0ken@stt-nemotron:8000/v1/stream"}, "MEETINGS_STREAM_STT_URL"},
+		"a stream token with a CR/LF":     {map[string]string{"MEETINGS_STREAM_STT_TOKEN": "s3cretT0ken\r\nX-Forged: 1"}, "MEETINGS_STREAM_STT_TOKEN"},
+		"a stream token with a space":     {map[string]string{"MEETINGS_STREAM_STT_TOKEN": "s3cretT0ken two"}, "MEETINGS_STREAM_STT_TOKEN"},
+		"no ingest secret (any engine's)": {map[string]string{"MEETINGS_INGEST_SECRET": ""}, "MEETINGS_INGEST_SECRET"},
+	} {
+		_, err := LoadConfig(env(all(c.extra)))
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: LoadConfig = %v, want a refusal naming %s", name, err, c.want)
+			continue
+		}
+		if strings.Contains(err.Error(), "s3cretT0ken") {
 			t.Errorf("%s: the refusal echoes a secret: %v", name, err)
 		}
 	}

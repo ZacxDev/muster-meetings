@@ -33,10 +33,13 @@
 // Phase 3a adds the transcript: a track Egress per microphone streams raw PCM
 // to the ingest listener, and an engine turns it into lines.
 //
-//	MEETINGS_STT_ENGINE       off (the default: no transcript), utterance, or fake (tests only); nemotron is phase 3c
-//	MEETINGS_STT_URL          utterance: the STT service muster's dictation uses (stt-cohere), http(s)://host[:port]
-//	MEETINGS_STT_TOKEN        utterance: its bearer (a copy of stt-cohere's one token)
+//	MEETINGS_STT_ENGINE       off (the default: no transcript), utterance, nemotron, or fake (tests only)
+//	MEETINGS_STT_URL          utterance, and nemotron's fallback: the STT service muster's dictation uses (stt-cohere), http(s)://host[:port]
+//	MEETINGS_STT_TOKEN        utterance, and nemotron's fallback: its bearer (a copy of stt-cohere's one token)
 //	MEETINGS_STT_MODEL        utterance: the model form field (optional; stt-cohere ignores it)
+//	MEETINGS_STREAM_STT_URL   nemotron: the Nemotron server's stream endpoint, wss://host[:port]/v1/stream (ws:// inside the cluster)
+//	MEETINGS_STREAM_STT_TOKEN nemotron: its bearer (a copy of stt-nemotron's STT_API_TOKEN)
+//	                          nemotron needs ALL FOUR of these, or the plugin refuses to boot
 //	MEETINGS_TEST_MODE        1 allows the fake engine; MEETINGS_FAKE_STT_SCRIPT its lines, separated by |
 //	MEETINGS_INGEST_SECRET    32+ random bytes, base64: the HMAC key of every ingest URL's token
 //	MEETINGS_INGEST_URL       the ingest listener as Egress reaches it, e.g. ws://muster-meetings:8082
@@ -95,10 +98,13 @@ type Config struct {
 	ClientIPHeader string
 
 	// The transcript (phase 3a). Engine is "" when it is off.
-	Engine       string
-	STTURL       string
-	STTToken     string
-	STTModel     string
+	Engine   string
+	STTURL   string
+	STTToken string
+	STTModel string
+	// StreamURL and StreamToken are the Nemotron server's (nemotron only).
+	StreamURL    string
+	StreamToken  string
 	FakeScript   []string
 	IngestKey    []byte
 	IngestURL    string
@@ -209,7 +215,9 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 // loadTranscript reads the transcript's settings (design: "Three engines,
 // one interface"). Unset or "off" is no transcript, and needs nothing else.
 // Any engine needs the ingest's secret and URL; utterance needs the STT
-// service; fake refuses to start unless MEETINGS_TEST_MODE=1.
+// service; nemotron needs the Nemotron server AND the STT service (its
+// fallback): all four variables, or it refuses to boot; fake refuses to
+// start unless MEETINGS_TEST_MODE=1.
 func (c *Config) loadTranscript(getenv func(string) string) error {
 	c.IngestListen = ":8082"
 	if v := strings.TrimSpace(getenv("MEETINGS_INGEST_LISTEN")); v != "" {
@@ -233,9 +241,22 @@ func (c *Config) loadTranscript(getenv func(string) string) error {
 			c.FakeScript = strings.Split(v, "|")
 		}
 	case EngineNemotron:
-		return errors.New("MEETINGS_STT_ENGINE=nemotron is not in this build (design: phase 3c); use utterance")
+		c.Engine = e
+		var err error
+		if c.StreamURL, err = stt.CheckStreamURL(getenv("MEETINGS_STREAM_STT_URL")); err != nil {
+			return fmt.Errorf("MEETINGS_STT_ENGINE=nemotron: %w", err)
+		}
+		if c.StreamToken, err = stt.CheckToken("MEETINGS_STREAM_STT_TOKEN", getenv("MEETINGS_STREAM_STT_TOKEN")); err != nil {
+			return fmt.Errorf("MEETINGS_STT_ENGINE=nemotron: %w", err)
+		}
+		// Its per-participant fallback is the utterance engine: the STT
+		// service is required too, never optional.
+		c.STTURL, c.STTToken, c.STTModel = strings.TrimSpace(getenv("MEETINGS_STT_URL")), strings.TrimSpace(getenv("MEETINGS_STT_TOKEN")), strings.TrimSpace(getenv("MEETINGS_STT_MODEL"))
+		if _, err := stt.NewClient(c.STTURL, c.STTToken, c.STTModel, 0); err != nil {
+			return fmt.Errorf("MEETINGS_STT_ENGINE=nemotron needs its fallback, the utterance engine's STT service: %w", err)
+		}
 	default:
-		return errors.New("MEETINGS_STT_ENGINE is off, utterance or fake")
+		return errors.New("MEETINGS_STT_ENGINE is off, utterance, nemotron or fake")
 	}
 	var err error
 	if c.IngestKey, err = ingest.ParseSecret(getenv("MEETINGS_INGEST_SECRET")); err != nil {
@@ -250,8 +271,14 @@ func (c *Config) loadTranscript(getenv func(string) string) error {
 }
 
 // engine builds the configured engine; nil when transcription is off.
-func (cfg Config) engine() (stt.Engine, error) {
+func (cfg Config) engine(logger *log.Logger) (stt.Engine, error) {
 	switch cfg.Engine {
+	case EngineNemotron:
+		cl, err := stt.NewClient(cfg.STTURL, cfg.STTToken, cfg.STTModel, stt.CallTimeout)
+		if err != nil {
+			return nil, err
+		}
+		return stt.NewNemotron(cfg.StreamURL, cfg.StreamToken, stt.NewUtterance(cl), logger), nil
 	case EngineUtterance:
 		cl, err := stt.NewClient(cfg.STTURL, cfg.STTToken, cfg.STTModel, stt.CallTimeout)
 		if err != nil {
@@ -368,7 +395,7 @@ func run(logger *log.Logger) error {
 	if err != nil {
 		return err
 	}
-	eng, err := cfg.engine()
+	eng, err := cfg.engine(logger)
 	if err != nil {
 		return err
 	}
@@ -452,6 +479,9 @@ func startupLine(cfg Config, name string, pluginID int64, tasks bool) string {
 		line += "; transcript off"
 	case EngineUtterance:
 		line += fmt.Sprintf("; transcript: utterance engine via %s, ingest %s (Egress streams to %s)", muster.Redact(cfg.STTURL), cfg.IngestListen, muster.Redact(cfg.IngestURL))
+	case EngineNemotron:
+		line += fmt.Sprintf("; transcript: nemotron engine via %s, falling back to utterance via %s, ingest %s (Egress streams to %s)",
+			muster.Redact(cfg.StreamURL), muster.Redact(cfg.STTURL), cfg.IngestListen, muster.Redact(cfg.IngestURL))
 	default:
 		line += fmt.Sprintf("; transcript: %s engine, ingest %s (Egress streams to %s)", cfg.Engine, cfg.IngestListen, muster.Redact(cfg.IngestURL))
 	}

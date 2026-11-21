@@ -129,6 +129,9 @@ const (
 	utt     = "internal/stt/utterance.go"
 	callJS  = "internal/server/web/static/call.js"
 	kEgress = "deploy/kubernetes/egress.yaml"
+	// phase 3c
+	nemGo = "internal/stt/nemotron.go"
+	wsCl  = "internal/stt/wsclient.go"
 )
 
 var mutants = []mutant{
@@ -776,6 +779,59 @@ var mutants = []mutant{
 		pkg: "./internal/stt", test: "TestAPauseEndsTheUtteranceAbout700msIntoTheSilenceEvenWithADCOffset", want: "dc 6000"},
 	{name: "vad: a pause never ends an utterance", file: vad, from: "case end-e.lastEnd >= msSamples(SilenceEnd):", to: "case false:",
 		pkg: "./internal/stt", test: "TestAPauseEndsTheUtteranceAbout700msIntoTheSilenceEvenWithADCOffset", want: "the pause must end the first"},
+
+	// ---- 3c: the nemotron engine ----
+	{name: "nemotron boot: no stream URL check", file: mainGo, from: `if c.StreamURL, err = stt.CheckStreamURL(getenv("MEETINGS_STREAM_STT_URL")); err != nil {`, to: `if c.StreamURL, err = getenv("MEETINGS_STREAM_STT_URL"), nil; err != nil {`,
+		pkg: ".", test: "TestLoadConfigNemotronNeedsAllFour", want: "no stream URL: LoadConfig = <nil>"},
+	{name: "nemotron boot: no stream token check", file: mainGo, from: `if c.StreamToken, err = stt.CheckToken("MEETINGS_STREAM_STT_TOKEN", getenv("MEETINGS_STREAM_STT_TOKEN")); err != nil {`, to: `if c.StreamToken, err = getenv("MEETINGS_STREAM_STT_TOKEN"), nil; err != nil {`,
+		pkg: ".", test: "TestLoadConfigNemotronNeedsAllFour", want: "no stream token: LoadConfig = <nil>"},
+	{name: "nemotron boot: its fallback's STT service not required", file: mainGo, from: "if _, err := stt.NewClient(c.STTURL, c.STTToken, c.STTModel, 0); err != nil {\n\t\t\treturn fmt.Errorf(\"MEETINGS_STT_ENGINE=nemotron needs", to: "if false {\n\t\t\treturn fmt.Errorf(\"MEETINGS_STT_ENGINE=nemotron needs",
+		pkg: ".", test: "TestLoadConfigNemotronNeedsAllFour", want: "no fallback URL: LoadConfig = <nil>"},
+	{name: "nemotron padding: end.samples counts the padding", file: nemGo, from: "n := c.sent + int64(len(c.frame))", to: "n := c.sent + int64(FrameSamples*min(len(c.frame), 1))",
+		pkg: "./internal/stt", test: "TestTheNemotronProtocolFramesPaddingAndSampleTimes", want: "end.samples = 69120"},
+	{name: "nemotron frames: the last frame not padded", file: nemGo, from: "b := make([]byte, FrameSamples*2)", to: "b := make([]byte, len(pcm)*2)",
+		pkg: "./internal/stt", test: "TestTheNemotronProtocolFramesPaddingAndSampleTimes", want: "is 1920 bytes, want 2560"},
+	{name: "nemotron frames: silence left out", file: nemGo, from: "\t\tif err := s.send(pcm); err != nil {", to: "\t\tif err := func() error {\n\t\t\tif constant(pcm) {\n\t\t\t\treturn nil\n\t\t\t}\n\t\t\treturn s.send(pcm)\n\t\t}(); err != nil {",
+		pkg: "./internal/stt", test: "TestTheNemotronProtocolFramesPaddingAndSampleTimes", want: "frames, want 54"},
+	{name: "nemotron endpointing: no flush at the VAD's end of speech", file: nemGo, from: "if err := s.conn.ws.writeText(`{\"type\":\"flush\"}`); err != nil {", to: "if err := error(nil); err != nil {",
+		pkg: "./internal/stt", test: "TestAFlushIsSentAbout700msIntoThePauseEvenWithADCOffset", want: "final before the second utterance"},
+	{name: "nemotron endpointing: no DC removal", file: vad, from: "y := x - e.px + highPassR*e.py", to: "y := x",
+		pkg: "./internal/stt", test: "TestAFlushIsSentAbout700msIntoThePauseEvenWithADCOffset", want: "dc 6000: final before the second utterance"},
+	{name: "nemotron fallback: none at a 503 (STT capacity)", file: nemGo, from: "if s.e.Fallback != nil {\n\t\tfb, ferr", to: "if false {\n\t\tfb, ferr",
+		pkg: "./internal/stt", test: "TestA503SendsTheParticipantToUtteranceAndRetriesAfterMax30sRetryAfter", want: "no the fallback's line"},
+	{name: "nemotron return: never retried after a fallback", file: nemGo, from: "\tcase modeFallback:\n\t\tif !s.e.now().Before(s.nextAt) {", to: "\tcase modeFallback:\n\t\tif false {",
+		pkg: "./internal/stt", test: "TestA503SendsTheParticipantToUtteranceAndRetriesAfterMax30sRetryAfter", want: "was not tried again at 1m0s"},
+	{name: "nemotron return: Retry-After ignored", file: nemGo, from: "errors.As(err, &ref) && ref.RetryAfter > wait", to: "false && ref.RetryAfter > wait",
+		pkg: "./internal/stt", test: "TestA503SendsTheParticipantToUtteranceAndRetriesAfterMax30sRetryAfter", want: "Retry-After 60: Nemotron was tried again at 59s"},
+	{name: "nemotron return: the 30 s floor ignored", file: nemGo, from: "\twait := MinRetry\n", to: "\twait := time.Duration(0)\n",
+		pkg: "./internal/stt", test: "TestA503SendsTheParticipantToUtteranceAndRetriesAfterMax30sRetryAfter", want: "Retry-After 10: Nemotron was tried again at 29s"},
+	{name: "nemotron drop: reconnects without the waits", file: nemGo, from: "s.nextAt = s.e.now().Add(s.reconnects[0])", to: "s.nextAt = s.e.now()",
+		pkg: "./internal/stt", test: "TestAMidStreamDropReconnectsThreeTimesThenFallsBackWithAGap", want: "at +0s: 1 reconnects tried, want 0"},
+	{name: "nemotron drop: falls back after one failed reconnect", file: nemGo, from: "if errors.As(err, &ref) || s.attempts >= len(s.reconnects) {", to: "if true {",
+		pkg: "./internal/stt", test: "TestAMidStreamDropReconnectsThreeTimesThenFallsBackWithAGap", want: "at +3s: 1 reconnects tried, want 2"},
+	{name: "nemotron drop: never falls back", file: nemGo, from: "\t\ts.closeGap()\n\t\ts.toFallback(err)\n\t\treturn\n\t}\n\ts.nextAt", to: "\t\ts.closeGap()\n\t\ts.nextAt = s.e.now().Add(s.reconnects[0])\n\t\treturn\n\t}\n\ts.nextAt",
+		pkg: "./internal/stt", test: "TestAMidStreamDropReconnectsThreeTimesThenFallsBackWithAGap", want: "no the fallback within"},
+	{name: "nemotron drop: no gap marker", file: nemGo, from: "\tif s.pos > s.gapFrom {", to: "\tif false {",
+		pkg: "./internal/stt", test: "TestAMidStreamDropReconnectsThreeTimesThenFallsBackWithAGap", want: "gaps = [], want one"},
+	{name: "nemotron time: a reconnected stream's times from zero", file: nemGo, from: "c := &nemConn{ws: ws, offset: s.pos,", to: "c := &nemConn{ws: ws, offset: 0,",
+		pkg: "./internal/stt", test: "TestAReconnectedStreamsTimesStartAtItsFirstSample", want: "no the second final"},
+	{name: "nemotron token: the upgrade request in a refusal's error", file: wsCl, from: "return nil, &RefusedError{Status: resp.StatusCode,", to: "return nil, fmt.Errorf(\"%s: %w\", req, &RefusedError{Status: resp.StatusCode,",
+		more: []edit{{wsCl, "RetryAfter: retryAfter(resp.Header.Get(\"Retry-After\"), time.Now())}", "RetryAfter: retryAfter(resp.Header.Get(\"Retry-After\"), time.Now())})"}},
+		pkg:  "./internal/stt", test: "TestTheStreamTokenIsNeverLogged", want: "the log carries the stream token"},
+	{name: "nemotron silent start: never flagged", file: nemGo, from: "if !s.flaggedSS && speech-s.speechBase >= span {", to: "if false {",
+		pkg: "./internal/stt", test: "TestTheSilentStartCheck", want: "21 s of speech and no words: flags []"},
+	{name: "nemotron silent start: a dead input not flagged", file: nemGo, from: "if !s.flaggedDead && s.constRun >= span {", to: "if false {",
+		pkg: "./internal/stt", test: "TestTheSilentStartCheck", want: "21 s of a stuck level: flags []"},
+	{name: "nemotron silent start: digital silence flagged", file: nemGo, from: "if v != 0 && v == s.constVal {", to: "if v == s.constVal {",
+		pkg: "./internal/stt", test: "TestTheSilentStartCheck", want: `21 s of digital silence: flags ["dead_input"]`},
+	{name: "nemotron silent start: words never clear it", file: nemGo, from: "s.speechBase, s.flaggedSS = speech, false", to: "s.flaggedSS = false",
+		pkg: "./internal/stt", test: "TestTheSilentStartCheck", want: `21 s of speech with words: flags ["silent_start"]`},
+	{name: "captions: a partial stored as a line", file: trans, from: "\t\tif seg.Text == \"\" {\n\t\t\tdelete(m, t.Track)", to: "\t\tif seg.Text != \"\" {\n\t\t\ts.store.AddSegment(ctx, t.Track, store.SegText, start, end, seg.Text, engine)\n\t\t}\n\t\tif seg.Text == \"\" {\n\t\t\tdelete(m, t.Track)",
+		pkg: "./internal/server", test: "TestNemotronPartialsAreCaptionsNeverStoredAndFinalsAre", want: "the panel's lines"},
+	{name: "captions delayed: never shown", file: trans, from: "s.tr.delayed[t.Track] = true", to: "s.tr.delayed[t.Track] = false",
+		pkg: "./internal/server", test: "TestCaptionsDelayedShowsExactlyWhileOnTheFallback", want: `no "transcript" event`},
+	{name: "captions delayed: never cleared", file: trans, from: "\t\t} else {\n\t\t\tdelete(s.tr.delayed, t.Track)\n\t\t}\n", to: "\t\t}\n",
+		pkg: "./internal/server", test: "TestCaptionsDelayedShowsExactlyWhileOnTheFallback", want: `no "transcript" event`},
 
 	// ---- 3a: the deployment ----
 	{name: "deploy: track_cpu_cost left at 0.5", file: kEgress, from: "track_cpu_cost: 0.1", to: "track_cpu_cost: 0.5",

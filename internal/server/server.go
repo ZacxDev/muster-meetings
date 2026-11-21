@@ -26,6 +26,7 @@ import (
 	"embed"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"html/template"
 	"io"
 	"io/fs"
@@ -669,6 +670,9 @@ func (s *Server) Internal() http.Handler {
 		io.WriteString(w, "ok\n")
 		if s.xffUntrusted.Load() {
 			io.WriteString(w, "warning: "+XFFWarning+"\n")
+		}
+		if n := s.SilentStartFlags(); n > 0 {
+			fmt.Fprintf(w, "warning: %d silent-start flag(s): a track had speech energy, or one constant level, and no words for %s (see the log)\n", n, stt.SilentStart)
 		}
 	})
 	return mux

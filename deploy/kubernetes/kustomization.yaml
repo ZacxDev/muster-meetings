@@ -58,3 +58,8 @@ configMapGenerator:
       # Service name in muster's namespace.
       - stt-engine=utterance
       - stt-url=http://stt-cohere:8000
+      # The nemotron engine's Nemotron server (muster's stt-nemotron image),
+      # by its Service name: read only with stt-engine=nemotron, which also
+      # needs stt-url (its fallback) and MEETINGS_STREAM_STT_TOKEN in the
+      # Secret, or the plugin refuses to boot.
+      - stream-stt-url=ws://stt-nemotron:8000/v1/stream

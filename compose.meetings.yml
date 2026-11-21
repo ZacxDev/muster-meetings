@@ -26,11 +26,15 @@
 #                             readable by uid 65532
 #   LIVEKIT_API_KEY, LIVEKIT_API_SECRET
 #   MEETINGS_INGEST_SECRET    openssl rand -base64 32 (the ingest URL tokens' key)
-#   MEETINGS_STT_ENGINE       optional: utterance (the default) or off
+#   MEETINGS_STT_ENGINE       optional: utterance (the default), nemotron or off
 #   MEETINGS_STT_URL          optional: default http://stt-cohere:8000 (muster's
-#                             stt-cohere profile)
+#                             stt-cohere profile); nemotron's fallback too
 #   MEETINGS_STT_TOKEN        stt-cohere's bearer: the same value as muster's
 #                             MUSTER_STT_TOKEN
+#   MEETINGS_STREAM_STT_URL   nemotron only: the stt-nemotron server's
+#                             ws(s)://host:port/v1/stream (no default: this
+#                             stack runs no stt-nemotron)
+#   MEETINGS_STREAM_STT_TOKEN nemotron only: stt-nemotron's STT_API_TOKEN
 #   MEETINGS_TRUSTED_PROXIES, MEETINGS_CLIENT_IP_HEADER   (optional; see the README)
 #
 # Published on 127.0.0.1 only, for the stack's reverse proxy on this host:
@@ -83,6 +87,8 @@ services:
       MEETINGS_STT_ENGINE: ${MEETINGS_STT_ENGINE:-utterance}
       MEETINGS_STT_URL: ${MEETINGS_STT_URL:-http://stt-cohere:8000}
       MEETINGS_STT_TOKEN: ${MEETINGS_STT_TOKEN:-}
+      MEETINGS_STREAM_STT_URL: ${MEETINGS_STREAM_STT_URL:-}
+      MEETINGS_STREAM_STT_TOKEN: ${MEETINGS_STREAM_STT_TOKEN:-}
       MEETINGS_INGEST_SECRET: ${MEETINGS_INGEST_SECRET:-}
       # The ingest listens on the plugin's address on meetings-ingest only,
       # and Egress is sent there.

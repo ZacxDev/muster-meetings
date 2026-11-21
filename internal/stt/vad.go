@@ -64,6 +64,7 @@ type Endpointer struct {
 	buf      []int16 // the utterance's raw samples, from start
 	lastEnd  int64   // where the last speech subframe ended
 	speech   int     // speech subframes in the utterance
+	speechN  int64   // samples of speech subframes since the stream began
 }
 
 // NewEndpointer returns an endpointer at the start of a stream.
@@ -98,6 +99,9 @@ func (e *Endpointer) subframe() []VADEvent {
 	var out []VADEvent
 	rms := math.Sqrt(e.sumsq / float64(len(e.cur)))
 	isSpeech := rms >= Threshold
+	if isSpeech {
+		e.speechN += int64(len(e.cur))
+	}
 	end := e.pos
 	begin := end - int64(len(e.cur))
 	cur := e.cur
@@ -176,6 +180,15 @@ func (e *Endpointer) Flush() []VADEvent {
 	}
 	return nil
 }
+
+// SpeechSamples is how many samples of the stream so far were in speech
+// subframes (energy at or over Threshold after the DC filter): the
+// silent-start check's measure.
+func (e *Endpointer) SpeechSamples() int64 { return e.speechN }
+
+// InSpeech says an utterance is in progress, and where it began (its
+// pre-roll included).
+func (e *Endpointer) InSpeech() (bool, int64) { return e.inSpeech, e.start }
 
 // Pos is how many samples the endpointer has consumed.
 func (e *Endpointer) Pos() int64 { return e.pos }

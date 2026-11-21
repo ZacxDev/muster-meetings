@@ -3,7 +3,7 @@
 // per participant's microphone track; the ingest writes 16 kHz mono into it
 // and reads Segments out.
 //
-// This build has two engines:
+// This build has three engines:
 //
 //	utterance  the plugin's endpointer cuts the audio at pauses (≤ 15 s), and
 //	           each utterance is sent to muster's existing STT service
@@ -16,9 +16,10 @@
 //	fake       the same endpointer, and a scripted line per utterance: for
 //	           tests only (MEETINGS_TEST_MODE=1).
 //
-// The `nemotron` engine (phase 3c) speaks the Nemotron server's streaming
-// protocol and is selected by the same MEETINGS_STT_ENGINE; it implements
-// this same interface and shares the endpointer (its `flush`).
+//	nemotron   the Nemotron server's streaming protocol (nemotron.go):
+//	           partials as live captions, a final at each of the shared
+//	           endpointer's pauses (its `flush`), and a per-participant
+//	           fallback to utterance when the server is full or down.
 //
 // 🔴 A segment's text is what a participant SAID, and a guest is a stranger:
 // it is untrusted text. Every page renders it with textContent only, every
@@ -57,6 +58,14 @@ const (
 	// STT service failed): stored as a marker so the archive shows where
 	// text is missing, and the panel says "Transcript paused".
 	Gap Kind = "gap"
+	// EngineSwitch says the track's audio now goes to the engine Engine
+	// names (the nemotron engine's per-participant fallback and its return):
+	// the panel says "Captions delayed" while it is not the configured one.
+	// Nothing is stored.
+	EngineSwitch Kind = "engine"
+	// Flag is the silent-start check's telemetry (Text: FlagSilentStart or
+	// FlagDeadInput): logged and counted, never stored or shown.
+	Flag Kind = "flag"
 )
 
 // Segment is one piece of a stream's transcript. StartMS and EndMS are in
@@ -67,6 +76,10 @@ type Segment struct {
 	StartMS int64
 	EndMS   int64
 	Text    string
+	// Engine is the engine that produced it ("" is the configured one): a
+	// nemotron stream's fallback lines are stored as the utterance
+	// engine's.
+	Engine string
 }
 
 // Engine opens streams.

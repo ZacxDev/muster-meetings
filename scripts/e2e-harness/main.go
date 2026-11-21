@@ -24,6 +24,12 @@
 // MEETINGS_LIVEKIT_SERVER, or on PATH) and says "real_livekit": true; with
 // no binary it says false and the spec that needs one decides.
 //
+// With -stt=nemotron the plugin runs its real nemotron engine against the
+// fake Nemotron server (internal/stttest), whose script is captionLines: each
+// utterance's partials grow a word per 560 ms of audio, and its final is the
+// whole line. Each egress then streams two utterances of 3 s of speech, so a
+// partial caption stays on screen for seconds before its final replaces it.
+//
 // LiveKit is a fake (internal/livekittest): rooms and participants over its
 // server API, and a signalling endpoint that records, verified, the token a
 // browser connects with and refuses the connection (it carries no media).
@@ -59,6 +65,7 @@ import (
 	"github.com/ZacxDev/muster-meetings/internal/server"
 	"github.com/ZacxDev/muster-meetings/internal/store"
 	"github.com/ZacxDev/muster-meetings/internal/stt"
+	"github.com/ZacxDev/muster-meetings/internal/stttest"
 )
 
 var (
@@ -66,7 +73,19 @@ var (
 	ada = mustertest.Person{ID: 4093716825, Email: "ada.lovelace@example.test", DisplayName: "Ada L."}
 )
 
-var lkMode = flag.String("livekit", "fake", "fake, or real (a livekit-server binary)")
+var (
+	lkMode  = flag.String("livekit", "fake", "fake, or real (a livekit-server binary)")
+	sttMode = flag.String("stt", "fake", "fake (the fake engine), or nemotron (the nemotron engine against the fake Nemotron server)")
+)
+
+// captionLines is the fake Nemotron server's script (-stt=nemotron).
+var captionLines = []string{"Captions arrive word by word as Ada speaks.", "Then the next line follows."}
+
+// fallbackSTT is the nemotron engine's fallback in the harness: never used
+// unless the fake server refuses (it does not).
+type fallbackSTT struct{}
+
+func (fallbackSTT) Transcribe(context.Context, []int16) (string, error) { return "(fallback)", nil }
 
 // script is the fake STT engine's lines: one per utterance, in order, for
 // each track. The second looks like markup, to show it is rendered as text.
@@ -135,6 +154,15 @@ func run(logger *log.Logger) error {
 	// utterances (1 s of speech, 1 s of silence, twice) in real time.
 	lk.WebhookURL = "http://" + internalLn.Addr().String() + "/livekit/webhook"
 	lk.EgressAudio = func(room, identity, track string) []byte { return egresstest.Script(1000, 1000, 1000) }
+	var engine stt.Engine = stt.NewFake(script)
+	if *sttMode == "nemotron" {
+		const token = "e2e-harness-stream-token-0a1b"
+		nem := stttest.New(token)
+		defer nem.Close()
+		nem.Set(func(s *stttest.Server) { s.Lines = captionLines })
+		engine = stt.NewNemotron(nem.URL(), token, stt.NewUtterance(fallbackSTT{}), logger)
+		lk.EgressAudio = func(room, identity, track string) []byte { return egresstest.Script(1000, 3000, 3000) }
+	}
 	real := false
 	if *lkMode == "real" {
 		if api, stop, err := startLiveKit(logger, "http://"+internalLn.Addr().String()); err != nil {
@@ -150,9 +178,10 @@ func run(logger *log.Logger) error {
 	}
 	srv := server.New(server.Config{PublicURL: pluginURL, MusterOrigin: parentOrigin, Log: logger,
 		LiveKit: lkc, LiveKitURL: lkWS, ICE: "all",
-		// The fake engine (MEETINGS_TEST_MODE's), and the ingest listener
-		// the fake Egress streams to.
-		Engine: stt.NewFake(script), IngestURL: "ws://" + ingestLn.Addr().String(), IngestKey: []byte("e2e harness ingest key 0123456789ab")}, st, a)
+		// The fake engine (MEETINGS_TEST_MODE's) or the nemotron engine
+		// against the fake Nemotron server, and the ingest listener the fake
+		// Egress streams to.
+		Engine: engine, IngestURL: "ws://" + ingestLn.Addr().String(), IngestKey: []byte("e2e harness ingest key 0123456789ab")}, st, a)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go srv.Run(ctx)

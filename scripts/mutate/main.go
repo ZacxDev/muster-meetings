@@ -10,8 +10,9 @@
 // and a no-op edit (it must survive), so a sweep that cannot tell the two
 // apart fails as a whole.
 //
-//	go run ./scripts/mutate          # every mutant
-//	go run ./scripts/mutate -list    # names only
+//	go run ./scripts/mutate             # every mutant
+//	go run ./scripts/mutate -list       # names only
+//	go run ./scripts/mutate -match re   # the mutants whose name matches re, and the two controls
 //
 // It exits non-zero unless every security mutant is killed and both controls
 // behave. Run it from the repository root. It refuses a dirty tree (`git
@@ -28,6 +29,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -93,6 +95,17 @@ const (
 	mainGo = "main.go"
 	link   = "internal/store/link.go"
 	client = "internal/muster/client.go"
+	// phase 2b
+	calls   = "internal/server/calls.go"
+	guest   = "internal/server/guest.go"
+	machine = "internal/server/machine.go"
+	parts   = "internal/store/participants.go"
+	lkToken = "internal/livekit/token.go"
+	lkHook  = "internal/livekit/webhook.go"
+	name    = "internal/lobby/name.go"
+	knocker = "internal/lobby/knocker.go"
+	limiter = "internal/lobby/limiter.go"
+	appJS   = "internal/server/web/static/app.js"
 )
 
 var mutants = []mutant{
@@ -147,7 +160,7 @@ var mutants = []mutant{
 			tok, ok = c.Value, true
 		}`,
 		pkg: "./internal/server", test: "TestOwnerRoutesRefuseAnythingButALiveBearerSession", want: "with the token as cookie = 200"},
-	{name: "frame-ancestors: any origin", file: srv, from: `form-action 'none'; frame-ancestors " + s.cfg.MusterOrigin`, to: `form-action 'none'; frame-ancestors *"`,
+	{name: "frame-ancestors: any origin", file: srv, from: `func (s *Server) ownerPageCSP() string { return s.pageCSP(s.cfg.MusterOrigin) }`, to: `func (s *Server) ownerPageCSP() string { return s.pageCSP("*") }`,
 		pkg: "./internal/server", test: "TestEnterHeadersFrameAncestorsIsMustersOriginAndNoCookieIsSet", want: "frame-ancestors = \"*\""},
 	{name: "referrer: send the origin", file: srv, from: `h.Set("Referrer-Policy", "no-referrer")`, to: `h.Set("Referrer-Policy", "origin")`,
 		pkg: "./internal/server", test: "TestEnterHeadersFrameAncestorsIsMustersOriginAndNoCookieIsSet", want: "Referrer-Policy = \"origin\""},
@@ -330,6 +343,167 @@ var mutants = []mutant{
 	{name: "log: the full URL with its query", file: srv, from: `RedactPath(r.URL.Path), sw.status`, to: `r.URL.String(), sw.status`,
 		pkg: "./internal/server", test: "TestTheLogCarriesNoCodeTokenOrQuery", want: "the log carries the hand-off code"},
 
+	// ==== phase 2b: the call, the lobby, the webhook, the notice ====
+
+	// ---- 🔴 no guest token before admission ----
+	{name: "lobby: mint a guest token on knock", file: guest, from: `writeJSON(w, http.StatusCreated, map[string]any{"ticket": k.Ticket})`,
+		to:   "tok, _ := s.cfg.LiveKit.Keys().Mint(livekit.Participant{Identity: \"guest-\" + k.ParticipantID}, livekit.GuestGrant(store.RoomName(k.MeetingID)), now)\n\twriteJSON(w, http.StatusCreated, map[string]any{\"ticket\": k.Ticket, \"token\": tok})",
+		more: []edit{{guest, "\t\"github.com/ZacxDev/muster-meetings/internal/lobby\"\n", "\t\"github.com/ZacxDev/muster-meetings/internal/livekit\"\n\t\"github.com/ZacxDev/muster-meetings/internal/lobby\"\n"}},
+		pkg:  "./internal/server", test: "TestNoGuestTokenBeforeAdmissionAndItsGrantIsExact", want: "want 201 with the ticket and nothing else"},
+	{name: "lobby: the token gate skips the admission predicate", file: calls, from: "if err != nil || !ok {\n\t\treturn tokenAnswer{}, false, err", to: "if err != nil {\n\t\treturn tokenAnswer{}, false, err",
+		pkg: "./internal/server", test: "TestNoGuestTokenBeforeAdmissionAndItsGrantIsExact", want: `no "waiting" event (the stream so far: "event: admitted`},
+	{name: "lobby: an event stream for a ticket that is not admitted", file: guest, from: `if g.State != store.StAdmitted || !g.MeetingLive {`, to: `if !g.MeetingLive {`,
+		pkg: "./internal/server", test: "TestADeniedGuestGetsNoToken", want: "a denied ticket's event stream = 200"},
+
+	// ---- 🔴 a ticket opens only its own meeting ----
+	{name: "ticket: the link code is not checked", file: parts, from: "`m.join_code_sha256 = ? AND p.ticket_sha256 = ?`", to: "`? IS NOT NULL AND p.ticket_sha256 = ?`",
+		pkg: "./internal/server", test: "TestATicketCannotWaitOnOrGetATokenForAnotherMeeting", want: "A's ticket on B's link /wait = 200"},
+	{name: "ticket: a guest's ticket opens the owner routes", file: secret,
+		from: "func ValidSessionToken(s string) bool { return sessionTokenRE.MatchString(s) }",
+		to:   "func ValidSessionToken(s string) bool { return sessionTokenRE.MatchString(s) || joinCodeRE.MatchString(s) }",
+		more: []edit{{st, "`SELECT subject, expires_at FROM owner_sessions WHERE token_sha256 = ? AND expires_at > ?`,\n\t\tHash(token), ms(now))",
+			"`SELECT subject, expires_at FROM owner_sessions WHERE token_sha256 = ? AND expires_at > ? UNION ALL SELECT m.subject, ? + 1 FROM participants p JOIN meetings m ON m.id = p.meeting_id WHERE p.ticket_sha256 = ?`,\n\t\tHash(token), ms(now), ms(now), Hash(token))"}},
+		pkg: "./internal/server", test: "TestAGuestReachesNoOwnerRoute", want: "with a guest's ticket as the bearer = 200"},
+
+	// ---- 🔴 a denied guest gets no token; the lobby state machine ----
+	{name: "deny: a deny admits", file: parts, from: "EvDeny:   {[]string{StWaiting}, StDenied},", to: "EvDeny:   {[]string{StWaiting}, StAdmitted},",
+		pkg: "./internal/server", test: "TestADeniedGuestGetsNoToken", want: `no "denied" event (the stream so far: "event: waiting`},
+	{name: "deny: the predicate admits a denied guest", file: parts, from: "p.kind = 'guest' AND p.state = 'admitted'))`", to: "p.kind = 'guest' AND p.state IN ('admitted', 'denied')))`",
+		pkg: "./internal/store", test: "TestMayBeInRoom", want: "a denied guest: true, want false"},
+	{name: "state machine: remove a waiting guest", file: parts, from: "EvRemove: {[]string{StAdmitted}, StRemoved},", to: "EvRemove: {[]string{StAdmitted, StWaiting}, StRemoved},",
+		pkg: "./internal/store", test: "TestTheLobbyStateMachine", want: `waiting/remove: ("removed", true), want ("", false)`},
+	{name: "state machine: admit a denied guest", file: parts, from: "EvAdmit:  {[]string{StWaiting}, StAdmitted},", to: "EvAdmit:  {[]string{StWaiting, StDenied}, StAdmitted},",
+		pkg: "./internal/store", test: "TestTheLobbyStateMachine", want: `denied/admit: ("admitted", true), want ("", false)`},
+	{name: "state machine: deny an admitted guest", file: parts, from: "EvDeny:   {[]string{StWaiting}, StDenied},", to: "EvDeny:   {[]string{StWaiting, StAdmitted}, StDenied},",
+		pkg: "./internal/store", test: "TestTheLobbyStateMachine", want: `admitted/deny: ("denied", true), want ("", false)`},
+	{name: "state machine: a waiting guest leaves", file: parts, from: "EvLeave:  {[]string{StAdmitted}, StLeft},", to: "EvLeave:  {[]string{StAdmitted, StWaiting}, StLeft},",
+		pkg: "./internal/store", test: "TestTheLobbyStateMachine", want: `waiting/leave: ("left", true), want ("", false)`},
+	{name: "state machine: something leaves ended", file: parts, from: "EvEnd:    {[]string{StWaiting, StAdmitted}, StEnded},", to: "EvEnd:    {[]string{StWaiting, StAdmitted, StDenied}, StEnded},",
+		pkg: "./internal/store", test: "TestTheLobbyStateMachine", want: `denied/end: ("ended", true), want ("", false)`},
+
+	// ---- 🔴 grants, exactly ----
+	{name: "grants: guest roomAdmin", file: lkToken, from: "RoomJoin: true, Room: room, RoomAdmin: false,", to: "RoomJoin: true, Room: room, RoomAdmin: true,",
+		pkg: "./internal/livekit", test: "TestGrantsAreExactlyAsDesigned", want: "guest grant ="},
+	{name: "grants: guest canPublishData left out (LiveKit reads it as true)", file: lkToken, from: "CanPublishData: ptr(false)", to: "CanPublishData: nil",
+		pkg: "./internal/livekit", test: "TestGrantsAreExactlyAsDesigned", want: "guest grant ="},
+	{name: "grants: guest recorder", file: lkToken, from: "RoomJoin: true, Room: room, RoomAdmin: false,", to: "RoomJoin: true, Room: room, RoomAdmin: false, Recorder: true,",
+		pkg: "./internal/livekit", test: "TestGrantsAreExactlyAsDesigned", want: "guest grant ="},
+	{name: "grants: hidden guest", file: lkToken, from: "RoomJoin: true, Room: room, RoomAdmin: false,", to: "RoomJoin: true, Room: room, RoomAdmin: false, Hidden: true,",
+		pkg: "./internal/livekit", test: "TestGrantsAreExactlyAsDesigned", want: "guest grant ="},
+	{name: "grants: a guest may rename itself", file: lkToken, from: "CanPublishData: ptr(false), CanUpdateOwnMetadata: ptr(false),", to: "CanPublishData: ptr(false), CanUpdateOwnMetadata: ptr(true),",
+		pkg: "./internal/livekit", test: "TestGrantsAreExactlyAsDesigned", want: "guest grant ="},
+	{name: "grants: a 10-minute token", file: lkToken, from: "const TokenTTL = 2 * time.Minute", to: "const TokenTTL = 10 * time.Minute",
+		pkg: "./internal/livekit", test: "TestMintIsATwoMinuteTokenForOneIdentity", want: "want a life of exactly 120 s"},
+	{name: "grants: the guest's room is not the meeting's", file: calls, from: "livekit.GuestGrant(g.Room)", to: "livekit.GuestGrant(\"meeting-\" + g.Identity)",
+		pkg: "./internal/server", test: "TestNoGuestTokenBeforeAdmissionAndItsGrantIsExact", want: "the guest's grant ="},
+
+	// ---- 🔴 removal: revoked and kicked ----
+	{name: "removal: LiveKit is not called", file: calls, from: "err := s.cfg.LiveKit.RemoveParticipant(r.Context(), mv.Room, mv.Identity)", to: "var err error",
+		pkg: "./internal/server", test: "TestARemovedGuestIsRevokedKickedAndKeptOut", want: "after the removal the room holds"},
+	{name: "removal: the identity is not revoked", file: parts, from: "EvRemove: {[]string{StAdmitted}, StRemoved},", to: "EvRemove: {[]string{StAdmitted}, StAdmitted},",
+		pkg: "./internal/server", test: "TestARemovedGuestIsRevokedKickedAndKeptOut", want: `no "removed" event`},
+	{name: "removal: a removed ticket may wait again", file: guest, from: "case store.StRemoved, store.StLeft:", to: "case store.StLeft:",
+		pkg: "./internal/server", test: "TestARemovedGuestIsRevokedKickedAndKeptOut", want: "the removed ticket's /wait = 200"},
+	{name: "rejoin: the participant_joined check is removed", file: machine, from: "\t\ts.admitOrRemove(ctx, room, ev.Participant.Identity)\n", to: "\t\t_ = 0\n",
+		pkg: "./internal/server", test: "TestARemovedGuestIsRevokedKickedAndKeptOut", want: "is back in the LiveKit room after rejoining with the old token"},
+	{name: "rejoin: anyone joining is removed (control)", file: machine, from: "\tif ok {\n\t\treturn\n\t}\n\tif err := s.cfg.LiveKit.RemoveParticipant", to: "\tif false {\n\t\treturn\n\t}\n\tif err := s.cfg.LiveKit.RemoveParticipant",
+		pkg: "./internal/server", test: "TestARemovedGuestIsRevokedKickedAndKeptOut", want: "an admitted guest's join was removed (the positive control)"},
+
+	// ---- 🔴 the webhook ----
+	{name: "webhook: the body hash is not compared", file: lkHook, from: "if subtle.ConstantTimeCompare(got[:], want) != 1 {", to: "if false {",
+		pkg: "./internal/server", test: "TestTheWebhookActsOnlyOnAVerifiedRequest", want: "a tampered body: 200"},
+	{name: "webhook: the signature is not compared", file: lkToken, from: "if subtle.ConstantTimeCompare(m.Sum(nil), sig) != 1 {", to: "if false {",
+		pkg: "./internal/server", test: "TestTheWebhookActsOnlyOnAVerifiedRequest", want: "a wrong secret: 200"},
+	{name: "webhook: the handler ignores the verification", file: machine, from: "if err != nil {\n\t\ts.cfg.Log.Printf(\"webhook: refused: does not verify\")", to: "if false {\n\t\ts.cfg.Log.Printf(\"webhook: refused: does not verify\")",
+		pkg: "./internal/server", test: "TestTheWebhookActsOnlyOnAVerifiedRequest", want: "no header: 200"},
+	{name: "token: the algorithm is not checked", file: lkToken, from: `json.Unmarshal(hb, &hdr) != nil || hdr.Alg != "HS256"`, to: `json.Unmarshal(hb, &hdr) != nil`,
+		pkg: "./internal/livekit", test: "TestVerifyRefusesEveryOtherToken", want: "alg HS512: verified"},
+	{name: "token: the issuer is not checked", file: lkToken, from: "if json.Unmarshal(pb, &c) != nil || c.Issuer != k.Key {", to: "if json.Unmarshal(pb, &c) != nil {",
+		pkg: "./internal/livekit", test: "TestVerifyRefusesEveryOtherToken", want: "another issuer: verified"},
+	{name: "token: the expiry is not checked", file: lkToken, from: "c.Expires == 0 || n > c.Expires+int64(Leeway/time.Second) ||", to: "c.Expires == 0 ||",
+		pkg: "./internal/livekit", test: "TestVerifyRefusesEveryOtherToken", want: "expired: verified"},
+
+	// ---- 🔴 ending a meeting ----
+	{name: "end: the room is not deleted", file: calls, from: "if err := s.cfg.LiveKit.DeleteRoom(r.Context(), room); err != nil {\n\t\ts.cfg.Log.Printf(\"end: LiveKit",
+		to:  "if err := error(nil); room == \"\" && err != nil {\n\t\ts.cfg.Log.Printf(\"end: LiveKit",
+		pkg: "./internal/server", test: "TestEndingAMeetingKillsTheLinkDeletesTheRoomAndEndsEveryToken", want: "the room survived End meeting"},
+	{name: "end: the meeting stays open", file: parts, from: "`UPDATE meetings SET state = 'ended', ended_at = ? WHERE id = ? AND subject = ? AND state = 'open' RETURNING room`",
+		to:  "`UPDATE meetings SET state = 'open', ended_at = ? WHERE id = ? AND subject = ? AND state = 'open' RETURNING room`",
+		pkg: "./internal/server", test: "TestEndingAMeetingKillsTheLinkDeletesTheRoomAndEndsEveryToken", want: `no "ended" event`},
+	{name: "end: a held token may be in an ended meeting's room", file: parts, from: "`SELECT count(*) FROM meetings m WHERE m.room = ? AND `+live+` AND (",
+		to:  "`SELECT count(*) FROM meetings m WHERE m.room = ? AND ? IS NOT NULL AND (",
+		pkg: "./internal/server", test: "TestEndingAMeetingKillsTheLinkDeletesTheRoomAndEndsEveryToken", want: "the owner's held token re-created the ended meeting's room and it survived"},
+	{name: "ended link: the guest link skips the state check", file: parts, from: "if state != \"open\" || created <= cutoff(now) {\n\t\treturn GuestMeeting{}, ErrGone", to: "if false {\n\t\treturn GuestMeeting{}, ErrGone",
+		pkg: "./internal/server", test: "TestEndingAMeetingKillsTheLinkDeletesTheRoomAndEndsEveryToken", want: "the link after End = 200"},
+	{name: "ended link: no 24 h cap on the guest link", file: parts, from: "if state != \"open\" || created <= cutoff(now) {\n\t\treturn GuestMeeting{}, ErrGone", to: "if state != \"open\" {\n\t\treturn GuestMeeting{}, ErrGone",
+		pkg: "./internal/server", test: "TestTheLinkIs410After24Hours", want: "the page at 24 h = 200"},
+
+	// ---- 🔴 the consent notice ----
+	{name: "notice at knock: the knock ignores the notice", file: parts, from: "shown != cur {", to: "false && shown != cur {",
+		pkg: "./internal/server", test: "TestAKnockWithAStaleNoticeIs409", want: "a knock with the stale notice = 201"},
+	{name: "consent: only an admitted guest locks the switches", file: parts, from: "const knockedSQL = `SELECT count(*) FROM participants WHERE meeting_id = ? AND kind = 'guest'`",
+		to:  "const knockedSQL = `SELECT count(*) FROM participants WHERE meeting_id = ? AND kind = 'guest' AND state = 'admitted'`",
+		pkg: "./internal/store", test: "TestASwitchGoesBackOnOnlyBeforeAnyGuestKnocked", want: "back on with a guest waiting: <nil>, want ErrSwitchLocked"},
+	{name: "consent: a switch never locks", file: parts, from: "\t\tif knocked > 0 {\n\t\t\treturn Notice{}, ErrSwitchLocked", to: "\t\tif false {\n\t\t\treturn Notice{}, ErrSwitchLocked",
+		pkg: "./internal/store", test: "TestASwitchGoesBackOnOnlyBeforeAnyGuestKnocked", want: "want ErrSwitchLocked"},
+	{name: "consent: Record defaults off", file: repo, from: "SELECT ?, ?, ?, ?, 'open', 1, 1, ?", to: "SELECT ?, ?, ?, ?, 'open', 0, 1, ?",
+		pkg: "./internal/store", test: "TestASwitchGoesBackOnOnlyBeforeAnyGuestKnocked", want: "a new meeting: record false, ai true; want both on"},
+	{name: "notice is current: the guest stream keeps the notice it opened with", file: guest, from: `snap := map[string]any{"notice": lobby.NoticeFor(cur.Notice.Record, cur.Notice.AI)}`,
+		to:  `snap := map[string]any{"notice": lobby.NoticeFor(g.Notice.Record, g.Notice.AI)}`,
+		pkg: "./internal/server", test: "TestTheAdmittedGuestSeesTheCurrentNotice", want: "after AI off the admitted guest's notice"},
+
+	// ---- 🔴 the guest name ----
+	{name: "name: format (bidi) characters accepted", file: name, from: `case unicode.Is(unicode.Cf, r) && r != '‍':`, to: `case false:`,
+		pkg: "./internal/lobby", test: "TestCleanNameTrimsAndRefusesControlAndBidiCharacters", want: "RIGHT-TO-LEFT OVERRIDE: CleanName"},
+	{name: "name: control characters accepted", file: name, from: `case unicode.Is(unicode.Cc, r), unicode.Is(unicode.Zl, r), unicode.Is(unicode.Zp, r):`, to: `case false:`,
+		pkg: "./internal/lobby", test: "TestCleanNameTrimsAndRefusesControlAndBidiCharacters", want: "a NUL: CleanName"},
+	{name: "name: 41 characters accepted", file: name, from: "n < 1 || n > MaxNameRunes", to: "n < 1 || n > MaxNameRunes+1",
+		pkg: "./internal/lobby", test: "TestCleanNameTrimsAndRefusesControlAndBidiCharacters", want: "41 characters: CleanName"},
+	{name: "name: not trimmed", file: name, from: "\ts = strings.TrimSpace(s)\n", to: "\t_ = strings.TrimSpace\n",
+		pkg: "./internal/lobby", test: "TestCleanNameTrimsAndRefusesControlAndBidiCharacters", want: `CleanName("  Grace H.  ")`},
+	{name: "name: the knock skips the check", file: guest, from: "name, err := lobby.CleanName(in.Name)", to: "name, err := in.Name, error(nil)",
+		pkg: "./internal/server", test: "TestTheGuestNameIsCheckedAndShownAsText", want: "right-to-left override: knock = 201"},
+	{name: "name: the owner's lobby renders it as markup", file: appJS, from: "name.textContent = p.name + ' (guest)';", to: "name.innerHTML = p.name + ' (guest)';",
+		pkg: "./internal/server", test: "TestNoPageScriptInterpretsMarkup", want: "app.js uses innerHTML"},
+
+	// ---- 🔴 knock limits ----
+	{name: "knock limits: no per-meeting cap", file: parts, from: "if waiting >= MaxWaiting {", to: "if false {",
+		pkg: "./internal/server", test: "TestKnockLimits", want: "the 21st waiting knock = 201"},
+	{name: "knock limits: no per-address cap", file: guest, from: "if !s.limiter.Allow(lobby.ClientAddr(r, s.cfg.TrustedProxies), now) {", to: "if false {",
+		pkg: "./internal/server", test: "TestKnockLimits", want: "the 11th knock from one address = 201"},
+	{name: "knock limits: an untrusted peer's X-Forwarded-For is believed", file: limiter, from: "\tif inAny(addr, trusted) {\n", to: "\tif true {\n",
+		pkg: "./internal/lobby", test: "TestClientAddr", want: `peer 198.51.100.7:4000, XFF "203.0.113.9": 203.0.113.9, want 198.51.100.7`},
+
+	// ---- 🔴 the knock notification ----
+	{name: "knock push: no presence check", file: knocker, from: "case k.hub.OwnerWatching(id):", to: "case false:",
+		pkg: "./internal/server", test: "TestTheKnockIsPushedOnlyWhileTheOwnerIsNotLooking", want: "after the owner opened the meeting"},
+	{name: "knock push: only the first knock", file: knocker, from: "case waiting > s.sent:", to: "case s.sent == 0:",
+		pkg: "./internal/server", test: "TestTheKnockIsPushedOnlyWhileTheOwnerIsNotLooking", want: "after the count rose to 2"},
+	{name: "knock push: every lobby change pushes", file: knocker, from: "case waiting > s.sent:", to: "case waiting > 0:",
+		pkg: "./internal/server", test: "TestTheKnockIsPushedOnlyWhileTheOwnerIsNotLooking", want: "after a deny"},
+	{name: "knock push: an empty lobby withdraws nothing", file: knocker, from: "\t\tk.withdraw(ctx, subject, id, s)\n\t\ts.sent = 0", to: "\t\ts.sent = 0",
+		pkg: "./internal/server", test: "TestTheKnockIsPushedOnlyWhileTheOwnerIsNotLooking", want: "after the lobby emptied"},
+
+	// ---- 🔴 the reconcile loop ----
+	{name: "reconcile: the ListParticipants loop is removed", file: machine, from: "\t\tfor _, p := range ps {\n\t\t\ts.admitOrRemove(ctx, room, p.Identity)\n\t\t}", to: "\t\t_ = ps",
+		pkg: "./internal/server", test: "TestTheReconcileLoopRemovesWhoIsNotAdmittedAndDeletesEndedRooms", want: "after one pass the room holds"},
+	{name: "reconcile: ended meetings' rooms are kept", file: machine, from: "if strings.HasPrefix(rm.Name, \"meeting-\") {", to: "if false {",
+		pkg: "./internal/server", test: "TestTheReconcileLoopRemovesWhoIsNotAdmittedAndDeletesEndedRooms", want: "the reconcile pass left an ended meeting's room"},
+
+	// ---- 🔴 ownership of the call ----
+	{name: "ownership: a lobby move without the owner filter", file: parts, from: "`SELECT room, state, created_at FROM meetings WHERE id = ? AND subject = ?`", to: "`SELECT room, state, created_at FROM meetings WHERE id = ? AND ? IS NOT NULL`",
+		pkg: "./internal/server", test: "TestAnotherPersonCannotDriveTheCall", want: "/admit = 200"},
+	{name: "ownership: End without the owner filter", file: parts, from: "WHERE id = ? AND subject = ? AND state = 'open' RETURNING room`", to: "WHERE id = ? AND ? IS NOT NULL AND state = 'open' RETURNING room`",
+		pkg: "./internal/server", test: "TestAnotherPersonCannotDriveTheCall", want: "/end = 200"},
+
+	// ---- 🔴 no ticket in a URL; the pages' policies ----
+	{name: "ticket in query: accepted", file: guest, from: "if r.URL.RawQuery != \"\" || r.URL.ForceQuery {", to: "if false {",
+		pkg: "./internal/server", test: "TestNoTicketCodeOrNameInAURLOrALog", want: "/wait with ?ticket= = 200"},
+	{name: "csp: connect anywhere", file: srv, from: "connect := \"'self'\"", to: "connect := \"*\"",
+		pkg: "./internal/server", test: "TestThePagesPoliciesArePinned", want: "the owner page's CSP ="},
+	{name: "csp: the guest page may be framed", file: srv, from: "func (s *Server) guestPageCSP() string { return s.pageCSP(\"'none'\") }", to: "func (s *Server) guestPageCSP() string { return s.pageCSP(\"*\") }",
+		pkg: "./internal/server", test: "TestThePagesPoliciesArePinned", want: "the guest page's CSP ="},
+
 	// ---- configuration ----
 	{name: "config: allow the plugin on muster's own origin", file: mainGo, from: `if c.PublicURL == c.MusterOrigin {`, to: `if false {`,
 		pkg: ".", test: "TestLoadConfig", want: "public URL is muster's origin: LoadConfig accepted it"},
@@ -337,7 +511,21 @@ var mutants = []mutant{
 
 func main() {
 	list := flag.Bool("list", false, "print the mutants' names and stop")
+	match := flag.String("match", "", "run only the mutants whose name matches this regular expression (the controls always run)")
 	flag.Parse()
+	if *match != "" {
+		re, err := regexp.Compile(*match)
+		if err != nil {
+			fatalf("-match: %v", err)
+		}
+		var keep []mutant
+		for _, m := range mutants {
+			if strings.HasPrefix(m.name, "control: ") || re.MatchString(m.name) {
+				keep = append(keep, m)
+			}
+		}
+		mutants = keep
+	}
 	if *list {
 		for _, m := range mutants {
 			fmt.Println(m.name)

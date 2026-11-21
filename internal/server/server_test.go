@@ -165,6 +165,12 @@ func (e *env) do(method, path, bearer string, body any, hdr ...string) (*http.Re
 		e.t.Fatal(err)
 	}
 	defer resp.Body.Close()
+	if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+		// An event stream does not end: its status is the answer. (A mutant
+		// that opens a stream where a refusal belongs must fail its test,
+		// not hang it.)
+		return resp, []byte("<an event stream>")
+	}
 	raw, _ := io.ReadAll(resp.Body)
 	return resp, raw
 }

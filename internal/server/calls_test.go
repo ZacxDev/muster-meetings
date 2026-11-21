@@ -19,6 +19,7 @@ import (
 	"github.com/ZacxDev/muster-meetings/internal/livekit"
 	"github.com/ZacxDev/muster-meetings/internal/livekittest"
 	"github.com/ZacxDev/muster-meetings/internal/mustertest"
+	"github.com/ZacxDev/muster-meetings/internal/server"
 	"github.com/ZacxDev/muster-meetings/internal/store"
 )
 
@@ -575,6 +576,9 @@ func TestEndingAMeetingKillsTheLinkDeletesTheRoomAndEndsEveryToken(t *testing.T)
 	ws.want("waiting")
 	gs := e.guestEvents(c.Code, at)
 	gs.want("meeting")
+	_, otRaw := e.do("POST", "/api/meetings/"+c.ID+"/token", c.Sess, nil)
+	var ot map[string]string
+	json.Unmarshal(otRaw, &ot)
 	resp, raw := e.do("POST", "/api/meetings/"+c.ID+"/end", c.Sess, nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("end = %d %s", resp.StatusCode, raw)
@@ -605,7 +609,44 @@ func TestEndingAMeetingKillsTheLinkDeletesTheRoomAndEndsEveryToken(t *testing.T)
 	}
 	e.lk.Webhook(e.internal.URL+"/livekit/webhook", "participant_joined", c.Room, tok["identity"])
 	if _, ok := e.lk.Room(c.Room); ok {
-		t.Fatalf("a held token re-created the ended meeting's room and it survived: %v", e.lk.InRoom(c.Room))
+		t.Fatalf("a guest's held token re-created the ended meeting's room and it survived: %v", e.lk.InRoom(c.Room))
+	}
+	// The owner's held token too: nobody may be in an ended meeting's room.
+	if _, _, err := e.lk.Join(ot["token"]); err != nil {
+		t.Fatal(err)
+	}
+	e.lk.Webhook(e.internal.URL+"/livekit/webhook", "participant_joined", c.Room, store.OwnerIdentity)
+	if _, ok := e.lk.Room(c.Room); ok {
+		t.Fatalf("the owner's held token re-created the ended meeting's room and it survived: %v", e.lk.InRoom(c.Room))
+	}
+}
+
+// Both pages' policies, pinned whole (design: "Every page sets its own
+// strict CSP"): their own script, style and images; their own API and
+// LiveKit's signalling origin, wss and https, and nothing else; framed by
+// muster's origin (owner) or by nobody (guest).
+func TestThePagesPoliciesArePinned(t *testing.T) {
+	e := newEnv(t)
+	host := strings.TrimPrefix(e.lk.WSURL(), "ws://")
+	rest := "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self' ws://" + host + " http://" + host +
+		"; media-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors "
+	resp, _ := e.framed(enterPath(e.fake.MintApp(app.PluginID, ada.ID, ""), app.PluginID))
+	if got := resp.Header.Get("Content-Security-Policy"); got != rest+musterOrigin {
+		t.Errorf("the owner page's CSP =\n%s\nwant\n%s", got, rest+musterOrigin)
+	}
+	c := e.meeting(bea)
+	resp, _ = e.do("GET", "/j/"+c.Code, "", nil)
+	if got := resp.Header.Get("Content-Security-Policy"); got != rest+"'none'" {
+		t.Errorf("the guest page's CSP =\n%s\nwant\n%s", got, rest+"'none'")
+	}
+	if got := resp.Header.Get("X-Frame-Options"); got != "DENY" {
+		t.Errorf("the guest page's X-Frame-Options = %q", got)
+	}
+	if got := resp.Header.Get("Permissions-Policy"); got != "camera=(self), microphone=(self), display-capture=(self)" {
+		t.Errorf("the guest page's Permissions-Policy = %q", got)
+	}
+	if got := server.RTCOrigins("wss://meet-rtc.example.test"); got != "wss://meet-rtc.example.test https://meet-rtc.example.test" {
+		t.Errorf("RTCOrigins(wss) = %q", got)
 	}
 }
 

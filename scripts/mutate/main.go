@@ -597,7 +597,7 @@ var mutants = []mutant{
 		pkg: ".", test: "TestLoadConfigClientIPHeader", want: "set without trusted proxies: LoadConfig = <nil>"},
 	{name: "client ip header: X-Forwarded-For accepted as its name", file: mainGo, from: `if v == "X-Forwarded-For" {`, to: `if false {`,
 		pkg: ".", test: "TestLoadConfigClientIPHeader", want: `MEETINGS_CLIENT_IP_HEADER="X-Forwarded-For": LoadConfig accepted it`},
-	{name: "client ip header: not passed to the server", file: mainGo, from: "\t\tClientIPHeader: cfg.ClientIPHeader}", to: "\t\tClientIPHeader: \"\"}",
+	{name: "client ip header: not passed to the server", file: mainGo, from: "\t\tClientIPHeader: cfg.ClientIPHeader,", to: "\t\tClientIPHeader: \"\",",
 		pkg: ".", test: "TestTheProxySettingsReachTheServer", want: `server config: header ""`},
 
 	// ---- 🔴 phase 2c: the deployment files ----
@@ -635,7 +635,7 @@ var mutants = []mutant{
 		pkg: "./deploy", test: "TestKubernetesNetworkPolicies", want: "the plugin's :8081 admits [ANYONE]"},
 	{name: "deploy: LiveKit may reach the plugin's public port", file: kNetPol, from: "              app.kubernetes.io/name: muster-meetings\n      ports:\n        - {protocol: TCP, port: 8081}", to: "              app.kubernetes.io/name: muster-meetings\n      ports:\n        - {protocol: TCP, port: 8081}\n        - {protocol: TCP, port: 8080}",
 		pkg: "./deploy", test: "TestKubernetesNetworkPolicies", want: "the livekit pods' egress is"},
-	{name: "deploy: the plugin may reach anything (an empty egress rule)", file: kNetPol, from: "      ports:\n        - {protocol: TCP, port: 7880}\n", to: "      ports:\n        - {protocol: TCP, port: 7880}\n    - {}\n",
+	{name: "deploy: the plugin may reach anything (an empty egress rule)", file: kNetPol, from: "    - to:\n        - podSelector:\n            matchLabels:\n              app.kubernetes.io/name: stt-cohere\n", to: "    - {}\n    - to:\n        - podSelector:\n            matchLabels:\n              app.kubernetes.io/name: stt-cohere\n",
 		pkg: "./deploy", test: "TestKubernetesNetworkPolicies", want: "the muster-meetings pods' egress is"},
 	{name: "deploy: LiveKit may reach anything (a rule with no ports)", file: kNetPol, from: "              app.kubernetes.io/name: muster-meetings\n      ports:\n        - {protocol: TCP, port: 8081}\n", to: "              app.kubernetes.io/name: muster-meetings\n      ports:\n        - {protocol: TCP, port: 8081}\n    - {}\n",
 		pkg: "./deploy", test: "TestKubernetesNetworkPolicies", want: "the livekit pods' egress is"},
@@ -681,7 +681,7 @@ var mutants = []mutant{
 	// ---- 3a: the ingest's token (Egress sends no header) ----
 	{name: "ingest: the token check removed", file: trans, from: "if err := p.Check(s.cfg.IngestKey, t.MeetingID, track, t.Nonce, now); err != nil {",
 		to:  "if err := p.Check(s.cfg.IngestKey, t.MeetingID, track, t.Nonce, now); false && err != nil {",
-		pkg: "./internal/server", test: "TestTheIngestTokenGatesEveryStream", want: "a tampered token: the upgrade = 101"},
+		pkg: "./internal/server", test: "TestTheIngestTokenGatesEveryStream", want: "the upgrade = 101, want 401"},
 	{name: "ingest: an older egress's token opens the track", file: ingTok, from: "if !hmac.Equal([]byte(p.Nonce), []byte(nonce)) {", to: "if false {",
 		pkg: "./internal/server", test: "TestTheIngestTokenGatesEveryStream", want: "an older egress's token: the upgrade = 101"},
 	{name: "ingest: the expiry not checked", file: ingTok, from: "if now.Unix() >= p.Exp {", to: "if false {",

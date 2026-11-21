@@ -63,14 +63,17 @@ for (const missing of ['css,js', 'css', 'js']) {
     await kitMode(h, `missing=${missing}`);
     await useFakeLiveKit(page.context());
     const seen = kitRequests(page);
-    const app = await ownerInCall(page, h);
+    await page.goto(`${h.parent}/apps/${h.pluginID}`);
+    await expect(page.frameLocator('#app').locator('#new-meeting')).toBeVisible();
     const f = appFrame(page);
     const want = missing === 'css,js' ? 'fallback' : missing === 'css' ? 'js' : 'css';
     expect(await f.evaluate(() => document.documentElement.getAttribute('data-kit'))).toBe(want);
     expect(seen.some((u) => u.endsWith('/static/kit-fallback.css'))).toBe(missing.includes('css'));
-    // The tokens are there either way, and the controls are drawn: a
-    // 44 px target with a visible icon.
-    expect(await f.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--mu-bg').trim())).not.toBe('');
+    // The tokens are there either way (the fallback's, when kit.css is gone).
+    await expect.poll(() => f.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--mu-bg').trim())).not.toBe('');
+    // And the call works: in, with the controls drawn (a 44 px target with
+    // a visible icon).
+    const app = await ownerInCall(page, h);
     const mic = app.locator('#btn-mic');
     const box = (await mic.boundingBox())!;
     expect(box.width).toBeGreaterThanOrEqual(44);

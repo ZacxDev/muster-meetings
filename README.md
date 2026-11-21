@@ -71,8 +71,13 @@ tab. muster never calls the plugin; the plugin calls muster.
    the answer was on its way keeps its fresh session. Only an answer ends
    anything: a muster that is down or failing ends nothing, a reply with no
    `states` object is not an answer, and when one batch of 200 subjects
-   fails, its people are kept while the answered batches apply. The plugin does both before it serves anyone when
-   it starts, so what it slept through is applied first.
+   fails, its people are kept while the answered batches apply. muster
+   allows 60 `owners/check` calls a minute: past it the plugin waits out
+   muster's `Retry-After`, and each poll resumes after the last person the
+   previous one judged, so everyone is judged within a bounded number of
+   polls. The plugin does both before it serves anyone when it starts
+   (waiting out the limit until everyone is judged), so what it slept
+   through is applied first.
 
 ## Set it up
 
@@ -91,9 +96,17 @@ On **muster**, as an admin:
 2. On `/admin/apps`, install the app: a name, a tab label (say `Meetings`)
    and an icon, origin `https://meet.<muster host>` and entry URL
    `https://meet.<muster host>/enter`. Check **Files tasks** if you want
-   **Make task** (phase 6). Install asks you to sign in again. Copy the
+   **Make task** (phase 6), and then also do step 3. Install asks you to sign in again. Copy the
    `mpl_…` token: it is shown once. From a pipeline,
    `muster-server app install` does the same and prints the token.
+3. For **Make task**: add the plugin's task namespace, `meetings`, to
+   `MUSTER_PLUGIN_TASK_NAMESPACES` on muster
+   ([configuration.md](https://github.com/ZacxDev/muster/blob/main/docs/configuration.md)),
+   e.g. `MUSTER_PLUGIN_TASK_NAMESPACES=meetings` (comma-separated beside
+   any others). Each task the plugin files is keyed `meetings:<id>`. With
+   the variable unset muster files no plugin tasks (`503`), and a namespace
+   it does not list is refused (`400`), so **Make task** cannot work until
+   it is set.
 
 Then **configure and start the plugin**:
 
@@ -231,7 +244,11 @@ session's sign-in time); the redeem's re-checks and its grant (a pairwise
 random subject, `act_until` 8 hours on); one predicate for "may this app act
 for this person" (`live`, `expired` or `revoked`), answered by `owners/check` and asked by the `Muster-Act-For`
 routes (notify, its withdrawal, and tasks through the app's own ledger). It
-has its own tests for those rules.
+is held to core's real behaviour (checked against muster PR #936): the
+door's order, every revoke cause, `owners/check` answering every subject
+and its 60 calls a minute, and notify's and tasks' answers, keys and caps,
+so a 2b or phase-6 test cannot pass against the fake and fail against
+muster. It has its own tests for those rules.
 
 `scripts/mutate` applies one mutation per security gate (accept an unframed
 `/enter`, redeem before refusing it, accept a personal token, drop the

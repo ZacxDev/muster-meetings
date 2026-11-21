@@ -248,7 +248,77 @@ func TestAFailedOwnersCheckBatchKeepsItsPeopleAndTheOtherBatchesApply(t *testing
 	if ended != 200 {
 		t.Fatalf("%d sessions ended, want the 200 of the answered batch", ended)
 	}
-	if !strings.Contains(buf.String(), "batch 2 of 2 (100 subjects)") {
+	if !strings.Contains(buf.String(), "could not check the subjects (those people are kept") {
 		t.Fatalf("the failed batch is not logged:\n%s", buf)
+	}
+}
+
+// 🔴 Past muster's owners/check limit no tail of the subjects is starved:
+// each poll resumes after the last subject the previous one judged, and none
+// is sent before muster's Retry-After. Here muster allows 2 calls a minute
+// and 1000 people are held (5 batches): within three polls every one has
+// been judged, and a poll inside the Retry-After sends nothing.
+func TestOwnersCheckRotatesAndHonoursRetryAfterSoNoSubjectIsStarved(t *testing.T) {
+	f, st, c, buf := setup(t)
+	clock := t0
+	f.Now = func() time.Time { return clock }
+	a, err := owners.Boot(ctx, c, st, log.New(buf, "", 0), func() time.Time { return clock })
+	if err != nil {
+		t.Fatal(err)
+	}
+	subjects := f.AddGrants(app.PluginID, 1000) // live: they stay held
+	for _, s := range subjects {
+		if _, _, err := st.CreateSession(ctx, s, "fixture name", clock); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.SetOwnersCheckLimit(2)
+	calls := func() int { return f.CountCalls("POST", "/plugin/v1/owners/check") }
+
+	clock = clock.Add(time.Second)
+	a.PollOnce(ctx) // batches 1, 2; the third is 429
+	if n := len(f.Checked()); n != 400 {
+		t.Fatalf("after the first poll %d subjects judged, want 400", n)
+	}
+	before := calls()
+	clock = clock.Add(30 * time.Second)
+	a.PollOnce(ctx) // inside the Retry-After
+	if calls() != before {
+		t.Fatalf("a poll inside muster's Retry-After sent %d owners/check calls", calls()-before)
+	}
+	for i := 0; i < 2; i++ {
+		clock = clock.Add(61 * time.Second)
+		a.PollOnce(ctx)
+	}
+	checked := f.Checked()
+	for i, s := range subjects {
+		if checked[s] == 0 {
+			t.Fatalf("subject %d of 1000 was never judged in three polls (%d were)", i, len(checked))
+		}
+	}
+}
+
+// Boot judges every held subject before it serves anyone, waiting out
+// muster's Retry-After between passes rather than failing.
+func TestBootWaitsOutOwnersChecksLimitAndJudgesEveryone(t *testing.T) {
+	f, st, c, buf := setup(t)
+	clock := t0
+	f.Now = func() time.Time { return clock }
+	toks := make([]string, 500)
+	for i := range toks { // muster never gave these: each is revoked once judged
+		toks[i], _, _ = st.CreateSession(ctx, fmt.Sprintf("B%021d", i), "fixture name", clock)
+	}
+	f.SetOwnersCheckLimit(1)
+	slept := 0
+	owners.SetSleepForTest(t, func(_ context.Context, d time.Duration) error {
+		slept++
+		clock = clock.Add(d)
+		return nil
+	})
+	if _, err := owners.Boot(ctx, c, st, log.New(buf, "", 0), func() time.Time { return clock }); err != nil {
+		t.Fatalf("Boot at muster's limit = %v", err)
+	}
+	if n, _ := st.CountSessions(ctx); n != 0 || slept != 2 {
+		t.Fatalf("after Boot: %d sessions left (want 0), %d waits (want 2)", n, slept)
 	}
 }

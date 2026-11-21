@@ -3,6 +3,7 @@ package muster_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -279,6 +280,42 @@ func TestOwnersCheckWithoutAStatesObjectIsAProtocolError(t *testing.T) {
 	defer srv.Close()
 	if states, err := client(t, srv.URL).OwnersCheck(context.Background(), []string{sa}); err != nil || states[sa] != muster.StateRevoked {
 		t.Fatalf("positive control: {\"states\":{}} = %v, %v; want Ada revoked", states, err)
+	}
+}
+
+// One failed batch does not discard the answered ones: 450 subjects, the
+// second call fails, and the first and third batches come back.
+func TestOwnersCheckKeepsTheBatchesThatWereAnswered(t *testing.T) {
+	n := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		if n == 2 {
+			w.WriteHeader(503)
+			io.WriteString(w, `{"error":"unavailable"}`)
+			return
+		}
+		var in struct{ Subjects []string }
+		json.NewDecoder(r.Body).Decode(&in)
+		st := map[string]string{}
+		for _, s := range in.Subjects {
+			st[s] = "live"
+		}
+		json.NewEncoder(w).Encode(map[string]any{"states": st})
+	}))
+	defer srv.Close()
+	var asked []string
+	for i := 0; i < 450; i++ {
+		asked = append(asked, fmt.Sprintf("K%021d", i))
+	}
+	states, err := client(t, srv.URL).OwnersCheck(context.Background(), asked)
+	if e := muster.AsError(err); e == nil || e.Kind != muster.KindServer || !strings.Contains(e.Message, "batch 2 of 3") {
+		t.Errorf("err = %v, want the second batch's 503 named", err)
+	}
+	if len(states) != 250 || states[asked[0]] != muster.StateLive || states[asked[449]] != muster.StateLive {
+		t.Fatalf("%d answered; want the 250 of the first and third batches", len(states))
+	}
+	if _, ok := states[asked[300]]; ok {
+		t.Fatal("a subject of the failed batch was answered")
 	}
 }
 

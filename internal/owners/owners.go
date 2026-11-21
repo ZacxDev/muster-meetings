@@ -25,6 +25,9 @@ import (
 	"fmt"
 	"log"
 	"slices"
+	"sort"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -58,6 +61,27 @@ type App struct {
 	log   *log.Logger
 	now   func() time.Time
 	dead  atomic.Bool
+
+	// The owners/check rotation: each pass resumes after the last subject
+	// the previous one judged, and none is sent before retryAt (muster's
+	// Retry-After), so past muster's 60 calls a minute no tail of the
+	// subjects is starved.
+	checkMu sync.Mutex
+	resume  string
+	retryAt time.Time
+}
+
+// sleep waits d, or until ctx ends: Boot waits out a Retry-After with it.
+// Tests replace it.
+var sleep = func(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
 }
 
 // ErrRevoked is muster's 401 for the token: the app is uninstalled, or its
@@ -92,11 +116,29 @@ func Boot(ctx context.Context, c *muster.Client, st *store.Store, logger *log.Lo
 		return nil, fmt.Errorf("the server app (plugin %d) lacks the %q capability", s.PluginID, Capability)
 	}
 	a.PluginID, a.Name, a.FilesTasks = s.PluginID, s.PluginName, slices.Contains(s.Capabilities, TasksCapability)
-	if err := a.checkOwners(ctx); err != nil {
+	// Every held subject is judged once before the plugin serves anyone:
+	// pass after pass, waiting out muster's Retry-After between them.
+	held, err := st.HeldSubjects(ctx, now())
+	if err != nil {
+		return nil, err
+	}
+	for covered := 0; covered < len(held); {
+		n, wait, err := a.checkOwners(ctx)
 		if errors.Is(err, ErrRevoked) {
 			return nil, err
 		}
-		return nil, fmt.Errorf("boot: POST /plugin/v1/owners/check: %w", err)
+		if err != nil {
+			return nil, fmt.Errorf("boot: POST /plugin/v1/owners/check: %w", err)
+		}
+		covered += n
+		if covered < len(held) && wait > 0 {
+			logger.Printf("owners: boot: %d of %d people checked; muster asks to wait %s", covered, len(held), wait)
+			if err := sleep(ctx, wait); err != nil {
+				return nil, fmt.Errorf("boot: waiting for owners/check: %w", err)
+			}
+		} else if n == 0 {
+			break // nothing left held (each judged subject may have ended)
+		}
 	}
 	return a, nil
 }
@@ -119,60 +161,96 @@ func (a *App) Revoke(ctx context.Context, why string) {
 	a.log.Printf("owners: %s: %d sessions deleted, %d meetings ended", why, res.Sessions, res.Meetings)
 }
 
-// checkOwners asks owners/check about every held subject and acts on each
-// state: live keeps it; expired ends the person's owner sessions only, so
-// their open meetings keep running for the guests (they end by End meeting,
-// the 24 h link lifetime or the sweep, and the owner reopens the tab to see
-// them); revoked ends their sessions and open meetings. 🔴 Anything else,
-// including a subject absent from the answer, is revoked: fail closed. A
-// 401 revokes the app and returns ErrRevoked; any other failure returns it
-// and ends nothing.
-func (a *App) checkOwners(ctx context.Context) error {
+// checkOwners is one owners/check pass. It sends the held subjects in
+// batches of muster.MaxCheckSubjects, starting after the last subject the
+// previous pass judged (wrapping around), until every one is sent or muster
+// answers 429; then it records muster's Retry-After, and the next pass
+// resumes where this one stopped. It returns how many subjects it judged or
+// sent, and the wait muster asked for.
+//
+// Each answered state is acted on: live keeps it; expired ends the person's
+// owner sessions only, so their open meetings keep running for the guests
+// (they end by End meeting, the 24 h link lifetime or the sweep, and the
+// owner reopens the tab to see them); revoked ends their sessions and open
+// meetings. 🔴 Anything else, including a subject absent from an answered
+// batch, is revoked: fail closed. Only what existed when the batch was sent
+// is ended. A batch that fails is logged and its people kept. A 401 revokes
+// the app and returns ErrRevoked.
+func (a *App) checkOwners(ctx context.Context) (int, time.Duration, error) {
+	a.checkMu.Lock()
+	defer a.checkMu.Unlock()
 	held, err := a.store.HeldSubjects(ctx, a.now())
 	if err != nil || len(held) == 0 {
-		return err
+		return 0, 0, err
 	}
-	// Only what existed when the check was sent is judged by its answer.
-	sent := a.now()
-	states, checkErr := a.Client.OwnersCheck(ctx, held)
-	if e := muster.AsError(checkErr); e != nil && e.Kind == muster.KindAuth {
-		a.Revoke(ctx, "owners/check answered 401")
-		return ErrRevoked
+	start := sort.SearchStrings(held, a.resume)
+	if start < len(held) && held[start] == a.resume {
+		start++
 	}
-	var revoked, expired []string
-	for _, s := range held {
-		st, answered := states[s]
-		if !answered {
-			continue // its batch failed: kept until muster answers
+	order := append(slices.Clone(held[start:]), held[:start]...)
+	var revoked, expired, failures []string
+	var wait time.Duration
+	var first error
+	sent, done := a.now(), 0
+	for done < len(order) {
+		batch := order[done:min(done+muster.MaxCheckSubjects, len(order))]
+		states, err := a.Client.OwnersCheck(ctx, batch)
+		e := muster.AsError(err)
+		if e != nil && e.Kind == muster.KindAuth {
+			a.checkMu.Unlock()
+			a.Revoke(ctx, "owners/check answered 401")
+			a.checkMu.Lock()
+			return done, 0, ErrRevoked
 		}
-		switch st {
-		case muster.StateLive:
-		case muster.StateExpired:
-			expired = append(expired, s)
-		default: // revoked, another state, or absent from an answered batch
-			revoked = append(revoked, s)
+		if e != nil && e.Kind == muster.KindRateLimited {
+			wait = e.RetryAfter
+			a.retryAt = a.now().Add(wait)
+			break
 		}
+		done += len(batch)
+		if err != nil {
+			failures = append(failures, err.Error())
+			if first == nil {
+				first = err
+			}
+			continue // its people are kept until muster answers
+		}
+		for _, s := range batch {
+			switch states[s] {
+			case muster.StateLive:
+			case muster.StateExpired:
+				expired = append(expired, s)
+			default: // revoked, another state, or absent from the answer
+				revoked = append(revoked, s)
+			}
+		}
+	}
+	if done > 0 {
+		a.resume = order[done-1]
 	}
 	if len(expired) > 0 {
 		n, err := a.store.EndSessions(ctx, expired, sent, a.now())
 		if err != nil {
-			return err
+			return done, wait, err
 		}
 		a.log.Printf("owners: %d of %d people's grants expired: %d sessions deleted, their meetings kept", len(expired), len(held), n)
 	}
 	if len(revoked) > 0 {
 		res, err := a.store.EndSubjects(ctx, revoked, sent, a.now())
 		if err != nil {
-			return err
+			return done, wait, err
 		}
 		a.log.Printf("owners: muster revoked the app for %d of %d people: %d sessions deleted, %d meetings ended",
 			len(revoked), len(held), res.Sessions, res.Meetings)
 	}
-	if checkErr != nil {
-		a.log.Printf("owners: POST /plugin/v1/owners/check: %v (those people are kept: only an answer ends a person)", checkErr)
-		return checkErr
+	if wait > 0 {
+		a.log.Printf("owners: owners/check: muster's limit reached after %d of %d people; resuming in %s", done, len(held), wait)
 	}
-	return nil
+	if first != nil {
+		a.log.Printf("owners: POST /plugin/v1/owners/check: %s (those people are kept: only an answer ends a person)", strings.Join(failures, "; "))
+		return done, wait, first
+	}
+	return done, wait, nil
 }
 
 // PollOnce asks /self, then owners/check. A 401 from either ends
@@ -191,7 +269,13 @@ func (a *App) PollOnce(ctx context.Context) {
 		a.log.Printf("owners: GET /plugin/v1/self: %v (keeping everything: only a 401 ends it)", err)
 		return
 	}
-	_ = a.checkOwners(ctx) // it logs its own failures
+	a.checkMu.Lock()
+	wait := a.now().Before(a.retryAt)
+	a.checkMu.Unlock()
+	if wait {
+		return // muster's Retry-After: not before then
+	}
+	_, _, _ = a.checkOwners(ctx) // it logs its own failures
 }
 
 // Run polls every interval until ctx ends.

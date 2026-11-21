@@ -141,7 +141,9 @@ func run(logger *log.Logger) error {
 	defer st.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	bootCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	// Boot judges every held person before serving, waiting out muster's
+	// owners/check limit (60 calls of 200 a minute) when there are many.
+	bootCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
 	app, err := owners.Boot(bootCtx, client, st, logger, time.Now)
 	cancel()
 	if err != nil {

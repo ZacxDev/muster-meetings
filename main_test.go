@@ -148,12 +148,43 @@ func TestLoadConfigClientIPHeader(t *testing.T) {
 	}
 }
 
-// MUSTER_URL may be plain http to muster's in-cluster Service.
-func TestLoadConfigAcceptsMustersClusterService(t *testing.T) {
-	m := base()
-	m["MUSTER_URL"] = "http://muster-web.tenant-b.svc.cluster.local:8105"
-	if c, err := LoadConfig(env(m)); err != nil || c.URL != "http://muster-web.tenant-b.svc.cluster.local:8105" {
-		t.Fatalf("in-cluster MUSTER_URL: %q, %v", c.URL, err)
+// MUSTER_URL may be plain http to muster's fully-qualified Service name in
+// the cluster domain (default cluster.local, or MEETINGS_CLUSTER_DOMAIN), or
+// to exactly the host MEETINGS_MUSTER_HTTP_HOST names; never the short or
+// dotless form, and never a wildcard.
+func TestLoadConfigMusterHTTP(t *testing.T) {
+	for name, c := range map[string]struct {
+		url, domain, host string
+		ok                bool
+	}{
+		"fqdn, default domain":      {"http://muster-web.tenant-b.svc.cluster.local.:8105", "", "", true},
+		"fqdn, its own domain":      {"http://muster-web.tenant-b.svc.corp-k8s.internal.:8105", "corp-k8s.internal", "", true},
+		"fqdn, the default refused": {"http://muster-web.tenant-b.svc.cluster.local.:8105", "corp-k8s.internal", "", false},
+		"dotless full form":         {"http://muster-web.tenant-b.svc.cluster.local:8105", "", "", false},
+		"short form":                {"http://muster-web.tenant-b.svc:8105", "", "", false},
+		"the named host":            {"http://muster-app:8105", "", "muster-app", true},
+		"another host":              {"http://muster:8105", "", "muster-app", false},
+		"a wildcard host":           {"http://muster-app:8105", "", "*", false},
+		"a wildcard-ish host":       {"http://x.svc:8105", "", "*.svc", false},
+		"a host with a port":        {"http://muster-app:8105", "", "muster-app:8105", false},
+		"a cluster domain wildcard": {"http://muster-web.tenant-b.svc.cluster.local.:8105", "*", "", false},
+	} {
+		m := base()
+		m["MUSTER_URL"], m["MEETINGS_CLUSTER_DOMAIN"], m["MEETINGS_MUSTER_HTTP_HOST"] = c.url, c.domain, c.host
+		got, err := LoadConfig(env(m))
+		if (err == nil) != c.ok {
+			t.Errorf("%s: LoadConfig = %q, %v; want ok=%v", name, got.URL, err, c.ok)
+		}
+		// A malformed setting is refused as itself, not only because the
+		// URL then happens not to match it.
+		if strings.Contains(c.host, "*") || strings.Contains(c.host, ":") {
+			if err == nil || !strings.Contains(err.Error(), "MEETINGS_MUSTER_HTTP_HOST names ONE host") {
+				t.Errorf("%s: LoadConfig = %v, want MEETINGS_MUSTER_HTTP_HOST refused", name, err)
+			}
+		}
+		if c.domain == "*" && (err == nil || !strings.Contains(err.Error(), "MEETINGS_CLUSTER_DOMAIN")) {
+			t.Errorf("%s: LoadConfig = %v, want MEETINGS_CLUSTER_DOMAIN refused", name, err)
+		}
 	}
 }
 

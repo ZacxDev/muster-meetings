@@ -29,9 +29,13 @@ resources:
 configMapGenerator:
   - name: muster-meetings-params
     literals:
-      # Where the plugin calls muster: its in-namespace Service. http only to
-      # a Service name (*.svc, *.svc.cluster.local) or loopback.
-      - muster-url=http://muster.muster-tenant.svc.cluster.local:8105
+      # Where the plugin calls muster: its Service, FULLY QUALIFIED with the
+      # trailing dot (<svc>.<ns>.svc.<cluster-domain>.). Plain http is allowed
+      # only in that form: without the dot, ndots:5 sends the name through
+      # the node's search domains first.
+      - muster-url=http://muster.muster-tenant.svc.cluster.local.:8105
+      # The cluster's DNS domain that rule checks.
+      - cluster-domain=cluster.local
       # muster's origin as browsers see it (the only page that may frame the app).
       - muster-origin=https://muster.example.test
       # The three ONE-LABEL hosts (a free edge certificate covers one level):

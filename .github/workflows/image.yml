@@ -1,37 +1,63 @@
 name: image
 
 # Publishes ghcr.io/<owner>/muster-meetings:
-#   - on a tag v*: :<version> (e.g. :0.3.1 for v0.3.1) and :sha-<short sha>
-#   - on main:     :main and :sha-<short sha>
+#   - on a tag v*:  :<version> (e.g. :0.3.1 for v0.3.1) and :sha-<short sha>
+#   - on main:      :main and :sha-<short sha>, ONLY after the `ci` workflow
+#                   succeeded on that exact commit (workflow_run), so :main
+#                   never names a commit whose tests or mutation sweep failed
 # Pull requests build the image (both architectures) without pushing, so a
 # broken Dockerfile is caught before it merges.
+#
+# :main moves. A deployment pins a digest or a released version, never :main.
 
 on:
   push:
-    branches: [main]
     tags: ['v*']
   pull_request:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
 
 permissions:
   contents: read
 
 jobs:
   image:
+    # For workflow_run: only a SUCCESSFUL ci run of a push to main.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     steps:
+      # The commit to build: the one ci passed on (workflow_run), else the
+      # event's own.
+      - id: src
+        env:
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -eu
+          image="ghcr.io/$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')/muster-meetings"
+          case "$EVENT" in
+            workflow_run) sha="$RUN_SHA"; tags="$image:main" ;;
+            push)         sha="$GITHUB_SHA"; tags="$image:${REF_NAME#v}" ;;
+            *)            sha="$GITHUB_SHA"; tags="$image:pr" ;;
+          esac
+          tags="$tags,$image:sha-${sha:0:7}"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ghcr.io/${{ github.repository_owner }}/muster-meetings
-          tags: |
-            type=semver,pattern={{version}}
-            type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
-            type=sha,prefix=sha-,enable=${{ github.event_name != 'pull_request' }}
+          ref: ${{ steps.src.outputs.sha }}
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - if: github.event_name != 'pull_request'
         uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
@@ -43,5 +69,7 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.src.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.src.outputs.sha }}

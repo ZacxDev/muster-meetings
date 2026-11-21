@@ -19,7 +19,8 @@ configMapGenerator:
   - name: muster-meetings-params
     behavior: merge
     literals:
-      - muster-url=http://muster.muster-tenant.svc.cluster.local:8105
+      - muster-url=http://muster.muster-tenant.svc.cluster.local.:8105
+      - cluster-domain=cluster.local
       - muster-origin=https://muster.example.test
       - public-url=https://meet-muster.example.test
       - livekit-url=wss://meet-rtc-muster.example.test

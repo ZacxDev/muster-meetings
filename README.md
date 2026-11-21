@@ -146,7 +146,9 @@ Read from the environment only; `.env.example` lists them.
 
 | variable | required | meaning |
 |---|---|---|
-| `MUSTER_URL` | yes | where the plugin calls muster. `https://`, or `http://` only to `localhost`, `127.0.0.1`, `[::1]` or a Kubernetes Service name (`<svc>.<ns>.svc`, `<svc>.<ns>.svc.cluster.local`), which stays on the cluster network; `http://` to any other host is refused. The address alone |
+| `MUSTER_URL` | yes | where the plugin calls muster. `https://`, or `http://` only to `localhost`, `127.0.0.1`, `[::1]`, a **fully-qualified** Service name written with its trailing dot, `<svc>.<ns>.svc.<cluster domain>.` (e.g. `http://muster.tenant.svc.cluster.local.:8105`), or exactly the host `MEETINGS_MUSTER_HTTP_HOST` names. The short (`muster.tenant.svc`) and dotless forms are refused for http: with the pod default `ndots:5` they go through the node's search domains first, and a wildcard record there would receive the token in clear text. The address alone |
+| `MEETINGS_CLUSTER_DOMAIN` | no | the cluster's DNS domain for that rule; default `cluster.local` |
+| `MEETINGS_MUSTER_HTTP_HOST` | no | ONE host to which `MUSTER_URL` may be plain http, matched exactly (no wildcard, no suffix match), e.g. `muster` in Compose, where muster's service is on the same network. Empty allows none |
 | `MUSTER_PLUGIN_TOKEN` | yes | **exactly one** `mpl_…` token: the one the install on `/admin/apps` showed. A comma (the old per-person list) refuses to start. Never logged |
 | `MUSTER_ORIGIN` | yes | muster's origin as browsers see it, e.g. `https://muster.example.test`. The only page allowed to frame the Meetings app |
 | `MEETINGS_PUBLIC_URL` | yes | this plugin's own origin, e.g. `https://meet-muster.example.test`. Guest links are built on it. Refused if it equals `MUSTER_ORIGIN` |
@@ -199,6 +201,11 @@ with the pages and LiveKit's browser client inside it. The root filesystem
 may be read-only: it writes only `/state` (SQLite; a volume) and `/tmp`
 (SQLite's temporary files; a tmpfs or `emptyDir`). Build it yourself with
 `docker build -t muster-meetings .`.
+
+`:main` is published only after `ci` passed on that commit, and it moves:
+**pin a digest** (or a released version) in a deployment. A package's first
+publish to GHCR is **private**: make it public once in the package's
+settings (or give the cluster a pull secret).
 
 ### The Secrets
 
@@ -254,7 +261,7 @@ What an overlay sets:
 
 | knob | how |
 |---|---|
-| hostnames, muster's address and origin, trusted proxies, the client-IP header | `configMapGenerator` `muster-meetings-params`, `behavior: merge`: `muster-url` (`http://<muster svc>.<ns>.svc.cluster.local:<port>`), `muster-origin`, `public-url`, `livekit-url`, `turn-domain`, `trusted-proxies`, `client-ip-header` |
+| hostnames, muster's address and origin, trusted proxies, the client-IP header | `configMapGenerator` `muster-meetings-params`, `behavior: merge`: `muster-url` (`http://<muster svc>.<ns>.svc.cluster.local.:<port>`, the trailing dot included), `cluster-domain`, `muster-origin`, `public-url`, `livekit-url`, `turn-domain`, `trusted-proxies`, `client-ip-header` |
 | namespace | `namespace:` |
 | the plugin's image | `images:` (pin a digest) |
 | NodePorts | a patch on `livekit-nodeport` (`/spec/ports/0/nodePort` signalling, `/spec/ports/1/nodePort` TURN) |
@@ -283,11 +290,24 @@ docker compose -f docker-compose.yml -f compose.meetings.yml --profile meetings 
 It adds `muster-meetings` and `livekit` under the `meetings` profile, with
 the same LiveKit config as Kubernetes (a test holds the two equal). Its
 variables (in muster's `.env`) are listed at the top of the file. The plugin
-reaches muster at muster's public `https://` URL there (`MEETINGS_MUSTER_URL`):
-plain http is allowed only to loopback or a Kubernetes Service name. It
+joins muster's default network and calls `http://muster:8105`, allowed
+because the file sets `MEETINGS_MUSTER_HTTP_HOST=muster`: the token stays on
+the Compose network and never passes your CDN or proxy. It
 publishes, on `127.0.0.1` only, the plugin (`8106`), signalling (`8107`) and
 TURN/TLS (`8108`) for your reverse proxy: HTTPS for the first two, an SNI
 passthrough on 443 for the third.
+
+### Capacity and limits
+
+- **About 100 concurrent participants per LiveKit pod.** Each relayed
+  participant takes ports from both pinned ranges, `rtc.port_range`
+  50000–50199 and `turn.relay_range` 40000–40199 (200 each, about two per
+  participant). To widen, patch both ranges in the `LIVEKIT_CONFIG` env
+  entry (the Kubernetes and Compose copies together): keep each clear of the
+  NodePort range 30000–32767, of each other, and of 5349, 7880 and 7881.
+- **IPv4 pod addresses only.** The config puts `$(LIVEKIT_NODE_IP)/32` in
+  the TURN allow-list and binds TURN on `0.0.0.0`; with an IPv6-only pod
+  address LiveKit refuses to start ("no matching node IP for relay").
 
 ### muster's side
 
@@ -314,7 +334,10 @@ Each step touches shared or outward-facing infrastructure; do them in this
 order (design: "Phase-2 deploy item: the `meet-turn` route").
 
 1. **Certificate:** a publicly trusted certificate for the TURN host (DNS-01),
-   in the `meetings-turn-tls` Secret, with its renewal set up.
+   in the `meetings-turn-tls` Secret, with its renewal set up. LiveKit reads
+   it once, at start: **restart LiveKit after every renewal** (e.g. a
+   `rollout restart` from the renewal hook), or it serves the old one until
+   it expires.
 2. **LiveKit:** apply the overlay; check its log says `Starting TURN server`
    with `turn.portTLS: 5349`. Nothing public changes yet.
 3. **The 443 route:** on the public address that will serve TCP 443 for the

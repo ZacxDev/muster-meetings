@@ -9,10 +9,10 @@
 #
 # Set in muster's .env (every value is empty unless set; the plugin refuses
 # to start on a missing one and names it):
-#   MEETINGS_MUSTER_URL       muster's https:// address as the plugin reaches
-#                             it. Plain http is refused except to loopback or
-#                             a Kubernetes Service name, so here it is
-#                             muster's public https:// URL, not http://muster:8105
+#   MEETINGS_MUSTER_URL       optional: where the plugin calls muster. Default
+#                             http://muster:8105, muster's own service on its
+#                             network (allowed because MEETINGS_MUSTER_HTTP_HOST
+#                             names exactly `muster`); the token never passes a CDN
 #   MEETINGS_MUSTER_ORIGIN    muster's origin as browsers see it
 #   MEETINGS_PLUGIN_TOKEN     the mpl_… token `muster-server app install` printed
 #   MEETINGS_LINK_KEY         openssl rand -base64 32
@@ -50,7 +50,11 @@ services:
     security_opt: ["no-new-privileges:true"]
     tmpfs: [/tmp]
     environment:
-      MUSTER_URL: ${MEETINGS_MUSTER_URL:-}
+      # muster's own service on muster's network, in plain http: allowed
+      # only because MEETINGS_MUSTER_HTTP_HOST names exactly that host, so
+      # the token never leaves the Compose network or passes a CDN.
+      MUSTER_URL: ${MEETINGS_MUSTER_URL:-http://muster:8105}
+      MEETINGS_MUSTER_HTTP_HOST: muster
       MUSTER_ORIGIN: ${MEETINGS_MUSTER_ORIGIN:-}
       MUSTER_PLUGIN_TOKEN: ${MEETINGS_PLUGIN_TOKEN:-}
       MEETINGS_LINK_KEY: ${MEETINGS_LINK_KEY:-}
@@ -67,7 +71,8 @@ services:
       - meetings-state:/state
     ports:
       - "${MEETINGS_BIND:-127.0.0.1}:${MEETINGS_HTTP_PORT:-8106}:8080"
-    networks: [meetings]
+    # default: muster's own network, where the name `muster` resolves.
+    networks: [meetings, default]
     depends_on: [livekit]
 
   livekit:

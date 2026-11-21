@@ -10,7 +10,9 @@
 //
 // Configuration is read from the environment only (see .env.example):
 //
-//	MUSTER_URL                where the plugin calls muster (https, or http to localhost or a cluster Service name *.svc)
+//	MUSTER_URL                where the plugin calls muster (https; http only to loopback, <svc>.<ns>.svc.<cluster domain>. or MEETINGS_MUSTER_HTTP_HOST)
+//	MEETINGS_CLUSTER_DOMAIN   the cluster's DNS domain for that http rule (default cluster.local)
+//	MEETINGS_MUSTER_HTTP_HOST one host, matched exactly, to which MUSTER_URL may be plain http (e.g. muster in Compose)
 //	MUSTER_PLUGIN_TOKEN       the ONE mpl_… token an admin's install on muster's /admin/apps showed
 //	MUSTER_ORIGIN             muster's origin as browsers see it: the only page that may frame the app
 //	MEETINGS_PUBLIC_URL       this plugin's own origin, e.g. https://meet.example.test
@@ -79,7 +81,11 @@ type Config struct {
 
 // LoadConfig reads and checks the environment through getenv.
 func LoadConfig(getenv func(string) string) (Config, error) {
-	base, err := muster.CheckBaseURL(getenv("MUSTER_URL"))
+	allow, err := httpAllow(getenv("MEETINGS_CLUSTER_DOMAIN"), getenv("MEETINGS_MUSTER_HTTP_HOST"))
+	if err != nil {
+		return Config{}, err
+	}
+	base, err := muster.CheckBaseURL(getenv("MUSTER_URL"), allow)
 	if err != nil {
 		return Config{}, err
 	}
@@ -161,6 +167,24 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	return c, nil
+}
+
+// httpAllow reads where plain http to muster is allowed besides loopback:
+// a fully-qualified Service name in the cluster domain (default
+// cluster.local), and the one host MEETINGS_MUSTER_HTTP_HOST names, matched
+// exactly. A wildcard or anything but DNS labels is refused, never widened.
+func httpAllow(domain, host string) (muster.HTTPAllow, error) {
+	a := muster.HTTPAllow{ClusterDomain: strings.TrimSuffix(strings.TrimSpace(domain), "."), Host: strings.TrimSpace(host)}
+	if a.ClusterDomain == "" {
+		a.ClusterDomain = "cluster.local"
+	}
+	if !muster.DNSName(a.ClusterDomain) {
+		return muster.HTTPAllow{}, errors.New("MEETINGS_CLUSTER_DOMAIN is not a DNS name such as cluster.local")
+	}
+	if a.Host != "" && !muster.DNSName(a.Host) {
+		return muster.HTTPAllow{}, errors.New("MEETINGS_MUSTER_HTTP_HOST names ONE host, exactly (e.g. muster): no wildcard, port, scheme or trailing dot")
+	}
+	return a, nil
 }
 
 // headerName is an HTTP header name a proxy might use for the client's address.

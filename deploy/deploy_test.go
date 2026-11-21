@@ -26,6 +26,8 @@ import (
 	"testing"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/ZacxDev/muster-meetings/internal/muster"
 )
 
 type obj = map[string]any
@@ -481,17 +483,72 @@ func TestKubernetesNetworkPolicies(t *testing.T) {
 	if len(admits) != 2 {
 		t.Errorf("the plugin admits ports %v, want 8080 and 8081 only", admits)
 	}
-	lk := find(t, docs, "NetworkPolicy", "livekit")
-	for _, r := range dig(lk, "spec", "egress").([]any) {
-		for _, p := range dig(r, "ports").([]any) {
-			n, _ := toInt(dig(p, "port"))
-			if n != 8081 && n != 53 {
-				t.Errorf("LiveKit may reach port %d, want only the plugin's 8081 and DNS", n)
-			}
-			if n == 8081 && !strings.Contains(fmt.Sprint(dig(r, "to")), "app.kubernetes.io/name:muster-meetings") {
-				t.Errorf("LiveKit's :8081 egress goes to %v, want the plugin's pods", dig(r, "to"))
-			}
+	// Egress, as EXACT sets: an added rule (an empty `- {}` allows every
+	// destination and port) or a widened one fails here.
+	for name, want := range map[string]string{
+		"muster-meetings": pluginEgress,
+		"livekit":         liveKitEgress,
+	} {
+		var w []any
+		if err := yaml.Unmarshal([]byte(want), &w); err != nil {
+			t.Fatal(err)
 		}
+		got := dig(find(t, docs, "NetworkPolicy", name), "spec", "egress")
+		if !reflect.DeepEqual(got, w) {
+			t.Errorf("the %s pods' egress is %v, want exactly %v", name, got, w)
+		}
+	}
+}
+
+// pluginEgress is the plugin's whole egress in phase 2c: muster's pods
+// (its API), LiveKit's API and DNS.
+const pluginEgress = `
+- to: [{podSelector: {matchLabels: {app.kubernetes.io/name: muster}}}]
+  ports: [{protocol: TCP, port: 8105}]
+- to: [{podSelector: {matchLabels: {app.kubernetes.io/name: livekit}}}]
+  ports: [{protocol: TCP, port: 7880}]
+- to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}, podSelector: {matchLabels: {k8s-app: kube-dns}}}]
+  ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+`
+
+// liveKitEgress is LiveKit's whole egress: the plugin's internal port (the
+// webhook) and DNS.
+const liveKitEgress = `
+- to: [{podSelector: {matchLabels: {app.kubernetes.io/name: muster-meetings}}}]
+  ports: [{protocol: TCP, port: 8081}]
+- to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}, podSelector: {matchLabels: {k8s-app: kube-dns}}}]
+  ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+`
+
+// 🔴 The muster address each deployment ships passes the plugin's own
+// check with the settings it ships beside it: the Kubernetes base's
+// fully-qualified Service name with its cluster domain, and Compose's
+// `muster` with the one host it names. A form the check refuses would stop
+// the plugin at boot; one it should refuse would send the token in clear.
+func TestTheShippedMusterURLsPassTheCheck(t *testing.T) {
+	docs := render(t, "kubernetes")
+	for _, d := range ofKind(docs, "ConfigMap") {
+		data := d["data"].(obj)
+		u, _ := data["muster-url"].(string)
+		if !strings.HasPrefix(u, "http://") || !strings.HasSuffix(strings.Split(strings.TrimPrefix(u, "http://"), ":")[0], ".") {
+			t.Errorf("kubernetes muster-url %q: want plain http to a name with its trailing dot", u)
+		}
+		if _, err := muster.CheckBaseURL(u, muster.HTTPAllow{ClusterDomain: fmt.Sprint(data["cluster-domain"])}); err != nil {
+			t.Errorf("kubernetes muster-url %q with cluster-domain %v: %v", u, data["cluster-domain"], err)
+		}
+	}
+	c := readCompose(t, map[string]string{})
+	env := dig(c, "services", "muster-meetings", "environment").(obj)
+	u, _ := env["MUSTER_URL"].(string)
+	host, _ := env["MEETINGS_MUSTER_HTTP_HOST"].(string)
+	if u != "http://muster:8105" || host != "muster" {
+		t.Errorf("compose MUSTER_URL %q, MEETINGS_MUSTER_HTTP_HOST %q; want http://muster:8105 and muster", u, host)
+	}
+	if _, err := muster.CheckBaseURL(u, muster.HTTPAllow{Host: host}); err != nil {
+		t.Errorf("compose MUSTER_URL %q with MEETINGS_MUSTER_HTTP_HOST %q: %v", u, host, err)
+	}
+	if nets := dig(c, "services", "muster-meetings", "networks"); !slices.Contains(nets.([]any), any("default")) {
+		t.Errorf("compose muster-meetings networks = %v: want muster's default network, where `muster` resolves", nets)
 	}
 }
 
@@ -650,7 +707,7 @@ func TestTheDeploymentFilesNameNoRealHost(t *testing.T) {
 		}
 		for _, m := range urlHost.FindAllStringSubmatch(string(raw), -1) {
 			seen++
-			h := strings.ToLower(m[1])
+			h := strings.TrimSuffix(strings.ToLower(m[1]), ".")
 			ok := h == "example.test" || strings.HasSuffix(h, ".example.test") || !strings.Contains(h, ".") ||
 				strings.HasSuffix(h, ".svc") || strings.HasSuffix(h, ".svc.cluster.local") ||
 				h == "github.com" || h == "127.0.0.1"

@@ -88,14 +88,26 @@ func AsError(err error) *Error {
 	return nil
 }
 
+// HTTPAllow names where plain http to muster is allowed, besides a loopback
+// host. Everything else must be https.
+type HTTPAllow struct {
+	// ClusterDomain is the cluster's DNS domain (e.g. "cluster.local"):
+	// http is allowed to a FULLY-QUALIFIED Service name in it, written with
+	// its trailing dot (ClusterFQDN). Empty allows none.
+	ClusterDomain string
+	// Host is ONE operator-named host (e.g. "muster", Compose's service
+	// name) to which http is allowed, matched exactly (case aside): no
+	// wildcard, no suffix. Empty allows none.
+	Host string
+}
+
 // CheckBaseURL validates muster's address: https, except plain http to a
-// loopback host or to a Kubernetes Service name (ClusterInternal); no user,
-// path, query or fragment (a trailing "/" is fine). A plugin token can act
-// for people, so it never crosses a network it does not stay inside in clear
-// text: http is allowed only where the call cannot leave the host or the
-// cluster, and a token pasted into the URL is refused rather than sent on
-// every call.
-func CheckBaseURL(raw string) (string, error) {
+// loopback host, to a fully-qualified Service name in allow.ClusterDomain,
+// or to exactly allow.Host; no user, path, query or fragment (a trailing "/"
+// is fine). A plugin token can act for people, so it never crosses a network
+// it does not stay inside in clear text, and a token pasted into the URL is
+// refused rather than sent on every call.
+func CheckBaseURL(raw string, allow HTTPAllow) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.Host == "" {
 		// Never echo the value: a mistaken one may hold the token.
@@ -103,8 +115,9 @@ func CheckBaseURL(raw string) (string, error) {
 	}
 	h := u.Hostname()
 	loopback := h == "localhost" || h == "127.0.0.1" || h == "::1"
-	if u.Scheme != "https" && !(u.Scheme == "http" && (loopback || ClusterInternal(h))) {
-		return "", fmt.Errorf("MUSTER_URL must be https:// (http:// only for localhost, 127.0.0.1, [::1] or a cluster Service name ending .svc or .svc.cluster.local)")
+	named := allow.Host != "" && strings.EqualFold(h, allow.Host)
+	if u.Scheme != "https" && !(u.Scheme == "http" && (loopback || named || ClusterFQDN(h, allow.ClusterDomain))) {
+		return "", fmt.Errorf("MUSTER_URL must be https:// (http:// only for localhost, 127.0.0.1, [::1], a fully-qualified Service name with its trailing dot such as muster.<namespace>.svc.cluster.local., or the host MEETINGS_MUSTER_HTTP_HOST names)")
 	}
 	if u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
 		return "", fmt.Errorf("MUSTER_URL must carry no user, query or fragment")
@@ -115,33 +128,42 @@ func CheckBaseURL(raw string) (string, error) {
 	return u.Scheme + "://" + u.Host, nil
 }
 
-// clusterLabel is one DNS label of a Service name.
+// clusterLabel is one DNS label.
 var clusterLabel = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
-// ClusterInternal says host is a Kubernetes Service name: one or more DNS
-// labels followed by exactly ".svc" or ".svc.cluster.local" (case does not
-// matter). Such a name resolves only through the cluster's own DNS, so a call
-// to it stays on the cluster network. A trailing dot, an empty label, or
-// ".svc" anywhere but the end (muster.svc.example.test) is not one: every
-// label before the suffix must be a DNS label, so ".svc" alone and "a..svc"
-// are refused.
-func ClusterInternal(host string) bool {
-	h := strings.ToLower(host)
-	var rest string
-	switch {
-	case strings.HasSuffix(h, ".svc.cluster.local"):
-		rest = strings.TrimSuffix(h, ".svc.cluster.local")
-	case strings.HasSuffix(h, ".svc"):
-		rest = strings.TrimSuffix(h, ".svc")
-	default:
+// DNSName says s is one or more DNS labels joined by dots, with no trailing
+// dot (case does not matter).
+func DNSName(s string) bool {
+	if s == "" {
 		return false
 	}
-	for _, l := range strings.Split(rest, ".") {
+	for _, l := range strings.Split(strings.ToLower(s), ".") {
 		if !clusterLabel.MatchString(l) {
 			return false
 		}
 	}
 	return true
+}
+
+// ClusterFQDN says host is a fully-qualified Kubernetes Service name,
+// exactly `<service>.<namespace>.svc.<clusterDomain>.`, WITH the trailing
+// dot (case does not matter). Only the trailing dot makes the name
+// absolute: without it, a resolver with ndots:5 (the pod default) tries the
+// node's search domains first, and a wildcard record in one of them would
+// receive the call, token and all, over cleartext http. So the short forms
+// (`muster.ns.svc`), the dotless full form, a name with more or fewer labels
+// before ".svc", and any other domain are refused.
+func ClusterFQDN(host, clusterDomain string) bool {
+	if !DNSName(clusterDomain) {
+		return false
+	}
+	h := strings.ToLower(host)
+	suffix := ".svc." + strings.ToLower(clusterDomain) + "."
+	if !strings.HasSuffix(h, suffix) {
+		return false
+	}
+	labels := strings.Split(strings.TrimSuffix(h, suffix), ".")
+	return len(labels) == 2 && DNSName(labels[0]) && DNSName(labels[1])
 }
 
 // Redact is a URL cut to its scheme and host, for a log line or an error: a

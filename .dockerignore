@@ -1,0 +1,8 @@
+.git
+.github
+.env
+state/
+e2e/
+deploy/
+compose.meetings.yml
+muster-meetings

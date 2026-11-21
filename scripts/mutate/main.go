@@ -112,6 +112,12 @@ const (
 	limiter = "internal/lobby/limiter.go"
 	appJS   = "internal/server/web/static/app.js"
 	streams = "internal/server/streams.go"
+	// phase 2c: the deployment files (killed by ./deploy, which needs kubectl)
+	kLiveKit = "deploy/kubernetes/livekit.yaml"
+	kPlugin  = "deploy/kubernetes/muster-meetings.yaml"
+	kNetPol  = "deploy/kubernetes/networkpolicy.yaml"
+	kBase    = "deploy/kubernetes/kustomization.yaml"
+	composeF = "compose.meetings.yml"
 )
 
 var mutants = []mutant{
@@ -571,6 +577,54 @@ var mutants = []mutant{
 	{name: "client ip header: not passed to the server", file: mainGo, from: "\t\tClientIPHeader: cfg.ClientIPHeader}", to: "\t\tClientIPHeader: \"\"}",
 		pkg: ".", test: "TestTheProxySettingsReachTheServer", want: `server config: header ""`},
 
+	// ---- 🔴 phase 2c: the deployment files ----
+	{name: "deploy: LiveKit auto-creates rooms (kubernetes)", file: kLiveKit, from: "auto_create: false", to: "auto_create: true",
+		pkg: "./deploy", test: "TestKubernetesLiveKitConfig", want: "kubernetes: room.auto_create = true"},
+	{name: "deploy: LiveKit auto-creates rooms (compose)", file: composeF, from: "auto_create: false", to: "auto_create: true",
+		pkg: "./deploy", test: "TestComposeLiveKitConfig", want: "compose: room.auto_create = true"},
+	{name: "deploy: auto_create left to LiveKit's default (true)", file: kLiveKit, from: "                  auto_create: false\n", to: "",
+		pkg: "./deploy", test: "TestKubernetesLiveKitConfig", want: "room.auto_create = <nil> (set: false), want an explicit false"},
+	{name: "deploy: TURN over UDP opened", file: kLiveKit, from: "                  tls_port: 5349\n", to: "                  tls_port: 5349\n                  udp_port: 3478\n",
+		pkg: "./deploy", test: "TestKubernetesLiveKitConfig", want: "turn.udp_port = 3478"},
+	{name: "deploy: the UDP mux opened", file: kLiveKit, from: "                  tcp_port: 7881\n", to: "                  tcp_port: 7881\n                  udp_port: 7882\n",
+		pkg: "./deploy", test: "TestKubernetesLiveKitConfig", want: "rtc.udp_port = 7882"},
+	{name: "deploy: the ICE range inside the NodePort range", file: kLiveKit, from: "port_range_start: 50000\n                  port_range_end: 50199", to: "port_range_start: 32000\n                  port_range_end: 32199",
+		pkg: "./deploy", test: "TestKubernetesLiveKitConfig", want: "rtc.port_range 32000-32199 overlaps the NodePort range"},
+	{name: "deploy: the relay range left to LiveKit's default (30000-40000)", file: kLiveKit, from: "                  relay_range_start: 40000\n                  relay_range_end: 40199\n", to: "",
+		pkg: "./deploy", test: "TestKubernetesLiveKitConfig", want: "turn.relay_range = <nil>-<nil>, want a pinned range"},
+	{name: "deploy: TURN may relay to every private address", file: kLiveKit, from: "allow_restricted_peer_cidrs: [$(LIVEKIT_NODE_IP)/32]", to: "allow_restricted_peer_cidrs: [10.0.0.0/8, $(LIVEKIT_NODE_IP)/32]",
+		pkg: "./deploy", test: "TestKubernetesLiveKitConfig", want: "turn.allow_restricted_peer_cidrs = [10.0.0.0/8"},
+	{name: "deploy: the webhook goes to the public port", file: kLiveKit, from: "urls: [http://muster-meetings:8081/livekit/webhook]", to: "urls: [http://muster-meetings:8080/livekit/webhook]",
+		pkg: "./deploy", test: "TestKubernetesLiveKitConfig", want: "webhook.urls = [http://muster-meetings:8080/livekit/webhook]"},
+	{name: "deploy: the TURN host's variable is defined after the config", file: kLiveKit, from: "            - name: TURN_DOMAIN\n", to: "            - name: TURN_HOST\n",
+		pkg: "./deploy", test: "TestKubernetesLiveKitConfig", want: "LIVEKIT_CONFIG uses $(TURN_DOMAIN), which is not defined before it"},
+	{name: "deploy: LiveKit's image by tag only", file: kLiveKit, from: "livekit-server:v1.13.11@sha256:", to: "livekit-server:v1.13.11-unpinned@sha256:",
+		pkg: "./deploy", test: "TestKubernetesLiveKitConfig", want: "want livekit-server v1.13.11 pinned by digest"},
+	{name: "deploy: a Service exposes the UDP mux", file: kLiveKit, from: "    - name: turn-tls\n      port: 5349\n      targetPort: turn-tls\n", to: "    - name: turn-tls\n      port: 5349\n      targetPort: turn-tls\n    - name: udp-mux\n      port: 7882\n      protocol: UDP\n",
+		pkg: "./deploy", test: "TestKubernetesExposesNoDirectMedia", want: "Service livekit-nodeport exposes 7882/UDP"},
+	{name: "deploy: LiveKit on the host's network", file: kLiveKit, from: "      automountServiceAccountToken: false\n      enableServiceLinks: false\n      securityContext:\n        runAsNonRoot: true\n        runAsUser: 65532\n        runAsGroup: 65532\n        seccompProfile:", to: "      hostNetwork: true\n      automountServiceAccountToken: false\n      enableServiceLinks: false\n      securityContext:\n        runAsNonRoot: true\n        runAsUser: 65532\n        runAsGroup: 65532\n        seccompProfile:",
+		pkg: "./deploy", test: "TestKubernetesExposesNoDirectMedia", want: "Deployment livekit uses hostNetwork"},
+	{name: "deploy: the plugin's root filesystem writable", file: kPlugin, from: "            readOnlyRootFilesystem: true", to: "            readOnlyRootFilesystem: false",
+		pkg: "./deploy", test: "TestKubernetesExposesNoDirectMedia", want: "Deployment muster-meetings: the container may write its root filesystem"},
+	{name: "deploy: two plugin replicas (two SQLite writers)", file: kPlugin, from: "  replicas: 1\n  strategy:\n    type: Recreate", to: "  replicas: 2\n  strategy:\n    type: Recreate",
+		pkg: "./deploy", test: "TestKubernetesPlugin", want: "plugin replicas 2"},
+	{name: "deploy: the plugin's internal port open to every pod", file: kNetPol, from: "    - from:\n        - podSelector:\n            matchLabels:\n              app.kubernetes.io/name: livekit\n      ports:\n        - {protocol: TCP, port: 8081}", to: "    - ports:\n        - {protocol: TCP, port: 8081}",
+		pkg: "./deploy", test: "TestKubernetesNetworkPolicies", want: "the plugin's :8081 admits [ANYONE]"},
+	{name: "deploy: LiveKit may reach the plugin's public port", file: kNetPol, from: "              app.kubernetes.io/name: muster-meetings\n      ports:\n        - {protocol: TCP, port: 8081}", to: "              app.kubernetes.io/name: muster-meetings\n      ports:\n        - {protocol: TCP, port: 8081}\n        - {protocol: TCP, port: 8080}",
+		pkg: "./deploy", test: "TestKubernetesNetworkPolicies", want: "LiveKit may reach port 8080"},
+	{name: "deploy: a param nobody reads", file: kBase, from: "      - client-ip-header=\n", to: "      - client-ip-header=\n      - unread=x\n",
+		pkg: "./deploy", test: "TestKubernetesParamsAreAllUsed", want: "they must match"},
+	{name: "deploy: the compose and kubernetes LiveKit configs drift", file: composeF, from: "          departure_timeout: 600", to: "          departure_timeout: 20",
+		pkg: "./deploy", test: "TestKubernetesAndComposeLiveKitConfigsAgree", want: "the LiveKit configs differ"},
+	{name: "deploy: compose node_ip is not LiveKit's address", file: composeF, from: "          node_ip: ${MEETINGS_LIVEKIT_IP:-172.31.250.10}", to: "          node_ip: 172.31.250.10",
+		pkg: "./deploy", test: "TestComposeLiveKitConfig", want: "compose: rtc.node_ip = 172.31.250.10, want \"172.31.250.77\""},
+	{name: "deploy: compose publishes the media port", file: composeF, from: "      - \"${MEETINGS_BIND:-127.0.0.1}:${MEETINGS_TURN_PORT:-8108}:5349\"\n", to: "      - \"${MEETINGS_BIND:-127.0.0.1}:${MEETINGS_TURN_PORT:-8108}:5349\"\n      - \"127.0.0.1:7882:7882/udp\"\n",
+		pkg: "./deploy", test: "TestComposeLiveKitConfig", want: "compose livekit publishes 127.0.0.1:7882:7882/udp"},
+	{name: "deploy: a real hostname in the base", file: kBase, from: "muster-origin=https://muster.example.test", to: "muster-origin=https://muster.example.com",
+		pkg: "./deploy", test: "TestTheDeploymentFilesNameNoRealHost", want: `names the host "muster.example.com"`},
+	{name: "deploy: a real address in the base", file: kBase, from: "      - client-ip-header=\n", to: "      - client-ip-header=\n# 8.8.4.4\n",
+		pkg: "./deploy", test: "TestTheDeploymentFilesNameNoRealHost", want: "names the address 8.8.4.4"},
+
 	// ---- configuration ----
 	{name: "config: allow the plugin on muster's own origin", file: mainGo, from: `if c.PublicURL == c.MusterOrigin {`, to: `if false {`,
 		pkg: ".", test: "TestLoadConfig", want: "public URL is muster's origin: LoadConfig accepted it"},
@@ -684,6 +738,10 @@ func run(m mutant) (string, string) {
 	cmd := exec.Command("go", "test", "-count=1", "-run", "^"+m.test+"$", m.pkg)
 	if m.realLiveKit {
 		cmd.Env = append(os.Environ(), "MEETINGS_REQUIRE_LIVEKIT=1")
+	}
+	if m.pkg == "./deploy" {
+		// The deployment tests render with kubectl: fail, never skip.
+		cmd.Env = append(os.Environ(), "MEETINGS_REQUIRE_KUBECTL=1")
 	}
 	out, err := cmd.CombinedOutput()
 	s := string(out)

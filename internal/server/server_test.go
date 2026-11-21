@@ -1374,10 +1374,23 @@ func TestTheAppPageCarriesNoInlineScript(t *testing.T) {
 	}
 	for name, page := range map[string][]byte{"app": body, "guest": guest} {
 		scripts := regexp.MustCompile(`<script[^>]*>([^<]*)</script>`).FindAllSubmatch(page, -1)
-		if len(scripts) != 3 {
-			t.Errorf("%s page: %d scripts, want the LiveKit client, call.js and its own", name, len(scripts))
+		if len(scripts) != 5 {
+			t.Errorf("%s page: %d scripts, want muster's kit.js, ui.js, the LiveKit client, call.js and its own", name, len(scripts))
 		}
-		for _, m := range scripts {
+		// muster's UI kit, linked live from muster's exact origin (the only
+		// other origin the CSP lets a script or a style come from), first.
+		kitJS := `<script src="` + musterOrigin + `/ui-kit/v1/kit.js"></script>`
+		if len(scripts) == 0 || string(scripts[0][0]) != kitJS {
+			t.Errorf("%s page: the first script is not muster's kit.js (%s)", name, kitJS)
+		}
+		kitCSS := `<link rel="stylesheet" href="` + musterOrigin + `/ui-kit/v1/kit.css">`
+		if !bytes.Contains(page, []byte(kitCSS)) || bytes.Index(page, []byte(kitCSS)) > bytes.Index(page, []byte(`href="/static/app.css"`)) {
+			t.Errorf("%s page: kit.css is not linked from muster before app.css (%s)", name, kitCSS)
+		}
+		for i, m := range scripts {
+			if i == 0 && string(m[0]) == kitJS {
+				continue
+			}
 			if !regexp.MustCompile(`^<script src="/static/[a-z0-9./-]+\.js">$`).Match(m[0][:len(m[0])-len(m[1])-len("</script>")]) || len(bytes.TrimSpace(m[1])) != 0 {
 				t.Errorf("%s page: script %s is not a file on this origin with no inline body: the CSP would block it", name, m[0])
 			}
@@ -1390,7 +1403,7 @@ func TestTheAppPageCarriesNoInlineScript(t *testing.T) {
 	if resp.StatusCode != 200 || !bytes.Contains(js, []byte("removeAttribute('data-session')")) || !bytes.Contains(js, []byte("history.replaceState")) {
 		t.Fatalf("app.js = %d", resp.StatusCode)
 	}
-	for _, f := range []string{"/static/app.js", "/static/guest.js", "/static/call.js"} {
+	for _, f := range []string{"/static/app.js", "/static/guest.js", "/static/call.js", "/static/ui.js"} {
 		_, js := e.do("GET", f, "", nil)
 		// No script parses HTML: a guest's name and what anyone SAID (the
 		// transcript) are rendered with textContent only. (A word check;

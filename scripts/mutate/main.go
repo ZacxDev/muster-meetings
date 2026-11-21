@@ -13,6 +13,12 @@
 //	go run ./scripts/mutate             # every mutant
 //	go run ./scripts/mutate -list       # names only
 //	go run ./scripts/mutate -match re   # the mutants whose name matches re, and the two controls
+//	go run ./scripts/mutate -e2e        # the UI mutants instead, each killed by a Playwright test
+//
+// A UI mutant (e2e set) is killed by one Playwright test in e2e/ (the
+// chromium project, -g its title), run with npx: the sweep needs the e2e
+// dependencies installed (npm ci in e2e/) and Chromium. It has its own two
+// controls. -e2e runs only those; the default sweep runs none of them.
 //
 // It exits non-zero unless every security mutant is killed and both controls
 // behave. Run it from the repository root. It refuses a dirty tree (`git
@@ -85,6 +91,9 @@ type mutant struct {
 	// that needs a few lines in several files (in order; each from must
 	// occur exactly once when it is applied).
 	more []edit
+	// e2e, for a UI mutant, is the Playwright spec (in e2e/) whose test
+	// titled test (a -g pattern) must fail with want in its output.
+	e2e string
 }
 
 type edit struct{ file, from, to string }
@@ -128,6 +137,10 @@ const (
 	vad     = "internal/stt/vad.go"
 	utt     = "internal/stt/utterance.go"
 	callJS  = "internal/server/web/static/call.js"
+	// the UI pass
+	uiJS    = "internal/server/web/static/ui.js"
+	appCSS  = "internal/server/web/static/app.css"
+	appHTML = "internal/server/web/app.html"
 	kEgress = "deploy/kubernetes/egress.yaml"
 	// phase 3c
 	nemGo = "internal/stt/nemotron.go"
@@ -893,6 +906,50 @@ var mutants = []mutant{
 	{name: "deploy: compose ingest on every interface", file: composeF, from: "MEETINGS_INGEST_LISTEN: ${MEETINGS_INGEST_ADDR:-172.31.251.2}:8082", to: `MEETINGS_INGEST_LISTEN: ":8082"`,
 		pkg: "./deploy", test: "TestComposeEgressRedisAndTheIngestNetwork", want: "compose ingest: listen"},
 
+	// ---- the UI pass, Go-side: the kit's CSP, the colour scan, the pinned kit ----
+	{name: "ui csp: the kit's origin widened", file: srv, from: `kit += " " + s.cfg.MusterOrigin`, to: `kit += " https:"`,
+		pkg: "./internal/server", test: "TestThePagesPoliciesArePinned", want: "the owner page's CSP"},
+	{name: "ui css: a colour written in app.css", file: appCSS, from: ".status { min-height: 1.5em; margin: .5rem 0; color: rgb(var(--mu-text2));", to: ".status { min-height: 1.5em; margin: .5rem 0; color: #c3bdd9;",
+		pkg: "./internal/server", test: "TestThePluginCSSWritesNoColour", want: "writes a colour, not a kit token: color: #c3bdd9"},
+	{name: "ui kit: a fixture not checked against SHA256SUMS", file: "scripts/e2e-harness/kit.go", from: `want[rel] == "" || got != want[rel]`, to: `want[rel] == ""`,
+		pkg: "./scripts/e2e-harness", test: "TestTheVendoredKitIsPinned", want: "a changed fixture: loadKit = <nil>"},
+
+	// ---- 🔴 the UI pass (killed in a browser: go run ./scripts/mutate -e2e) ----
+	{name: "control: ui known-caught (the mic indicator never drawn)", file: callJS, from: "setInd(t.mic, !mic, 'mic-off', 'Microphone off');", to: "setInd(t.mic, false, 'mic-off', 'Microphone off');",
+		e2e: "ui-call.spec.ts", test: "1280x800 .* remote person's mute", want: `[data-ind="mic"]`},
+	{name: "control: ui no-op edit (must survive)", file: callJS, from: "setInd(t.mic, !mic, 'mic-off', 'Microphone off');", to: "setInd(t.mic, !mic, 'mic-off', 'Microphone off'); // no-op",
+		e2e: "ui-call.spec.ts", test: "1280x800 .* remote person's mute", survive: true},
+	{name: "ui: indicators not updated on a remote mute", file: callJS, from: "room.on(ev, function (pub, p) { if (p) drawParticipant(p);", to: "room.on(ev, function (pub, p) { if (false) drawParticipant(p);",
+		e2e: "ui-call.spec.ts", test: "1280x800 .* remote person's mute", want: `[data-ind="mic"]`},
+	{name: "ui: camera-off leaves the frozen video", file: callJS, from: "t.el.setAttribute('data-video', cam && t.video ? 'on' : 'off');", to: "t.el.setAttribute('data-video', t.video ? 'on' : 'off');",
+		e2e: "ui-call.spec.ts", test: "1280x800 .* remote person's mute", want: "data-video"},
+	{name: "ui: the speaking ring does not follow", file: callJS, from: "t.el.classList.toggle('mu-tile--speaking', sp);", to: "t.el.classList.toggle('mu-tile--speaking', sp || t.el.classList.contains('mu-tile--speaking'));",
+		e2e: "ui-call.spec.ts", test: "1280x800 .* active speaker ring", want: "mu-tile--speaking"},
+	{name: "ui: presentation does not switch on a share", file: callJS, from: "return manual || (s ? 'presentation' : 'grid');", to: "return manual || 'grid';",
+		e2e: "ui-call.spec.ts", test: "1280x800 .* shared screen switches", want: "data-layout"},
+	{name: "ui: the browser's own Stop leaves the share up", file: callJS, from: "if (pub.source === 'screen_share') dropTile(", to: "if (false) dropTile(",
+		e2e: "ui-call.spec.ts", test: "1280x800 .* your own share", want: "screen_share"},
+	{name: "ui: the quality icon ignores LiveKit's quality", file: callJS, from: "var q = QUALITY[p.connectionQuality];", to: "var q = QUALITY[p.connectionQuality] && QUALITY.excellent;",
+		e2e: "ui-call.spec.ts", test: "1280x800 .* connection indicator", want: "Connection poor"},
+	{name: "ui: an aria-label missing (a template's icon button)", file: appHTML, from: `<button id="btn-layout" type="button" class="mu-icon-btn mu-toggle" aria-label="Presentation view" `, to: `<button id="btn-layout" type="button" class="mu-icon-btn mu-toggle" `,
+		e2e: "ui-call.spec.ts", test: "1280x800 .* accessible name", want: "btn-layout"},
+	{name: "ui: an aria-label missing (a script's icon button)", file: uiJS, from: "    label(b, text);\n", to: "\n",
+		e2e: "ui-call.spec.ts", test: "1280x800 .* accessible name", want: "mu-icon-btn"},
+	{name: "ui: reduced motion ignored (a literal duration)", file: appCSS, from: ".tile { margin: 0; animation: tile-in var(--mu-dur-base) var(--mu-ease-enter);", to: ".tile { margin: 0; animation: tile-in 200ms var(--mu-ease-enter);",
+		e2e: "ui-call.spec.ts", test: "reduced motion", want: "animation 0.2s"},
+	{name: "ui: reduced motion ignored (the FLIP animation)", file: uiJS, from: "    var d = dur('base');\n    var before", to: "    var d = 200;\n    var before",
+		e2e: "ui-call.spec.ts", test: "reduced motion", want: "expect(moving).toBe(0)"},
+	{name: "ui: Share drawn where getDisplayMedia is missing", file: callJS, from: "shareBtn.hidden = !(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia);", to: "shareBtn.hidden = false;",
+		e2e: "ui-call.spec.ts", test: "phone with no screen sharing", want: "btn-share"},
+	{name: "ui: the M shortcut does nothing", file: callJS, from: "var b = k === 'm' ? mic :", to: "var b = k === '\\u0000' ? mic :",
+		e2e: "ui-call.spec.ts", test: "1280x800 .* keyboard shortcuts", want: "btn-mic"},
+	{name: "ui: Join before the device check", file: appJS, from: "$('btn-join').disabled = s === 'checking' || s === 'idle';", to: "$('btn-join').disabled = false;",
+		e2e: "ui-call.spec.ts", test: "1280x800 .* pre-join holds Join", want: "toBeDisabled"},
+	{name: "ui: no fallback when the kit does not load", file: uiJS, from: "  if (!cssLive) {\n", to: "  if (false) {\n",
+		e2e: "ui-kit.spec.ts", test: "kit's css,js missing", want: "--mu-bg"},
+	{name: "ui: the kit from the wrong origin", file: appHTML, from: `<link rel="stylesheet" href="{{.Kit}}/kit.css">`, to: `<link rel="stylesheet" href="/ui-kit/v1/kit.css">`,
+		e2e: "ui-kit.spec.ts", test: "configured muster origin", want: "kit.css"},
+
 	// ---- configuration ----
 	{name: "config: the fake engine without MEETINGS_TEST_MODE", file: mainGo, from: `if strings.TrimSpace(getenv("MEETINGS_TEST_MODE")) != "1" {`, to: `if false {`,
 		pkg: ".", test: "TestLoadConfigTranscript", want: "fake without test mode: LoadConfig accepted it"},
@@ -902,6 +959,7 @@ var mutants = []mutant{
 
 func main() {
 	list := flag.Bool("list", false, "print the mutants' names and stop")
+	e2eOnly := flag.Bool("e2e", false, "run the UI mutants (killed by Playwright tests) and their controls, instead of the Go ones")
 	match := flag.String("match", "", "run only the mutants whose name matches this regular expression (the controls always run)")
 	flag.Parse()
 	if *match != "" {
@@ -917,6 +975,13 @@ func main() {
 		}
 		mutants = keep
 	}
+	var kind []mutant
+	for _, m := range mutants {
+		if (m.e2e != "") == *e2eOnly {
+			kind = append(kind, m)
+		}
+	}
+	mutants = kind
 	if *list {
 		for _, m := range mutants {
 			fmt.Println(m.name)
@@ -1005,6 +1070,9 @@ func run(m mutant) (string, string) {
 			return "ERROR", err.Error()
 		}
 	}
+	if m.e2e != "" {
+		return runE2E(m)
+	}
 	cmd := exec.Command("go", "test", "-count=1", "-run", "^"+m.test+"$", m.pkg)
 	if m.realLiveKit {
 		cmd.Env = append(os.Environ(), "MEETINGS_REQUIRE_LIVEKIT=1")
@@ -1031,6 +1099,56 @@ func run(m mutant) (string, string) {
 		return "ERROR", fmt.Sprintf("the test failed, but not with %q: %s", m.want, failLine(s))
 	}
 	return "KILLED", failLine(s)
+}
+
+// runE2E runs a UI mutant's one Playwright test. Killed: it failed, exactly
+// one test failed, and the output carries want. Survived: exactly one test
+// ran and passed (a -g that matched nothing is an error, not a pass).
+func runE2E(m mutant) (string, string) {
+	cmd := exec.Command("npx", "playwright", "test", m.e2e, "--project=chromium", "--reporter=line", "--retries=0", "-g", m.test)
+	cmd.Dir = "e2e"
+	out, err := cmd.CombinedOutput()
+	s := string(out)
+	if err == nil {
+		if !regexp.MustCompile(`\b1 passed\b`).MatchString(s) {
+			return "ERROR", "the -g filter did not run exactly one test: " + lastLine(s)
+		}
+		return "SURVIVED", "test passed"
+	}
+	if !regexp.MustCompile(`\b1 failed\b`).MatchString(s) {
+		return "ERROR", "failed without exactly one test failing (a broken page?): " + lastLine(s)
+	}
+	if m.want != "" && !strings.Contains(s, m.want) {
+		return "ERROR", fmt.Sprintf("the test failed, but not with %q: %s", m.want, e2eFailLine(s))
+	}
+	return "KILLED", e2eFailLine(s)
+}
+
+func lastLine(s string) string {
+	ls := strings.Split(strings.TrimSpace(s), "\n")
+	return strings.TrimSpace(ls[len(ls)-1])
+}
+
+// e2eFailLine is the first "Error:" line of a Playwright failure and the
+// locator or expectation under it.
+func e2eFailLine(s string) string {
+	ls := strings.Split(s, "\n")
+	for i, l := range ls {
+		if strings.HasPrefix(strings.TrimSpace(l), "Error:") {
+			out := strings.TrimSpace(l)
+			for _, n := range ls[i+1 : min(i+6, len(ls))] {
+				if t := strings.TrimSpace(n); strings.HasPrefix(t, "Locator:") || strings.HasPrefix(t, "Expected") {
+					out += " | " + t
+					break
+				}
+			}
+			if len(out) > 200 {
+				out = out[:200] + "…"
+			}
+			return out
+		}
+	}
+	return lastLine(s)
 }
 
 // lookup is a binary named by env, or found on PATH; "" for neither.

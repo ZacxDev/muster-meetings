@@ -51,9 +51,13 @@ test('at 390×844 a guest knocks, the lobby row shows their name as text, and Ad
   await owner.goto(`${parent}/apps/${pluginID}`);
   const app = owner.frameLocator('#app');
   await app.locator('#new-meeting').click();
-  await expect(app.locator('#call-view')).toBeVisible();
-  const link = await app.locator('#call-url').inputValue();
+  // New meeting opens the pre-join, with the link to share on it.
+  await expect(app.locator('#prejoin')).toBeVisible();
+  const link = await app.locator('#join-url').inputValue();
   expect(link).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/j\/[A-Za-z0-9_-]{22}$/);
+  await expect(app.locator('#btn-join')).toBeEnabled({ timeout: 15_000 });
+  await app.locator('#btn-join').click();
+  await expect(app.locator('#call-view')).toBeVisible();
 
   // The guest: a fresh context, no cookies, a phone.
   const guestCtx = await browser.newContext({ viewport: phone });
@@ -71,19 +75,27 @@ test('at 390×844 a guest knocks, the lobby row shows their name as text, and Ad
   // A name that looks like markup is just a name.
   const typed = '<b>Grace</b>';
   await guest.locator('#name').fill(typed);
+  await expect(guest.locator('#ask')).toBeEnabled({ timeout: 15_000 }); // the device check
   await guest.locator('#ask').click();
   await expect(guest.locator('#guest')).toHaveAttribute('data-state', 'waiting');
   await expect(guest.locator('#guest-status')).toHaveText('Waiting for Ada L. to let you in.');
 
-  // The owner's lobby row appears, on screen without scrolling, with the
+  // The knock is a count on People and a toast naming them, as text.
+  await expect(app.locator('#lobby-count')).toHaveText('1');
+  await expect(app.locator('#btn-people')).toHaveAccessibleName('People, 1 waiting');
+  await expect(app.locator('.mu-toast')).toContainText(`${typed} wants to join`);
+  await expect(app.locator('.mu-toast b')).toHaveCount(0);
+  // People opens the lobby: the row is on screen without scrolling, with the
   // name as text (no <b> element), "(guest)" after it.
+  await app.locator('#btn-people').click();
   const row = app.locator('.lobby-row.waiting');
   await expect(row).toBeVisible();
   await expect(row.locator('.who')).toHaveText(`${typed} (guest)`);
   await expect(row.locator('b')).toHaveCount(0);
   await expect(row).toBeInViewport({ ratio: 1 });
   await expect(row.locator('.admit')).toBeInViewport({ ratio: 1 });
-  await expect(app.locator('#btn-end')).toBeInViewport({ ratio: 1 });
+  await expect(row.locator('.admit')).toHaveAccessibleName(`Admit ${typed}`);
+  await expect(app.locator('#btn-leave')).toBeInViewport({ ratio: 1 });
   await expect(app.locator('#badge')).toHaveText('Recording · Transcribing · AI');
   const before = (await joins(browser)).filter((j) => j.Claims.sub?.startsWith('guest-'));
   expect(before).toHaveLength(0); // no guest token before the admit

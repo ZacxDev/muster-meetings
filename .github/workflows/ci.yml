@@ -118,10 +118,52 @@ jobs:
       # the transcript in the owner's and a guest's panels (the fake LiveKit
       # as Egress, the fake STT engine), and live captions at 390x844 and
       # 1280x800 (the nemotron engine against the fake Nemotron server).
+      # The UI pass (ui-*.spec.ts): the pre-join, the tile indicators, the
+      # speaking ring, the layouts and screen share, the connection quality,
+      # the shortcuts, reduced motion, accessible names, axe, and muster's UI
+      # kit (served by the harness from e2e/fixtures/ui-kit) and its fallback;
+      # the indicators and a screen share against the real livekit-server.
       # Count the passes: `playwright test` exits 0 when everything skipped.
       - name: playwright test
         working-directory: e2e
         run: |
           set -o pipefail
-          npx playwright test 2>&1 | tee /tmp/e2e.log
-          grep -qE '^\s+6 passed \(' /tmp/e2e.log
+          npx playwright test --project=chromium 2>&1 | tee /tmp/e2e.log
+          grep -qE '^\s+34 passed \(' /tmp/e2e.log
+      # The UI mutants: each must turn its named Playwright test red (and the
+      # no-op control must not).
+      - name: UI mutation sweep (each UI mutant's named Playwright test must go red)
+        run: go run ./scripts/mutate -e2e
+
+  # The visual goldens (e2e/goldens/), compared in the pinned Playwright
+  # image, where the fonts and the rasteriser are the ones they were made
+  # with (scripts/update-goldens.sh makes them in the same image).
+  visual:
+    name: visual goldens (playwright image)
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/playwright:v1.64.1-noble
+      options: --ipc=host
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - name: npm ci
+        working-directory: e2e
+        run: npm ci
+      - name: playwright test (visual)
+        working-directory: e2e
+        env:
+          HOME: /root
+          GOFLAGS: -buildvcs=false
+        run: |
+          set -o pipefail
+          npx playwright test --project=visual 2>&1 | tee /tmp/visual.log
+          grep -qE '^\s+2 passed \(' /tmp/visual.log
+      - name: the diffs, on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: visual-diffs
+          path: e2e/test-results/

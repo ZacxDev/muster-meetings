@@ -66,6 +66,8 @@ for (const size of [{ width: 390, height: 844 }, { width: 1280, height: 800 }]) 
     await owner.goto(`${parent}/apps/${pluginID}`);
     const app = owner.frameLocator('#app');
     await app.locator('#new-meeting').click();
+    await expect(app.locator('#btn-join')).toBeEnabled({ timeout: 15_000 });
+    await app.locator('#btn-join').click();
     await expect(app.locator('#call-view')).toBeVisible();
     const room = await ownerRoom(browser, before);
 
@@ -103,6 +105,7 @@ for (const size of [{ width: 390, height: 844 }, { width: 1280, height: 800 }]) 
     const overflow = await frame.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
     expect(overflow).toBeLessThanOrEqual(0);
 
+    await app.locator('#btn-leave').click();
     await app.locator('#btn-end').click();
     await expect(app.locator('#list-view')).toBeVisible();
     await ctx.close();

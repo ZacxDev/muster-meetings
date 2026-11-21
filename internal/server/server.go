@@ -225,16 +225,38 @@ func (s *Server) ownerPageCSP() string { return s.pageCSP(s.cfg.MusterOrigin) }
 func (s *Server) guestPageCSP() string { return s.pageCSP("'none'") }
 
 // pageCSP is a page's policy (design: "Every page sets its own strict CSP"):
-// its own script, style and images; its own API and LiveKit's signalling
-// origin (wss, and https for the client's /rtc/validate check) and nothing
-// else; media from itself and blob:; framed by frameAncestors.
+// its own script, style and images, and muster's UI kit (kit.css, kit.js and
+// muster's brand images: docs/ui-kit.md, "Your page's Content-Security-
+// Policy") from muster's exact origin in those three directives and no
+// other; its own API and LiveKit's signalling origin (wss, and https for the
+// client's /rtc/validate check) and nothing else; media from itself and
+// blob:; framed by frameAncestors.
 func (s *Server) pageCSP(frameAncestors string) string {
 	connect := "'self'"
 	if s.rtcOrigins != "" {
 		connect += " " + s.rtcOrigins
 	}
-	return "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src " + connect + "; media-src 'self' blob:; " +
+	kit := "'self'"
+	if s.cfg.MusterOrigin != "" {
+		kit += " " + s.cfg.MusterOrigin
+	}
+	return "default-src 'self'; script-src " + kit + "; style-src " + kit + "; img-src " + kit + "; connect-src " + connect + "; media-src 'self' blob:; " +
 		"object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors " + frameAncestors
+}
+
+// KitPath is the UI kit's major version on muster (docs/ui-kit.md): the
+// pages link kit.css and kit.js under it, LIVE, so the install's theme
+// reaches them on their next load.
+const KitPath = "/ui-kit/v1"
+
+// kitBase is where the pages load the kit from: muster's origin and
+// KitPath, or "" with no muster origin (the pages then draw the built-in
+// fallback, static/kit-fallback.css).
+func (s *Server) kitBase() string {
+	if s.cfg.MusterOrigin == "" {
+		return ""
+	}
+	return s.cfg.MusterOrigin + KitPath
 }
 
 // RTCOrigins is connect-src's LiveKit part for a signalling URL: its origin
@@ -368,6 +390,8 @@ type enterPage struct {
 	Ref     string
 	Message string
 	Again   bool
+	// Kit is the UI kit's base URL (kitBase).
+	Kit string
 }
 
 func (s *Server) renderEnter(w http.ResponseWriter, code int, p enterPage) {
@@ -377,6 +401,7 @@ func (s *Server) renderEnter(w http.ResponseWriter, code int, p enterPage) {
 	h.Set("Cache-Control", "no-store")
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(code)
+	p.Kit = s.kitBase()
 	_ = pageTmpl.ExecuteTemplate(w, "app.html", p)
 }
 

@@ -1,22 +1,23 @@
-// The guest page: the notice, a name, Ask to join, the wait, the call.
-// The ticket the knock answers lives in this script's memory only and is
-// sent in request bodies, never in a URL. The page's state is on
+// The guest page: the notice, the device check and a name, Ask to join, the
+// wait, the call. The ticket the knock answers lives in this script's memory
+// only and is sent in request bodies, never in a URL. The page's state is on
 // <main data-state>: start, waiting, admitted, denied, ended, removed.
 (function () {
   'use strict';
   var root = document.getElementById('guest');
   if (!root) return;
+  var UI = window.MeetingsUI;
   var $ = function (id) { return document.getElementById(id); };
   var base = location.pathname.replace(/\/+$/, '');
   var shown = { record: root.getAttribute('data-record') === 'true', ai: root.getAttribute('data-ai') === 'true',
     transcribed: root.getAttribute('data-transcribed') === 'true' };
   var ticket = null;
-  var preview = null; // the camera preview's stream
   var conn = null;
   var abort = null;
+  var media = false; // what the call publishes, from the pre-join
 
   function state(s) { root.setAttribute('data-state', s); }
-  function say(text) { $('guest-status').textContent = text || ''; }
+  function say(text) { $('pre-status').textContent = text || ''; }
   function callSay(text) { $('call-status').textContent = text || ''; }
 
   function renderNotice(n) {
@@ -27,6 +28,7 @@
       p.textContent = t;
       box.appendChild(p);
     });
+    box.hidden = !(n.text || []).length;
     shown = { record: !!n.record, ai: !!n.ai, transcribed: !!n.transcribed };
   }
 
@@ -36,29 +38,24 @@
     return fetch(base + path, init);
   }
 
-  function stopPreview() {
-    if (preview) { preview.getTracks().forEach(function (t) { t.stop(); }); preview = null; }
-  }
-
-  $('btn-preview').addEventListener('click', function () {
-    var b = this;
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { say('This browser cannot use a camera here.'); return; }
-    navigator.mediaDevices.getUserMedia({ audio: true, video: true }).then(function (s) {
-      preview = s;
-      $('preview').srcObject = s;
-      b.hidden = true;
-    }, function () { say('The camera and microphone are off. You can still ask to join.'); });
-  });
+  // The pre-join check starts at once; Ask to join waits for it (granted,
+  // or refused: the guest then joins without a camera and microphone).
+  var asked = false;
+  var pre = MeetingsCall.prejoin({ root: $('join-view'), name: function () { return $('name').value.trim(); }, onState: function (s) {
+    $('ask').disabled = asked || s === 'checking' || s === 'idle';
+  } });
+  $('name').addEventListener('input', function () { pre.refresh(); });
+  pre.start();
 
   function finish(s, text) {
     state(s);
-    stopPreview();
+    pre.stop();
     if (abort) { abort.abort(); abort = null; }
     if (conn) { conn.leave(); conn = null; }
     ticket = null;
     document.body.textContent = '';
     var m = document.createElement('main');
-    m.className = 'notice';
+    m.className = 'page notice';
     m.id = 'guest';
     m.setAttribute('data-state', s);
     var h = document.createElement('h1');
@@ -76,7 +73,7 @@
   function connect(t) {
     var r = $('btn-retry');
     r.hidden = true;
-    MeetingsCall.join({ url: t.livekit_url, token: t.token, ice: t.ice, media: wantMedia, onStatus: callSay,
+    MeetingsCall.join({ url: t.livekit_url, token: t.token, ice: t.ice, media: media, onStatus: callSay,
       onGone: function () {
         conn = null;
         if (root.getAttribute('data-state') === 'admitted') { callSay('The call disconnected.'); r.hidden = false; }
@@ -84,11 +81,10 @@
       .then(function (c) { conn = c; }, function () { r.hidden = false; /* the status says "Can't connect media" */ });
   }
 
-  var wantMedia = false;
   function onAdmitted(t) {
     state('admitted');
-    wantMedia = !!preview;
-    stopPreview();
+    media = pre.choice();
+    pre.stop();
     $('join-view').hidden = true;
     $('call-view').hidden = false;
     events();
@@ -97,7 +93,8 @@
 
   // The live transcript, the same as the owner's panel. Each stream sends it
   // from the start, so a new stream (a Retry) redraws it.
-  var transcript = MeetingsCall.Transcript($('transcript'), $('transcript-status'), $('panels'));
+  var side = MeetingsCall.Side();
+  var transcript = MeetingsCall.transcriptPanel(side);
 
   // events follows the admitted guest's stream: a fresh token at its start
   // (used on a Retry), the CURRENT notice (its badge), the live transcript,
@@ -135,7 +132,8 @@
   function wait() {
     state('waiting');
     var who = root.getAttribute('data-owner');
-    say(who ? 'Waiting for ' + who + ' to let you in.' : 'Waiting for the host to let you in.');
+    $('waiting').hidden = false;
+    $('guest-status').textContent = who ? 'Waiting for ' + who + ' to let you in.' : 'Waiting for the host to let you in.';
     abort = new AbortController();
     post('/wait', { ticket: ticket }, abort.signal).then(function (res) {
       if (res.status === 410) { finish('ended', 'This meeting has ended.'); return; }
@@ -153,8 +151,11 @@
   $('knock-form').addEventListener('submit', function (ev) {
     ev.preventDefault();
     var b = $('ask');
-    var name = $('name').value.trim();
-    if (!name) { say('Type your name first.'); return; }
+    var input = $('name');
+    var name = input.value.trim();
+    if (!name) { input.setAttribute('aria-invalid', 'true'); say('Type your name first.'); input.focus(); return; }
+    input.removeAttribute('aria-invalid');
+    asked = true;
     b.disabled = true;
     say('');
     post('/knock', { name: name, notice: shown }).then(function (res) {
@@ -170,9 +171,10 @@
         } else {
           say(body.error || 'That did not work. Try again.');
         }
-        b.disabled = false;
+        asked = false;
+        b.disabled = pre.state() === 'checking';
       });
-    }).catch(function () { say('Could not reach the meeting. Try again.'); b.disabled = false; });
+    }).catch(function () { say('Could not reach the meeting. Try again.'); asked = false; b.disabled = false; });
   });
 
   $('btn-leave').addEventListener('click', function () {

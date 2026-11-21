@@ -8,8 +8,19 @@
 // and serves until its standard input closes or it is signalled. The two
 // origins are different sites, as meet.<muster host> and muster are.
 //
+// The parent is also muster's UI kit (docs/ui-kit.md): it serves
+// /ui-kit/v1/{kit.css,theme.css,kit.js,icons.svg} from e2e/fixtures/ui-kit,
+// muster's own render of the kit at one pinned commit (scripts/vendor-ui-kit.sh;
+// SHA256SUMS is checked at start), with muster's headers. So the plugin's
+// pages load the kit from the configured muster origin exactly as in
+// production, and CI never depends on a live muster.
+//
 // The parent's routes, for the test only:
 //
+//	GET /kit-mode?theme=brass|harbor&missing=css,js
+//	                           the theme the kit is served in (a second preset, so a
+//	                           test sees the theme flow through), and which kit files
+//	                           answer 404 (the pages' fallback)
 //	GET /mint                  a fresh hand-off code, as the person's browser mints one
 //	GET /redeems               how many redeems the fake muster has answered
 //	GET /apps/<id>[?code=…]    muster's page: frames /enter with that code, or a fresh one
@@ -193,6 +204,11 @@ func run(logger *log.Logger) error {
 	go ingestSrv.Serve(ingestLn)
 
 	mux := http.NewServeMux()
+	kit, err := loadKit(filepath.Join("e2e", "fixtures", "ui-kit"))
+	if err != nil {
+		return err
+	}
+	kit.routes(mux)
 	mux.HandleFunc("GET /mint", func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, fake.MintApp(app.PluginID, ada.ID, ""))
 	})

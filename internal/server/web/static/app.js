@@ -3,8 +3,11 @@
 // removed, and it is never written to storage or a cookie. A reload finds no
 // token and the server says "Open Meetings from muster again".
 //
-// The whole owner flow: New meeting, which opens the pre-join (the camera
-// check, and the link to copy or share), then Join. Guests who knock are a
+// The whole owner flow: New meeting, then share the link. The FIRST time,
+// New meeting opens the pre-join (the camera check, and the link to copy
+// or share) and Join; the check's result is remembered (static/prefs.js),
+// and from then on New meeting goes straight into the call with the link on
+// screen. Storage that is blocked just means the check again. Guests who knock are a
 // count on the People button and a toast with Admit; one tap admits them.
 // Every name a guest typed is rendered as text only (textContent, or an
 // attribute value).
@@ -318,9 +321,31 @@
 
   // ---- pre-join ----
 
-  var pre = MeetingsCall.prejoin({ root: $('prejoin'), onState: function (s) {
+  var pre = MeetingsCall.prejoin({ root: $('prejoin'), remember: true, onState: function (s) {
     $('btn-join').disabled = s === 'checking' || s === 'idle';
   } });
+
+  // The invite card: the link on the stage while you are alone in the call.
+  var inviteClosed = false;
+  function invite(alone) { $('invite').hidden = inviteClosed || !alone || !call; }
+  $('invite-close').addEventListener('click', function () { inviteClosed = true; invite(false); });
+  $('invite-copy').addEventListener('click', function () { copyText($('call-url').value, $('call-url')); });
+  $('invite-share').addEventListener('click', function () {
+    navigator.share({ title: 'Join my meeting', url: $('call-url').value }).catch(function () { /* dismissed */ });
+  });
+
+  // enterCall goes into the call with media (the check's choice, or the
+  // remembered one, minus any device that is gone).
+  function enterCall(media) {
+    if (!call || call.joined) return;
+    call.joined = true;
+    pre.stop();
+    show('call-view');
+    inviteClosed = false;
+    invite(true);
+    var id = call.id;
+    MeetingsCall.usable(media).then(function (m) { if (call && call.id === id) connect(id, m); });
+  }
 
   // openMeeting opens a meeting's pre-join: the device check, and the link.
   // The meeting's event stream starts here, so a knock is shown (and the
@@ -331,23 +356,22 @@
     call = { id: id, url: url || '', abort: new AbortController(), conn: null, ended: false, joined: false };
     knocked = {};
     $('join-url').value = url || '';
-    $('share-link').hidden = !navigator.share;
+    $('call-url').value = url || '';
+    $('share-link').hidden = $('invite-share').hidden = !navigator.share;
     $('lobby').textContent = '';
     $('btn-use-here').hidden = true;
     callSay('');
     preSay('');
-    show('prejoin');
     pre.start();
+    if (pre.state() === 'remembered') enterCall(pre.choice());
+    else show('prejoin');
     watch(id, call.abort).catch(function (e) { if (token && call && call.id === id && e.name !== 'AbortError') preSay('Lost touch with the meeting: ' + e.message); });
   }
 
   $('btn-join').addEventListener('click', function () {
     if (!call || call.joined) return;
-    var media = pre.choice();
-    pre.stop();
-    call.joined = true;
-    show('call-view');
-    connect(call.id, media);
+    pre.keep();
+    enterCall(pre.choice());
   });
   $('prejoin-back').addEventListener('click', function () { closeCall(); load(false); });
 
@@ -363,6 +387,12 @@
     api('POST', '/api/meetings/' + encodeURIComponent(id) + '/token').then(function (t) {
       if (!call || call.id !== id) return;
       return MeetingsCall.join({ url: t.livekit_url, token: t.token, ice: t.ice, media: media, onStatus: callSay,
+        onRoster: function (n) { invite(n === 0); },
+        // A device picked in the call's settings is the remembered one.
+        onDevice: function (field, devId) {
+          var p = window.MeetingsPrefs && window.MeetingsPrefs.load();
+          if (p) { p[field] = devId; window.MeetingsPrefs.save(p); }
+        },
         onGone: function (reason) {
           if (!call || call.id !== id || call.ended) return;
           call.conn = null;
@@ -391,6 +421,7 @@
     if (call.conn) call.conn.leave();
     call = null;
     pre.stop();
+    invite(false);
     side.close(false);
     UI.closePop(false);
     show('list-view');

@@ -38,10 +38,12 @@
     return fetch(base + path, init);
   }
 
-  // The pre-join check starts at once; Ask to join waits for it (granted,
-  // or refused: the guest then joins without a camera and microphone).
+  // The pre-join check starts at once, EVERY time (a guest's page never
+  // remembers one); Ask to join waits for it (granted, refused, or the
+  // browser's prompt unanswered for a few seconds: the guest then joins
+  // without a camera and microphone).
   var asked = false;
-  var pre = MeetingsCall.prejoin({ root: $('join-view'), name: function () { return $('name').value.trim(); }, onState: function (s) {
+  var pre = MeetingsCall.prejoin({ root: $('join-view'), remember: false, name: function () { return $('name').value.trim(); }, onState: function (s) {
     $('ask').disabled = asked || s === 'checking' || s === 'idle';
   } });
   $('name').addEventListener('input', function () { pre.refresh(); });

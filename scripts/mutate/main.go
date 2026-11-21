@@ -141,6 +141,7 @@ const (
 	uiJS    = "internal/server/web/static/ui.js"
 	appCSS  = "internal/server/web/static/app.css"
 	appHTML = "internal/server/web/app.html"
+	guestJS = "internal/server/web/static/guest.js"
 	kEgress = "deploy/kubernetes/egress.yaml"
 	// phase 3c
 	nemGo = "internal/stt/nemotron.go"
@@ -947,6 +948,15 @@ var mutants = []mutant{
 		e2e: "ui-call.spec.ts", test: "1280x800 .* pre-join holds Join", want: "toBeDisabled"},
 	{name: "ui: no fallback when the kit does not load", file: uiJS, from: "  if (!cssLive) {\n", to: "  if (false) {\n",
 		e2e: "ui-kit.spec.ts", test: "kit's css,js missing", want: "the fallback stylesheet was linked"},
+	{name: "ui: no bundled kit.js when muster's does not load", file: appHTML, from: `<script src="/static/vendor/muster-ui-kit-v1.js"></script>
+`, to: ``,
+		e2e: "ui-kit.spec.ts", test: "kit's js missing", want: "kit.js (muster's or the bundled one) is installed"},
+	{name: "ui: the owner never skips the remembered check", file: appJS, from: "root: $('prejoin'), remember: true,", to: "root: $('prejoin'), remember: false,",
+		e2e: "ui-remember.spec.ts", test: "first New meeting shows the check", want: "the finished check was remembered"},
+	{name: "ui: a guest skips the check", file: guestJS, from: "root: $('join-view'), remember: false,", to: "root: $('join-view'), remember: true,",
+		e2e: "ui-remember.spec.ts", test: "a guest always gets the check", want: "remembered"},
+	{name: "ui: Join stuck while the camera prompt is pending", file: callJS, from: "        setState('pending');\n", to: "        return;\n",
+		e2e: "ui-remember.spec.ts", test: "unanswered camera prompt", want: "pending"},
 	{name: "ui: the kit from the wrong origin", file: appHTML, from: `<link rel="stylesheet" href="{{.Kit}}/kit.css">`, to: `<link rel="stylesheet" href="/ui-kit/v1/kit.css">`,
 		e2e: "ui-kit.spec.ts", test: "configured muster origin", want: "kit.css"},
 

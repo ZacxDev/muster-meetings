@@ -20,7 +20,7 @@ export default defineConfig({
   retries: 0,
   timeout: 120_000, // the first `go run` of the harness compiles it
   reporter: [['list']],
-  expect: { toHaveScreenshot: { maxDiffPixelRatio: 0.002, animations: 'disabled', caret: 'hide' } },
+  expect: { toHaveScreenshot: { maxDiffPixels: 50, animations: 'disabled', caret: 'hide' } },
   snapshotPathTemplate: '{testDir}/goldens/{testFilePath}/{arg}{ext}',
   projects: [{
     name: 'chromium',

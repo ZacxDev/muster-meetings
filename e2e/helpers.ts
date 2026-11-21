@@ -51,11 +51,18 @@ export async function ownerPrejoin(page: Page, h: Harness): Promise<FrameLocator
   return app;
 }
 
-// ownerInCall goes on from the pre-join into the call (the fake client:
-// connected at once, with the owner's own tile).
+// ownerInCall goes into the call (the fake client: connected at once, with
+// the owner's own tile): through the pre-join the first time, straight in
+// once the check is remembered.
 export async function ownerInCall(page: Page, h: Harness): Promise<FrameLocator> {
-  const app = await ownerPrejoin(page, h);
-  await app.locator('#btn-join').click();
+  await page.goto(`${h.parent}/apps/${h.pluginID}`);
+  const app = page.frameLocator('#app');
+  await app.locator('#new-meeting').click();
+  await expect(app.locator('#prejoin, #call-view').filter({ visible: true })).toHaveCount(1, { timeout: 15_000 });
+  if (await app.locator('#prejoin').isVisible()) {
+    await expect(app.locator('#btn-join')).toBeEnabled({ timeout: 15_000 });
+    await app.locator('#btn-join').click();
+  }
   await expect(app.locator('#call-view')).toBeVisible();
   await expect(app.locator('#call-view')).toHaveAttribute('data-conn', 'connected', { timeout: 15_000 });
   await expect(app.locator('.tile.local[data-source="camera"]')).toHaveCount(1);

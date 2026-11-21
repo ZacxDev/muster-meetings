@@ -554,18 +554,29 @@ plugin's on the next page load, with no rebuild. The pages' CSP adds exactly
 any other directive. `static/app.css` only places the kit's components and
 writes **no colour** (every colour, radius and duration is a `--mu-*`
 token; `TestThePluginCSSWritesNoColour` fails on a literal). If the kit
-cannot be loaded (muster down, a `404`), the page draws a built-in fallback
-(`static/kit-fallback.css` and `kit-fallback-icons.svg`: muster's own
-render of the kit in its default theme, made by `scripts/vendor-ui-kit.sh`)
-and the call works the same; `<html data-kit>` says which (`live`, `css`,
-`js`, `fallback`).
+cannot be loaded (muster down, a `404`), the page uses the kit bundled with
+the plugin: `static/vendor/muster-ui-kit-v1.js` is muster's `kit.js` byte for
+byte (loaded after muster's, it installs itself only when muster's did not)
+and `static/kit-fallback.css` is muster's `kit.css` in its default theme,
+both rendered by `scripts/vendor-ui-kit.sh` from the commit the tests pin.
+The call works the same; `<html data-kit>` says `live` or `fallback`.
 
-- **Owner:** New meeting opens the **pre-join**: the camera preview, the
-  microphone's level, the camera and microphone pickers, mute and camera
-  toggles, and the meeting's link with Copy (and Share where the browser
-  has it). **Join** waits for the device check; refused or missing devices
-  join without them. Guests can knock while you are on the pre-join.
-- **Guest:** the same pre-join, after the consent notice (in full: this is
+- **Owner, the first time:** New meeting opens the **device check**: the
+  camera preview, the microphone's level, the camera and microphone
+  pickers, mute and camera toggles, and the meeting's link with Copy (and
+  Share where the browser has it). **Join** waits for the check (refused or
+  missing devices join without them; a browser prompt left unanswered for
+  5 s lets Join go ahead without them). A finished check is remembered in
+  the browser (`static/prefs.js`: one `localStorage` key on the plugin's
+  origin, holding which camera and microphone and whether each is on;
+  nothing else is ever stored).
+- **Owner, after that:** New meeting goes straight into the call, with the
+  link on an invite card until someone joins. A remembered device that is
+  gone, or a permission refused since, joins anyway with what works and
+  says so. The camera and microphone pickers stay in the call (the settings
+  button), and a device picked there is the remembered one. Storage that
+  is blocked means the check again.
+- **Guest:** always the check, after the consent notice (in full: this is
   where they agree to it), then their name and **Ask to join**.
 - **The call:** a control bar of icon buttons (each with a tooltip and an
   `aria-label`): mute, camera, share screen, the layout, the transcript,
@@ -584,8 +595,8 @@ and the call works the same; `<html data-kit>` says which (`live`, `css`,
   overrides it. Your own share shows "You are presenting" with Stop, and the
   browser's own Stop sharing ends it the same way. Where the browser cannot
   share (`getDisplayMedia` missing: phones) the button is not drawn.
-- **Keyboard:** M mutes, V turns the camera off, S shares, ? lists them;
-  never while typing in a field.
+- **Keyboard:** M mutes, V turns the camera off, S shares (each button's
+  tooltip names its key); never while typing in a field.
 - **Motion:** tiles fade and scale in and out, layout changes move tiles
   (FLIP), panels and rows rise in, and toggles animate their pressed state,
   all in the kit's duration tokens, so `prefers-reduced-motion` (which sets
@@ -782,6 +793,11 @@ shortcuts, reduced motion (every computed transition and animation 0 s, and
 no Web Animation on a layout change), every button's accessible name
 (enumerated), axe (no serious or critical violation) on the pre-join, the
 call, the lobby and the past meetings, and a phone with no screen sharing.
+`ui-remember.spec.ts`: the owner's first New meeting shows the check and the
+next goes straight in with the link on screen (storage holding only the
+device key), a remembered device gone and a permission refused since, blocked
+storage meaning the check, a guest always checked, and Join (and Ask to
+join) let through after an unanswered camera prompt.
 `ui-kit.spec.ts`: the kit loaded from the configured muster origin, a second
 theme reaching the page on reload, the CSP, and the fallback with
 `kit.css`, `kit.js` or both answering `404`. `ui-real-livekit.spec.ts` runs

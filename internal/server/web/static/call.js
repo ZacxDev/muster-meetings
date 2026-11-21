@@ -45,16 +45,28 @@
 
   // ---- pre-join ----
 
+  // PENDING_MS is how long a page waits on the browser's camera and
+  // microphone prompt before it lets the person join anyway (without them):
+  // a prompt nobody answers must not hold Join forever.
+  var PENDING_MS = 5000;
+
   // prejoin wires the pre-join section's preview, meter, pickers and
-  // toggles. onState(state) is told "checking", "ready" (devices on) or
-  // "blocked" (refused or missing: the call goes on without them); a page's
-  // Join waits for anything but "checking".
+  // toggles. onState(state) is told "checking", "ready" (devices on),
+  // "blocked" (refused or missing: the call goes on without them),
+  // "pending" (the browser's prompt still unanswered after PENDING_MS: the
+  // call may go on without them) or "remembered"; a page's Join waits only
+  // while "checking".
+  //
+  // opts.remember (the owner's page only): a check finished before
+  // (MeetingsPrefs) is not run again: start() goes straight to "remembered"
+  // and choice() is what was kept. A guest's page never remembers.
   function prejoin(opts) {
     opts = opts || {};
     var root = opts.root, video = $('preview'), tile = $('pre-tile'), avatar = $('pre-avatar'), checking = $('pre-checking');
     var level = $('mic-level'), fill = level.querySelector('.meter__fill'), micBtn = $('pre-mic'), camBtn = $('pre-cam');
     var pickCam = $('pick-cam'), pickMic = $('pick-mic'), status = $('pre-status');
     var stream = null, micOn = true, camOn = true, ac = null, raf = 0, state = 'idle', started = false, gen = 0;
+    var saved = null, pending = 0;
 
     function say(t) { status.textContent = t || ''; }
     function setState(s) {
@@ -160,6 +172,12 @@
       }
       release();
       setState('checking');
+      clearTimeout(pending);
+      pending = setTimeout(function () {
+        if (my !== gen || state !== 'checking') return;
+        setState('pending');
+        say('Still waiting for the browser to allow the camera and microphone. You can join without them.');
+      }, PENDING_MS);
       return open(micId, camId).then(function (s) {
         if (my !== gen) { s.getTracks().forEach(function (t) { t.stop(); }); return; }
         stream = s;
@@ -186,15 +204,25 @@
     }
 
     return {
-      // start runs the device check (again).
-      start: function () { started = true; sync(); return check(pickMic.value || '', pickCam.value || ''); },
+      // start runs the device check (again), or, remembered, does not.
+      start: function () {
+        started = true;
+        saved = opts.remember && window.MeetingsPrefs ? window.MeetingsPrefs.load() : null;
+        if (saved) { setState('remembered'); return Promise.resolve(); }
+        sync();
+        return check(pickMic.value || '', pickCam.value || '');
+      },
       state: function () { return state; },
       // choice is what the call should publish.
       choice: function () {
+        if (state === 'remembered') return saved;
         return { mic: micOn && has('audio'), cam: camOn && has('video'), micId: currentId('audio'), camId: currentId('video') };
       },
+      // keep remembers a FINISHED check (devices granted), for the next
+      // time; a refused or unanswered one is asked again.
+      keep: function () { if (opts.remember && state === 'ready' && window.MeetingsPrefs) window.MeetingsPrefs.save(this.choice()); },
       // stop releases the camera and the microphone.
-      stop: function () { started = false; gen++; release(); setState('idle'); },
+      stop: function () { started = false; gen++; clearTimeout(pending); release(); setState('idle'); },
       refresh: sync
     };
   }
@@ -262,23 +290,52 @@
     }
   }
 
-  // ---- the shortcut sheet ----
-  var sheetWired = false;
-  function openShortcuts() {
-    var sh = $('shortcuts');
-    if (sh && sh.hidden) UI.openSheet(sh);
+  // usable keeps a remembered choice's devices only where they still
+  // exist (a camera unplugged since, or no permission to list them): the
+  // call then takes the browser's default instead of failing on a stale id.
+  function usable(media) {
+    if (!media || !navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return Promise.resolve(media);
+    return navigator.mediaDevices.enumerateDevices().then(function (ds) {
+      var ids = ds.map(function (d) { return d.deviceId; }).filter(Boolean);
+      return { mic: media.mic, cam: media.cam,
+        micId: ids.indexOf(media.micId) >= 0 ? media.micId : '', camId: ids.indexOf(media.camId) >= 0 ? media.camId : '' };
+    }, function () { return { mic: media.mic, cam: media.cam, micId: '', camId: '' }; });
   }
-  function wireShortcutSheet() {
-    if (sheetWired) return;
-    sheetWired = true;
-    var b = $('btn-shortcuts');
-    if (b) b.addEventListener('click', openShortcuts);
-    var sh = $('shortcuts');
-    if (sh && !UI.kit) {
-      Array.prototype.forEach.call(sh.querySelectorAll('[data-mu-close]'), function (c) {
-        c.addEventListener('click', function () { UI.closeSheet(sh); });
+
+  // ---- in-call settings: the camera and microphone pickers ----
+  var settings = null; // {room, onDevice}
+  var settingsWired = false;
+  function fillSettings() {
+    var cam = $('set-cam'), mic = $('set-mic');
+    if (!cam || !navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+    navigator.mediaDevices.enumerateDevices().then(function (ds) {
+      [[cam, 'videoinput', 'Camera'], [mic, 'audioinput', 'Microphone']].forEach(function (x) {
+        var sel = x[0], cur = settings && settings.room.getActiveDevice ? settings.room.getActiveDevice(x[1]) : '';
+        sel.textContent = '';
+        ds.filter(function (d) { return d.kind === x[1]; }).forEach(function (d, i) {
+          var o = document.createElement('option');
+          o.value = d.deviceId;
+          o.textContent = d.label || x[2] + ' ' + (i + 1);
+          if (d.deviceId === cur) o.selected = true;
+          sel.appendChild(o);
+        });
+        sel.disabled = sel.options.length < 2;
       });
-    }
+    }).catch(function () {});
+  }
+  function wireSettings() {
+    if (settingsWired || !$('btn-settings')) return;
+    settingsWired = true;
+    UI.popover($('btn-settings'), $('settings-pop'));
+    $('btn-settings').addEventListener('click', fillSettings);
+    [['set-cam', 'videoinput', 'camId'], ['set-mic', 'audioinput', 'micId']].forEach(function (x) {
+      $(x[0]).addEventListener('change', function () {
+        if (!settings) return;
+        var id = this.value, cb = settings.onDevice;
+        settings.room.switchActiveDevice(x[1], id).then(function () { if (cb) cb(x[2], id); },
+          function () { UI.toast('That device could not be used.', { kind: 'warning' }); });
+      });
+    });
   }
 
   // ---- the call ----
@@ -291,7 +348,7 @@
     var featuredSpeaker = '';
     var manual = null, shareSet = '';
     var say = opts.onStatus || function () {};
-    wireShortcutSheet();
+    wireSettings();
     if (!LK) {
       say('The call could not load. Reload the page.');
       return Promise.reject(new Error('livekit-client is missing'));
@@ -455,6 +512,7 @@
         Array.prototype.forEach.call(stage.querySelectorAll('.tile'), function (el) { el.classList.toggle('featured', m === 'presentation'); });
       });
       strip.hidden = m !== 'presentation' || strip.querySelectorAll('.tile:not(.leaving)').length === 0;
+      if (opts.onRoster) opts.onRoster(keys.filter(function (k) { return !tiles[k].local && tiles[k].source === 'camera'; }).length);
       layoutBtn.setAttribute('aria-pressed', String(m === 'presentation'));
       UI.setIcon(layoutBtn, m === 'presentation' ? 'fullscreen-exit' : 'fullscreen');
     }
@@ -569,15 +627,13 @@
     // No getDisplayMedia (a phone's browser): no Share button at all.
     shareBtn.hidden = !(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia);
 
-    // The shortcuts: M, V, S and ?, while the call is on screen, never while
-    // typing in a field or with a modifier held.
+    // The shortcuts: M, V and S (each control's tooltip names its key),
+    // while the call is on screen, never while typing in a field or with a
+    // modifier held.
     function onKey(e) {
       if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || view.hidden) return;
       var t = e.target;
       if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
-      var open = document.querySelector('.mu-sheet:not([hidden])');
-      if (e.key === '?') { e.preventDefault(); openShortcuts(); return; }
-      if (open) return;
       var k = (e.key || '').toLowerCase();
       var b = k === 'm' ? mic : k === 'v' ? cam : k === 's' && !shareBtn.hidden ? shareBtn : null;
       if (!b) return;
@@ -599,10 +655,12 @@
       shareBtn.removeEventListener('click', onShare);
       layoutBtn.removeEventListener('click', onLayout);
       document.removeEventListener('keydown', onKey);
+      settings = null;
     }
 
     function leave() {
       unbind();
+      settings = null;
       opts.onGone = null;
       clear();
       return room.disconnect();
@@ -612,6 +670,7 @@
     return room.connect(opts.url, opts.token, { rtcConfig: { iceTransportPolicy: opts.ice === 'all' ? 'all' : 'relay' } })
       .then(function () {
         say('');
+        settings = { room: room, onDevice: opts.onDevice };
         addParticipant(lp(), true);
         room.remoteParticipants.forEach(function (p) {
           addParticipant(p, false);
@@ -622,7 +681,10 @@
             media.mic ? lp().setMicrophoneEnabled(true) : null,
             media.cam ? lp().setCameraEnabled(true) : null
           ]).catch(function () {
+            // A remembered device gone or permission now refused: the call
+            // goes on with what works, and says so.
             say('Your camera or microphone is off: allow them in the browser to be seen and heard.');
+            UI.toast('Your camera or microphone could not start. You are in the call without it.', { kind: 'warning' });
           });
         }
       })
@@ -791,6 +853,8 @@
     });
   }
 
-  window.MeetingsCall = { prejoin: prejoin, join: join, readEvents: readEvents, showBadge: showBadge, replacedElsewhere: replacedElsewhere,
+  UI.decorate(document);
+
+  window.MeetingsCall = { prejoin: prejoin, join: join, usable: usable, PENDING_MS: PENDING_MS, readEvents: readEvents, showBadge: showBadge, replacedElsewhere: replacedElsewhere,
     Transcript: Transcript, transcriptPanel: transcriptPanel, Side: Side, lineEl: lineEl, clock: clock };
 })();

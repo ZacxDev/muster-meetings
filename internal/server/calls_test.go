@@ -1048,7 +1048,7 @@ func TestNoPageScriptInterpretsMarkup(t *testing.T) {
 				t.Errorf("%s uses %s", f, bad)
 			}
 		}
-		if !strings.Contains(string(b), "textContent") {
+		if b := filepath.Base(f); b != "prefs.js" && b != "ui.js" && !strings.Contains(string(mustRead(t, f)), "textContent") { // those two write no text
 			t.Errorf("%s never uses textContent: is this the right file?", f)
 		}
 	}

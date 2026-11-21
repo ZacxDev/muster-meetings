@@ -91,13 +91,26 @@
       <p id="call-status" class="call-status" role="status" aria-live="polite"></p>
       <div class="call-top__end">
         <button id="call-copy" type="button" class="mu-icon-btn" aria-label="Copy meeting link" data-icon="link"></button>
-        <button id="btn-shortcuts" type="button" class="mu-icon-btn wide-only" aria-label="Keyboard shortcuts" data-mu-tooltip="Keyboard shortcuts (?)" aria-keyshortcuts="?" data-icon="info"></button>
+        <button id="btn-settings" type="button" class="mu-icon-btn" aria-label="Camera and microphone" data-icon="settings"></button>
+        <div id="settings-pop" class="mu-card mu-card--raised pop" role="dialog" aria-label="Camera and microphone" hidden>
+          <label class="device"><span data-icon="camera"></span><span class="mu-visually-hidden">Camera</span><select id="set-cam" class="mu-select"></select></label>
+          <label class="device"><span data-icon="mic"></span><span class="mu-visually-hidden">Microphone</span><select id="set-mic" class="mu-select"></select></label>
+        </div>
       </div>
     </header>
     <div class="call-body">
       <div class="stage-wrap">
         <div id="stage" class="stage"></div>
         <div id="strip" class="strip" aria-label="Participants"></div>
+        <div id="invite" class="mu-card mu-card--raised invite" hidden>
+          <div class="invite__head"><span class="mu-card__title">Invite people</span>
+            <button id="invite-close" type="button" class="mu-icon-btn" aria-label="Close" data-icon="close"></button></div>
+          <div class="linkrow">
+            <input id="call-url" class="mu-input" type="text" readonly aria-label="Meeting link">
+            <button id="invite-copy" type="button" class="mu-icon-btn" aria-label="Copy link" data-icon="copy"></button>
+            <button id="invite-share" type="button" class="mu-icon-btn" aria-label="Share link" data-icon="share" hidden></button>
+          </div>
+        </div>
         <button id="btn-use-here" type="button" class="mu-btn mu-btn--primary overlay-action" data-icon="phone" hidden>Use here</button>
       </div>
       <aside id="side" class="side" hidden>
@@ -135,15 +148,6 @@
       <div class="mu-menu__sep" role="separator"></div>
       <button id="btn-end" type="button" class="mu-menu__item mu-menu__item--danger" role="menuitem" data-icon="close">End meeting for everyone</button>
     </div>
-    <div id="shortcuts" class="mu-sheet" role="dialog" aria-modal="true" aria-labelledby="shortcuts-title" hidden>
-      <div class="mu-sheet__header"><h2 id="shortcuts-title">Keyboard shortcuts</h2><button type="button" class="mu-icon-btn" aria-label="Close" data-mu-close data-icon="close"></button></div>
-      <div class="mu-sheet__body"><dl class="keys">
-        <dt><kbd>M</kbd></dt><dd>Mute or unmute</dd>
-        <dt><kbd>V</kbd></dt><dd>Camera on or off</dd>
-        <dt><kbd>S</kbd></dt><dd>Share your screen, or stop</dd>
-        <dt><kbd>?</kbd></dt><dd>These shortcuts</dd>
-      </dl></div>
-    </div>
   </section>
   <noscript><p>Meetings needs JavaScript.</p></noscript>
 </main>
@@ -151,6 +155,8 @@
 <script src="{{.Kit}}/kit.js"></script>
 {{- end}}
 <script src="/static/ui.js"></script>
+<script src="/static/vendor/muster-ui-kit-v1.js"></script>
+<script src="/static/prefs.js"></script>
 <script src="/static/vendor/livekit-client-2.25.0.umd.js"></script>
 <script src="/static/call.js"></script>
 <script src="/static/app.js"></script>

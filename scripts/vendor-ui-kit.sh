@@ -62,11 +62,13 @@ rm -rf "$out"
 mkdir -p "$out"
 (cd "$wt" && go run ./cmd/kitdump "$out")
 printf '%s\n' "$full" >"$out/COMMIT"
-# The plugin's built-in fallback (static/kit-fallback.css and its icons),
-# drawn when the live kit cannot be loaded: the same components in the
-# default theme, from the same render.
+# The plugin's built-in fallback, used when the live kit cannot be loaded:
+# kit.js byte for byte (it carries the icon sprite, and installs itself only
+# when the live one did not), and kit.css in the default theme, both from
+# this same render. scripts/e2e-harness TestTheFallbackIsTheVendoredKit
+# holds them to the pinned fixtures.
 static="$here/internal/server/web/static"
-cp "$out/brass/v1/icons.svg" "$static/kit-fallback-icons.svg"
+cp "$out/brass/v1/kit.js" "$static/vendor/muster-ui-kit-v1.js"
 {
 	printf '/* The built-in FALLBACK for muster'"'"'s UI kit, used only when the live kit\n   (<muster>/ui-kit/v1/kit.css) does not load (static/ui.js). Rendered from\n   muster %s, default theme, by scripts/vendor-ui-kit.sh: never edit by hand. */\n' "$full"
 	tail -n +2 "$out/brass/v1/kit.css"

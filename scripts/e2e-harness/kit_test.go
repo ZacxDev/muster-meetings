@@ -53,3 +53,22 @@ func TestTheVendoredKitIsPinned(t *testing.T) {
 		t.Fatalf("a changed fixture: loadKit = %v, want a SHA256SUMS refusal", err)
 	}
 }
+
+// The pages' built-in fallback is the vendored kit itself: the bundled
+// script is kit.js byte for byte, and the fallback stylesheet is kit.css in
+// the default theme under its own header, both from the pinned render.
+func TestTheFallbackIsTheVendoredKit(t *testing.T) {
+	fix := filepath.Join("..", "..", "e2e", "fixtures", "ui-kit", "brass", "v1")
+	static := filepath.Join("..", "..", "internal", "server", "web", "static")
+	js, _ := os.ReadFile(filepath.Join(fix, "kit.js"))
+	got, err := os.ReadFile(filepath.Join(static, "vendor", "muster-ui-kit-v1.js"))
+	if err != nil || len(js) == 0 || string(got) != string(js) {
+		t.Fatalf("static/vendor/muster-ui-kit-v1.js is not the pinned kit.js (%v): re-run scripts/vendor-ui-kit.sh", err)
+	}
+	css, _ := os.ReadFile(filepath.Join(fix, "kit.css"))
+	fb, err := os.ReadFile(filepath.Join(static, "kit-fallback.css"))
+	body := string(css)[strings.Index(string(css), "\n")+1:]
+	if err != nil || !strings.HasSuffix(string(fb), body) || !strings.Contains(string(fb), pinnedKit) {
+		t.Fatalf("static/kit-fallback.css is not the pinned kit.css under its header (%v): re-run scripts/vendor-ui-kit.sh", err)
+	}
+}

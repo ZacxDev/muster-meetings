@@ -3,20 +3,21 @@
 // install's theme reaches this plugin on its next load. This file is the one
 // place that knows whether they arrived.
 //
-// 🔴 The call must work without the kit. kit.css is render-blocking and runs
-// before this script, so a missing --mu-bg token here means it did not load
-// (a 404, muster down, a CSP refusal): the page then links the built-in
-// fallback (static/kit-fallback.css, the kit's components and its default
-// theme) and draws its icons from static/kit-fallback-icons.svg. kit.js can be
-// missing on its own: every behaviour the pages use goes through MeetingsUI,
-// which falls back to a small built-in version of it.
+// 🔴 The call must work without the kit. The fallback is muster's own kit,
+// bundled (scripts/vendor-ui-kit.sh, the same render the tests pin):
+// - kit.css is render-blocking and has run before this script, so a missing
+//   --mu-bg token here means it did not load (a 404, muster down, a CSP
+//   refusal); this links static/kit-fallback.css, its default theme.
+// - kit.js: the page loads static/vendor/muster-ui-kit-v1.js right after this
+//   script, always. It is kit.js byte for byte, and kit.js installs itself
+//   only when no MusterKit exists, so it is a no-op when the live one loaded.
+//   That is why everything here reads window.MusterKit when called, never at
+//   load.
 //
-// <html data-kit> says what happened: "live" (both from muster), "css"
-// (kit.css only), "js" (kit.js only), "fallback" (neither).
+// <html data-kit> is "live" (both from muster) or "fallback".
 (function () {
   'use strict';
   var doc = document.documentElement;
-  var K = window.MusterKit || null;
   var cssLive = getComputedStyle(doc).getPropertyValue('--mu-bg').trim() !== '';
   if (!cssLive) {
     var l = document.createElement('link');
@@ -25,38 +26,26 @@
     l.id = 'kit-fallback';
     document.head.insertBefore(l, document.head.firstChild);
   }
-  doc.setAttribute('data-kit', cssLive && K ? 'live' : cssLive ? 'css' : K ? 'js' : 'fallback');
-
-  var SVGNS = 'http://www.w3.org/2000/svg';
+  doc.setAttribute('data-kit', cssLive && window.MusterKit ? 'live' : 'fallback');
+  function K() { return window.MusterKit; }
 
   // icon is a decorative <svg class="mu-icon"> drawing the kit's icon name.
-  function icon(name) {
-    if (K) return K.icon(name);
-    var svg = document.createElementNS(SVGNS, 'svg');
-    svg.setAttribute('class', 'mu-icon');
-    svg.setAttribute('aria-hidden', 'true');
-    svg.setAttribute('focusable', 'false');
-    var use = document.createElementNS(SVGNS, 'use');
-    use.setAttribute('href', '/static/kit-fallback-icons.svg#mu-' + name);
-    svg.appendChild(use);
-    return svg;
-  }
+  function icon(name) { return K().icon(name); }
 
   // setIcon replaces el's first icon with name's (a toggle's pressed glyph).
   function setIcon(el, name) {
-    if (el.getAttribute('data-icon') === name) return;
+    if (el.getAttribute('data-icon') === name && el.querySelector('svg.mu-icon')) return;
     var old = el.querySelector('svg.mu-icon');
     var n = icon(name);
     if (old) el.replaceChild(n, old); else el.insertBefore(n, el.firstChild);
     el.setAttribute('data-icon', name);
   }
 
-  // label sets an icon button's accessible name (and so the kit's tooltip),
-  // or, with no kit.js, the browser's own tooltip.
+  // label sets an icon button's accessible name, which the kit draws as its
+  // tooltip (or tip, when given).
   function label(el, text, tip) {
     el.setAttribute('aria-label', text);
     if (tip) el.setAttribute('data-mu-tooltip', tip); else el.removeAttribute('data-mu-tooltip');
-    if (!K) el.title = tip || text;
   }
 
   // iconButton is a kit icon button: one icon, an aria-label, a tooltip.
@@ -71,80 +60,15 @@
     return b;
   }
 
-  // decorate gives every [data-icon] element in root its icon and, with no
-  // kit.js, every labelled icon button its title (the templates write the
-  // name; this draws the glyph, so a page with no script at all still has
-  // its text).
+  // decorate gives every [data-icon] element in root its icon (the
+  // templates write the name; this draws the glyph).
   function decorate(root) {
     Array.prototype.forEach.call((root || document).querySelectorAll('[data-icon]'), function (el) {
       if (!el.querySelector('svg.mu-icon')) el.insertBefore(icon(el.getAttribute('data-icon')), el.firstChild);
-      if (!K && el.classList.contains('mu-icon-btn') && !el.title) el.title = el.getAttribute('data-mu-tooltip') || el.getAttribute('aria-label') || '';
     });
   }
 
-  // ---- toasts: the kit's, or a plain one in the same classes ----
-  function toast(message, opts) {
-    if (K) return K.toast(message, opts);
-    opts = opts || {};
-    var r = document.querySelector('.mu-toast-region');
-    if (!r) {
-      r = document.createElement('div');
-      r.className = 'mu-toast-region';
-      r.setAttribute('role', 'status');
-      r.setAttribute('aria-live', 'polite');
-      document.body.appendChild(r);
-    }
-    var el = document.createElement('div');
-    el.className = 'mu-toast' + (opts.kind && opts.kind !== 'info' ? ' mu-toast--' + opts.kind : '');
-    var text = document.createElement('div');
-    text.className = 'toast-text';
-    text.textContent = String(message);
-    el.appendChild(text);
-    var timer = null;
-    function dismiss() { if (timer) clearTimeout(timer); el.remove(); }
-    if (opts.action && opts.action.label) {
-      var a = document.createElement('button');
-      a.type = 'button';
-      a.className = 'mu-btn mu-btn--ghost mu-btn--sm';
-      a.textContent = String(opts.action.label);
-      a.addEventListener('click', function () { opts.action.onClick(); dismiss(); });
-      el.appendChild(a);
-    }
-    var x = iconButton('close', 'Dismiss', 'mu-btn--sm', dismiss);
-    el.appendChild(x);
-    r.appendChild(el);
-    var t = opts.timeout != null ? opts.timeout : opts.kind === 'error' ? 0 : 5000;
-    if (t > 0) timer = setTimeout(dismiss, t);
-    return dismiss;
-  }
-
-  // ---- sheets (modal): the kit's, or hidden toggling with Escape ----
-  function openSheet(el, opts) {
-    if (K) { K.openSheet(el, opts); return; }
-    if (el._open) return;
-    var before = document.activeElement;
-    var back = document.createElement('div');
-    back.className = 'mu-backdrop';
-    el.parentNode.insertBefore(back, el);
-    el.hidden = false;
-    var f = el.querySelector('button, [href], input, select');
-    if (f) f.focus();
-    function onKey(e) { if (e.key === 'Escape') { e.preventDefault(); closeSheet(el); } }
-    back.addEventListener('click', function () { closeSheet(el); });
-    document.addEventListener('keydown', onKey);
-    el._open = { back: back, onKey: onKey, before: before, onClose: opts && opts.onClose };
-  }
-  function closeSheet(el) {
-    if (K) { K.closeSheet(el); return; }
-    var st = el._open;
-    if (!st) return;
-    el._open = null;
-    el.hidden = true;
-    st.back.remove();
-    document.removeEventListener('keydown', st.onKey);
-    if (st.before && st.before.focus) st.before.focus();
-    if (st.onClose) st.onClose();
-  }
+  function toast(message, opts) { return K().toast(message, opts); }
 
   // ---- popovers (non-modal): a menu or a details card by its trigger ----
   // The kit's menu opens below its trigger; a call's controls sit at the
@@ -263,9 +187,8 @@
   }
 
   window.MeetingsUI = {
-    kit: K, icon: icon, setIcon: setIcon, label: label, iconButton: iconButton, decorate: decorate, toast: toast,
-    openSheet: openSheet, closeSheet: closeSheet, popover: popover, closePop: closePop,
+    icon: icon, setIcon: setIcon, label: label, iconButton: iconButton, decorate: decorate, toast: toast,
+    popover: popover, closePop: closePop,
     dur: dur, flip: flip, remove: remove, initials: initials
   };
-  decorate(document);
 })();

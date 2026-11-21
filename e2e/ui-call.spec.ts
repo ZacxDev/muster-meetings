@@ -199,7 +199,7 @@ for (const size of sizes) {
       await expect(app.locator('#call-status')).toHaveText('');
     });
 
-    test('the keyboard shortcuts: M mutes, V turns the camera off, S shares, ? opens the sheet; never while typing', async ({ page }) => {
+    test('the keyboard shortcuts: M mutes, V turns the camera off, S shares (each tooltip names its key); never while typing', async ({ page }) => {
       const { app, f } = await setup(page);
       await app.locator('#stage').click({ position: { x: 5, y: 5 } });
       const press = (k: string) => page.keyboard.press(k);
@@ -214,11 +214,6 @@ for (const size of sizes) {
       await expect(app.locator('#btn-share')).toHaveAttribute('aria-pressed', 'true');
       await press('s');
       await expect(app.locator('#btn-share')).toHaveAttribute('aria-pressed', 'false');
-      await press('Shift+?');
-      await expect(app.locator('#shortcuts')).toBeVisible();
-      await expect(app.locator('#shortcuts')).toContainText('Mute or unmute');
-      await press('Escape');
-      await expect(app.locator('#shortcuts')).toBeHidden();
       // Typing in a field is typing.
       const calls = await f.evaluate(() => (window as any).__lk.calls.length);
       await app.locator('#consent-btn').click();
@@ -229,6 +224,9 @@ for (const size of sizes) {
       await expect(app.locator('#btn-mic')).toHaveAttribute('aria-keyshortcuts', 'M');
       await expect(app.locator('#btn-cam')).toHaveAttribute('aria-keyshortcuts', 'V');
       await expect(app.locator('#btn-share')).toHaveAttribute('aria-keyshortcuts', 'S');
+      for (const [id, tip] of [['#btn-mic', 'Mute (M)'], ['#btn-cam', 'Turn camera off (V)'], ['#btn-share', 'Share screen (S)']]) {
+        await expect(app.locator(id)).toHaveAttribute('data-mu-tooltip', tip);
+      }
     });
 
     test('every button has an accessible name, and every icon button a tooltip', async ({ page }) => {

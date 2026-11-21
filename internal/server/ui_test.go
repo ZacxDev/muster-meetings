@@ -109,3 +109,51 @@ func TestThePluginCSSWritesNoColour(t *testing.T) {
 		}
 	}
 }
+
+// 🔴 Only prefs.js touches the browser's storage, and it writes one key with
+// five device fields: the session token, a ticket, a name or a link never
+// reach storage (the owner's remembered device check, static/prefs.js).
+func TestOnlyPrefsTouchesStorage(t *testing.T) {
+	files, _ := filepath.Glob(filepath.Join("web", "static", "*.js"))
+	if len(files) < 5 {
+		t.Fatalf("found %d scripts: this scan would prove nothing", len(files))
+	}
+	sawPrefs := false
+	for _, f := range files {
+		b, _ := os.ReadFile(f)
+		s := string(b)
+		if filepath.Base(f) == "prefs.js" {
+			sawPrefs = true
+			if n := strings.Count(s, "setItem("); n != 1 {
+				t.Errorf("prefs.js calls setItem %d times, want once", n)
+			}
+			const stored = `JSON.stringify({ v: 1, mic: !!c.mic, cam: !!c.cam, micId: String(c.micId || ''), camId: String(c.camId || '') })`
+			if !strings.Contains(s, "setItem(KEY, "+stored+")") {
+				t.Errorf("prefs.js stores something other than the five device fields under KEY")
+			}
+			for _, bad := range []string{"sessionStorage", "indexedDB", "document.cookie", "token", "ticket"} {
+				if strings.Contains(s, bad) {
+					t.Errorf("prefs.js mentions %s", bad)
+				}
+			}
+			continue
+		}
+		for _, bad := range []string{"localStorage", "sessionStorage", "indexedDB", "document.cookie", "setItem("} {
+			if strings.Contains(s, bad) {
+				t.Errorf("%s uses %s: only prefs.js may touch storage", f, bad)
+			}
+		}
+	}
+	if !sawPrefs {
+		t.Fatal("no prefs.js: the scan saw the wrong directory")
+	}
+}
+
+func mustRead(t *testing.T, f string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}

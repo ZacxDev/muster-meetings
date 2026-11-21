@@ -160,6 +160,9 @@
     if (window.__lk.failConnect) return Promise.reject(new Error('could not establish signal connection'));
     return new Promise(function (resolve) { setTimeout(function () { self.state = 'connected'; resolve(); }, 10); });
   };
+  // switchActiveDevice is the in-call device picker's call.
+  Room.prototype.switchActiveDevice = function (kind, id) { window.__lk.calls.push('switch ' + kind + '=' + id); this._active = this._active || {}; this._active[kind] = id; return Promise.resolve(true); };
+  Room.prototype.getActiveDevice = function (kind) { return (this._active || {})[kind]; };
   Room.prototype.disconnect = function () {
     if (this.state === 'disconnected') return Promise.resolve();
     this.state = 'disconnected';
@@ -190,7 +193,8 @@
 
   // The spec's handle on the room's other people.
   window.__lk = {
-    rooms: [], calls: [], refuse: {}, failConnect: false,
+    // __lkPreset (set by a spec's init script) presets refuse before the page runs.
+    rooms: [], calls: [], refuse: (window.__lkPreset && window.__lkPreset.refuse) || {}, failConnect: false,
     room: room,
     // addRemote joins someone: {mic, cam} (default both on), {quality}.
     addRemote: function (id, name, o) {

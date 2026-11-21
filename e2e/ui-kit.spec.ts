@@ -66,9 +66,11 @@ for (const missing of ['css,js', 'css', 'js']) {
     await page.goto(`${h.parent}/apps/${h.pluginID}`);
     await expect(page.frameLocator('#app').locator('#new-meeting')).toBeVisible();
     let f = appFrame(page);
-    const want = missing === 'css,js' ? 'fallback' : missing === 'css' ? 'js' : 'css';
+    const want = 'fallback';
     expect(await f.evaluate(() => document.documentElement.getAttribute('data-kit'))).toBe(want);
     expect(seen.some((u) => u.endsWith('/static/kit-fallback.css')), 'the fallback stylesheet was linked').toBe(missing.includes('css'));
+    // kit.js either way: muster's, or the bundled copy when it did not load.
+    expect(await f.evaluate(() => (window as any).MusterKit?.version), 'kit.js (muster\'s or the bundled one) is installed').toBe('1.0.0');
     // The tokens are there either way (the fallback's, when kit.css is gone).
     await expect.poll(() => f.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--mu-bg').trim())).not.toBe('');
     // And the call works: in, with the controls drawn (a 44 px target with
@@ -93,8 +95,9 @@ for (const missing of ['css,js', 'css', 'js']) {
     await expect(app.locator('.tile[data-identity="guest-a"] [data-ind="mic"]')).toBeVisible();
     await mic.click();
     await expect(mic).toHaveAttribute('aria-pressed', 'true');
-    // With no kit.js the browser's own tooltip carries the label.
-    if (missing.includes('js')) await expect(mic).toHaveAttribute('title', /Mute/);
+    // The kit's behaviours are there either way: the tooltip.
+    await mic.hover();
+    await expect(app.locator('.mu-tooltip')).toHaveText('Mute (M)');
     // The guest page falls back the same way.
     const link = await app.locator('#join-url').inputValue();
     const g = await browser.newPage();

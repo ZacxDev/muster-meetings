@@ -9,7 +9,7 @@ set -euo pipefail
 here=$(realpath "$(dirname "$0")/..")
 image=mcr.microsoft.com/playwright:v1.64.1-noble
 gover=$(awk '/^go /{print $2; exit}' "$here/go.mod")
-update=--update-snapshots
+update=--update-snapshots=all
 [ "${1:-}" = --check ] && update=
 docker run --rm --ipc=host --user "$(id -u):$(id -g)" -v "$here:/src" -w /src -e HOME=/tmp -e GOFLAGS=-buildvcs=false "$image" bash -euc "
   curl -sSfL https://go.dev/dl/go${gover}.linux-amd64.tar.gz | tar -xz -C /tmp

@@ -1374,8 +1374,8 @@ func TestTheAppPageCarriesNoInlineScript(t *testing.T) {
 	}
 	for name, page := range map[string][]byte{"app": body, "guest": guest} {
 		scripts := regexp.MustCompile(`<script[^>]*>([^<]*)</script>`).FindAllSubmatch(page, -1)
-		if len(scripts) != 5 {
-			t.Errorf("%s page: %d scripts, want muster's kit.js, ui.js, the LiveKit client, call.js and its own", name, len(scripts))
+		if len(scripts) != 7 {
+			t.Errorf("%s page: %d scripts, want muster's kit.js, ui.js, the bundled kit (the fallback), prefs.js, the LiveKit client, call.js and its own", name, len(scripts))
 		}
 		// muster's UI kit, linked live from muster's exact origin (the only
 		// other origin the CSP lets a script or a style come from), first.

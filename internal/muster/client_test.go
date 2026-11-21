@@ -247,6 +247,57 @@ func TestOwnersCheckAnswersOnlyTheLiveSubsetItWasAsked(t *testing.T) {
 	}
 }
 
+// A 2xx owners/check answer with no "states" object is not an answer: the
+// design's old {"live": [...]} shape, an empty body, {} and {"states":
+// null} are each a KindProtocol error, never "every subject revoked", so the
+// poll and the boot keep everything and log it.
+func TestOwnersCheckWithoutAStatesObjectIsAProtocolError(t *testing.T) {
+	const sa = "Aa1Bb2Cc3Dd4Ee5Ff6Gg7h"
+	for name, body := range map[string]string{
+		"the old live list": `{"live":["` + sa + `"]}`,
+		"an empty body":     ``,
+		"{}":                `{}`,
+		"states null":       `{"states":null}`,
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			io.WriteString(w, body)
+		}))
+		states, err := client(t, srv.URL).OwnersCheck(context.Background(), []string{sa})
+		srv.Close()
+		if e := muster.AsError(err); e == nil || e.Kind != muster.KindProtocol {
+			t.Errorf("%s: OwnersCheck = %v, %v; want a protocol error", name, states, err)
+		}
+		if states[sa] != "" {
+			t.Errorf("%s: Ada was answered %q from no states object", name, states[sa])
+		}
+	}
+	// Positive control: an empty states object is an answer (Ada absent:
+	// revoked).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"states":{}}`)
+	}))
+	defer srv.Close()
+	if states, err := client(t, srv.URL).OwnersCheck(context.Background(), []string{sa}); err != nil || states[sa] != muster.StateRevoked {
+		t.Fatalf("positive control: {\"states\":{}} = %v, %v; want Ada revoked", states, err)
+	}
+}
+
+// A state other than live, expired or revoked, for a subject that was asked,
+// is revoked: fail closed.
+func TestOwnersCheckAnUnknownStateIsRevoked(t *testing.T) {
+	const sa = "Aa1Bb2Cc3Dd4Ee5Ff6Gg7h"
+	for _, st := range []string{"paused", "LIVE", "", "live "} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(map[string]any{"states": map[string]string{sa: st}})
+		}))
+		states, err := client(t, srv.URL).OwnersCheck(context.Background(), []string{sa})
+		srv.Close()
+		if err != nil || states[sa] != muster.StateRevoked {
+			t.Errorf("state %q = %q, %v; want revoked", st, states[sa], err)
+		}
+	}
+}
+
 // 🔴 notify, its withdrawal and tasks act for the person the subject names,
 // with exactly one Muster-Act-For header: Ada's knock reaches Ada and nobody
 // else, and a call with no subject is never sent.

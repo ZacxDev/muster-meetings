@@ -235,7 +235,7 @@ func TestCreatingAMeetingNeedsTheSessionStillLive(t *testing.T) {
 		t.Fatalf("a repository with no session made a meeting: %v", err)
 	}
 	r := owner(t, s, subA, t0)
-	if _, err := s.EndSubjects(ctx, []string{subA}, t0); err != nil {
+	if _, err := s.EndSubjects(ctx, []string{subA}, t0, t0); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := r.CreateMeeting(ctx, t0); err != store.ErrNoSession {
@@ -345,7 +345,7 @@ func TestOnlyTheOwnerReadsTheLink(t *testing.T) {
 func TestAnEndedMeetingHasNoLink(t *testing.T) {
 	s, _ := open(t)
 	c := mk(t, s, subA, t0)
-	if _, err := s.EndSubjects(ctx, []string{subA}, t0.Add(time.Minute)); err != nil {
+	if _, err := s.EndSubjects(ctx, []string{subA}, t0.Add(time.Minute), t0.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := s.ForSubject(subA).Link(ctx, c.Meeting.ID, t0.Add(time.Minute)); err != store.ErrNoLink || got != "" {
@@ -393,7 +393,7 @@ func TestEndSubjectsEndsOnlyThoseSubjects(t *testing.T) {
 	tB, _, _ := s.CreateSession(ctx, subB, "fixture name", t0)
 	ma := mk(t, s, subA, t0)
 	mb := mk(t, s, subB, t0)
-	res, err := s.EndSubjects(ctx, []string{subA}, t0.Add(time.Minute))
+	res, err := s.EndSubjects(ctx, []string{subA}, t0.Add(time.Minute), t0.Add(time.Minute))
 	// subA holds two sessions (tA and mk's own) and one meeting.
 	if err != nil || res.Sessions != 2 || res.Meetings != 1 {
 		t.Fatalf("EndSubjects = %+v, %v; want 2 sessions, 1 meeting", res, err)
@@ -409,6 +409,49 @@ func TestEndSubjectsEndsOnlyThoseSubjects(t *testing.T) {
 	}
 	if m, _ := s.ForSubject(subB).Meeting(ctx, mb.Meeting.ID); m.State != "open" {
 		t.Fatalf("B's meeting after A's end = %+v", m)
+	}
+}
+
+// The cutoff is when the check was sent: what the person made after it (a
+// fresh tab, a meeting) is newer than muster's answer and is kept, by both
+// the revoked and the expired path; what existed at the send, to the
+// millisecond, is ended.
+func TestTheEndKeepsWhatWasMadeAfterTheCheckWasSent(t *testing.T) {
+	s, _ := open(t)
+	sent := t0.Add(time.Second)
+	oldS, _, _ := s.CreateSession(ctx, subA, "fixture name", sent) // exactly at the send: ended
+	old := mk(t, s, subA, t0)
+	newS, _, _ := s.CreateSession(ctx, subA, "fixture name", sent.Add(time.Millisecond))
+	fresh := mk(t, s, subA, sent.Add(time.Millisecond))
+	res, err := s.EndSubjects(ctx, []string{subA}, sent, sent.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Meetings != 1 {
+		t.Errorf("EndSubjects ended %d meetings, want the 1 from before the send", res.Meetings)
+	}
+	if _, err := s.LookupSession(ctx, oldS, sent); err != store.ErrNotFound {
+		t.Errorf("revoked: a session made at the send survived")
+	}
+	if _, err := s.LookupSession(ctx, newS, sent); err != nil {
+		t.Errorf("revoked: a session made after the send was deleted: %v", err)
+	}
+	if m, _ := s.ForSubject(subA).Meeting(ctx, old.Meeting.ID); m.State != "ended" {
+		t.Errorf("revoked: a meeting made before the send = %q", m.State)
+	}
+	if m, _ := s.ForSubject(subA).Meeting(ctx, fresh.Meeting.ID); m.State != "open" {
+		t.Errorf("revoked: a meeting made after the send = %q, want open", m.State)
+	}
+	oldB, _, _ := s.CreateSession(ctx, subB, "fixture name", sent)
+	newB, _, _ := s.CreateSession(ctx, subB, "fixture name", sent.Add(time.Millisecond))
+	if n, err := s.EndSessions(ctx, []string{subB}, sent, sent.Add(time.Second)); err != nil || n != 1 {
+		t.Fatalf("EndSessions = %d, %v; want 1", n, err)
+	}
+	if _, err := s.LookupSession(ctx, oldB, sent); err != store.ErrNotFound {
+		t.Errorf("expired: a session made at the send survived")
+	}
+	if _, err := s.LookupSession(ctx, newB, sent); err != nil {
+		t.Errorf("expired: a session made after the send was deleted: %v", err)
 	}
 }
 
@@ -453,7 +496,7 @@ func TestHeldSubjectsAreLiveSessionsAndOpenMeetings(t *testing.T) {
 	s.CreateSession(ctx, subA, "fixture name", t0.Add(2*time.Hour)) // a live session only
 	mk(t, s, subC, t0)
 	md := mk(t, s, subD, t0)
-	if _, err := s.EndSubjects(ctx, []string{subD}, t0); err != nil {
+	if _, err := s.EndSubjects(ctx, []string{subD}, t0, t0); err != nil {
 		t.Fatal(err)
 	}
 	at := t0.Add(8*time.Hour + time.Minute) // C's and D's sessions expired, A's not

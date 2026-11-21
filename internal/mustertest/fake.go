@@ -156,6 +156,17 @@ type Fake struct {
 	Failing bool
 	// FailOwnersCheck makes owners/check alone answer 503.
 	FailOwnersCheck bool
+	// FailOwnersCheckCall makes the nth owners/check call (1-based, counted
+	// from New) answer 503, and only it: one failed batch among several.
+	FailOwnersCheckCall int
+	// OwnersCheckBody, when set, is owners/check's 200 answer, verbatim: a
+	// muster answering a shape the plugin must not act on.
+	OwnersCheckBody string
+	// OnOwnersCheck, when set, runs after owners/check's answer is decided
+	// and before it is written, with the fake unlocked: the window in which
+	// a person can reopen the tab while the answer is on its way.
+	OnOwnersCheck func()
+	ownersChecks  int
 
 	apps     map[string]*app // token → app; a rotated-away token stays, revoked
 	byID     map[int64]*app
@@ -415,6 +426,15 @@ func (f *Fake) SetFailing(on bool) {
 	f.Failing = on
 }
 
+// SetOwnersCheck sets how owners/check answers: failCall fails the nth call
+// (0: none), body is a verbatim 200 answer ("": the real one), and hook runs
+// before the answer is written (nil: none).
+func (f *Fake) SetOwnersCheck(failCall int, body string, hook func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.FailOwnersCheckCall, f.OwnersCheckBody, f.OnOwnersCheck = failCall, body, hook
+}
+
 // SetFailOwnersCheck makes owners/check alone answer 503 (on) or serve.
 func (f *Fake) SetFailOwnersCheck(on bool) {
 	f.mu.Lock()
@@ -549,7 +569,8 @@ func (f *Fake) redeem(w http.ResponseWriter, r *http.Request, c caller) {
 		return
 	}
 	a := c.app
-	if !ok || k.spent || k.pluginID != a.PluginID || now.Sub(k.mintedAt) > CodeLife {
+	// expires_at > now(): a code is refused at exactly CodeLife.
+	if !ok || k.spent || k.pluginID != a.PluginID || !k.mintedAt.Add(CodeLife).After(now) {
 		write(w, 404, missing)
 		return
 	}
@@ -603,9 +624,16 @@ func (f *Fake) ownersCheck(w http.ResponseWriter, r *http.Request, c caller) {
 		}
 	}
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.FailOwnersCheck {
+	f.ownersChecks++
+	if f.FailOwnersCheck || f.ownersChecks == f.FailOwnersCheckCall {
+		f.mu.Unlock()
 		write(w, 503, `{"error":"unavailable"}`)
+		return
+	}
+	if f.OwnersCheckBody != "" {
+		body := f.OwnersCheckBody
+		f.mu.Unlock()
+		write(w, 200, body)
 		return
 	}
 	now := f.Now()
@@ -617,6 +645,11 @@ func (f *Fake) ownersCheck(w http.ResponseWriter, r *http.Request, c caller) {
 				states[s] = f.grantState(c.app, uid, g, now)
 			}
 		}
+	}
+	hook := f.OnOwnersCheck
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
 	}
 	writeJSON(w, 200, map[string]any{"states": states})
 }

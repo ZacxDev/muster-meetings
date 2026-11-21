@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -214,5 +215,40 @@ func TestARotatedTokenEndsEverythingAndTheNewOneKeepsTheSubjects(t *testing.T) {
 	states, err := c2.OwnersCheck(ctx, []string{sa})
 	if err != nil || states[sa] != muster.StateLive {
 		t.Fatalf("the new token's owners/check = %v, %v: the subject was lost", states, err)
+	}
+}
+
+// One failed owners/check batch does not throw away the batches muster
+// answered: those are applied, and the failed one is logged and kept.
+func TestAFailedOwnersCheckBatchKeepsItsPeopleAndTheOtherBatchesApply(t *testing.T) {
+	f, st, c, buf := setup(t)
+	a, err := owners.Boot(ctx, c, st, log.New(buf, "", 0), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 300 subjects muster never gave this app: an answered batch says each
+	// is revoked. Held subjects go in sorted order, so the first batch is
+	// subjects 0..199 and the second 200..299.
+	toks := make([]string, 300)
+	for i := range toks {
+		toks[i], _, _ = st.CreateSession(ctx, fmt.Sprintf("S%021d", i), "fixture name", t0)
+	}
+	f.SetOwnersCheck(2, "", nil) // the poll's second batch fails
+	a.PollOnce(ctx)
+	ended := 0
+	for i, tok := range toks {
+		_, err := st.LookupSession(ctx, tok, t0)
+		if err == store.ErrNotFound {
+			ended++
+		}
+		if (i < 200) != (err == store.ErrNotFound) {
+			t.Fatalf("subject %d: session lookup = %v; want the first batch ended and the second kept", i, err)
+		}
+	}
+	if ended != 200 {
+		t.Fatalf("%d sessions ended, want the 200 of the answered batch", ended)
+	}
+	if !strings.Contains(buf.String(), "batch 2 of 2 (100 subjects)") {
+		t.Fatalf("the failed batch is not logged:\n%s", buf)
 	}
 }

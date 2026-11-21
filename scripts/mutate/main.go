@@ -33,17 +33,16 @@ import (
 	"syscall"
 )
 
-// live is the file a mutant is applied to right now, and its original bytes:
-// what a signal must put back.
+// live is the files a mutant is applied to right now, and their original
+// bytes: what a signal must put back.
 var live struct {
 	sync.Mutex
-	file string
-	orig []byte
+	orig map[string][]byte
 }
 
-func setLive(file string, orig []byte) {
+func setLive(orig map[string][]byte) {
 	live.Lock()
-	live.file, live.orig = file, orig
+	live.orig = orig
 	live.Unlock()
 }
 
@@ -54,12 +53,12 @@ func restoreOnSignal() {
 	go func() {
 		sig := <-ch
 		live.Lock() // held to exit: no mutant is applied after this
-		if live.file != "" {
-			if err := os.WriteFile(live.file, live.orig, 0o644); err != nil {
-				fmt.Fprintf(os.Stderr, "mutate: %v: COULD NOT RESTORE %s: %v\n", sig, live.file, err)
+		for f, b := range live.orig {
+			if err := os.WriteFile(f, b, 0o644); err != nil {
+				fmt.Fprintf(os.Stderr, "mutate: %v: COULD NOT RESTORE %s: %v\n", sig, f, err)
 				os.Exit(2)
 			}
-			fmt.Fprintf(os.Stderr, "mutate: %v: restored %s\n", sig, live.file)
+			fmt.Fprintf(os.Stderr, "mutate: %v: restored %s\n", sig, f)
 		}
 		os.Exit(130)
 	}()
@@ -75,7 +74,15 @@ type mutant struct {
 	want string // a substring of the killing failure's message
 	// survive marks the no-op control: it must NOT be killed.
 	survive bool
+	// more are further replacements applied with this one, for a mutant
+	// that needs a few lines in several files (in order; each from must
+	// occur exactly once when it is applied).
+	more []edit
 }
+
+type edit struct{ file, from, to string }
+
+func (m mutant) edits() []edit { return append([]edit{{m.file, m.from, m.to}}, m.more...) }
 
 const (
 	srv    = "internal/server/server.go"
@@ -177,26 +184,45 @@ var mutants = []mutant{
 		pkg: "./internal/server", test: "TestAPersonMusterNoLongerAnswersLiveLosesTheirSessionsAndMeetingsAndNoOneElse", want: `hidden: Ada's meeting after the poll = "open"`},
 	{name: "owners/check: expired treated as revoked", file: own, from: "expired = append(expired, s)", to: "revoked = append(revoked, s)",
 		pkg: "./internal/server", test: "TestAnExpiredGrantEndsOnlyTheOwnersSessionsAndKeepsTheirMeetingsOpen", want: `expired: Ada's meeting after the poll = "ended"`},
-	{name: "owners/check: expired ends no session", file: st, from: "`DELETE FROM owner_sessions WHERE subject IN (SELECT j.value FROM json_each(?) AS j)`",
-		to:  "`DELETE FROM owner_sessions WHERE subject IN (SELECT j.value FROM json_each(?) AS j) AND 0`",
+	{name: "owners/check: expired ends no session", file: st, from: "AS j) AND created_at <= ?`",
+		to:  "AS j) AND 0 AND created_at <= ?`",
 		pkg: "./internal/server", test: "TestAnExpiredGrantEndsOnlyTheOwnersSessionsAndKeepsTheirMeetingsOpen", want: "expired: Ada's session after the poll = 200"},
 	{name: "owners/check: an absent or unknown state is live", file: client, from: "default:\n\t\t\t\tst = StateRevoked", to: "default:\n\t\t\t\tst = StateLive",
 		pkg: "./internal/server", test: "TestASubjectOwnersCheckDoesNotAnswerIsTreatedAsRevoked", want: `absent: the meeting after the poll = "open"`},
-	{name: "owners/check: the poll never asks", file: own, from: "if err := a.checkOwners(ctx); err != nil && !errors.Is(err, ErrRevoked) {",
-		to:  "if err := error(nil); err != nil && !errors.Is(err, ErrRevoked) {",
+	{name: "owners/check: the poll never asks", file: own, from: "_ = a.checkOwners(ctx) // it logs its own failures",
+		to:  "_ = 0 // it logs its own failures",
 		pkg: "./internal/server", test: "TestAPersonMusterNoLongerAnswersLiveLosesTheirSessionsAndMeetingsAndNoOneElse", want: "hidden: Ada's session after the poll = 200"},
-	{name: "owners/check: a failed check ends everyone held", file: own, from: "\tif err != nil {\n\t\treturn err\n\t}\n\tvar revoked, expired []string", to: "\tvar revoked, expired []string",
+	{name: "owners/check: a failed check ends everyone held", file: own, from: "if !answered {", to: "if !answered && false {",
 		pkg: "./internal/server", test: "TestALivenessPollThatFailsEndsNoOne", want: "owners/check 503: Ada's session = 401"},
 	{name: "owners/check: one person's end deletes everyone's sessions", file: st,
-		from: "`DELETE FROM owner_sessions WHERE subject IN (SELECT value FROM json_each(?))`", to: "`DELETE FROM owner_sessions WHERE ? IS NOT NULL`",
+		from: "WHERE subject IN (SELECT value FROM json_each(?)) AND created_at <= ?`, list", to: "WHERE ? IS NOT NULL AND created_at <= ?`, list",
 		pkg: "./internal/server", test: "TestAPersonMusterNoLongerAnswersLiveLosesTheirSessionsAndMeetingsAndNoOneElse", want: "Bea's session after Ada's end = 401"},
 	{name: "owners/check: one person's end ends everyone's meetings", file: st,
-		from: "WHERE state = 'open' AND subject IN (SELECT value FROM json_each(?)) RETURNING", to: "WHERE state = 'open' AND ? IS NOT NULL RETURNING",
+		from: "AND subject IN (SELECT value FROM json_each(?)) AND created_at <= ? RETURNING", to: "AND ? IS NOT NULL AND created_at <= ? RETURNING",
 		pkg: "./internal/server", test: "TestAPersonMusterNoLongerAnswersLiveLosesTheirSessionsAndMeetingsAndNoOneElse", want: `Bea's meeting after Ada's end = "ended"`},
 	{name: "owners/check: batches of 201", file: client, from: "const MaxCheckSubjects = 200", to: "const MaxCheckSubjects = 201",
 		pkg: "./internal/muster", test: "TestOwnersCheckAnswersOnlyTheLiveSubsetItWasAsked", want: "450 subjects:"},
-	{name: "owners/check: trust a subject that was not asked", file: client, from: "\t\t\tstates[s] = st\n\t\t}\n", to: "\t\t\tstates[s] = st\n\t\t}\n\t\tfor s, st := range out.States {\n\t\t\tstates[s] = st\n\t\t}\n",
+	{name: "owners/check: trust a subject that was not asked", file: client, from: "\t\t\tstates[s] = st\n\t\t}\n", to: "\t\t\tstates[s] = st\n\t\t}\n\t\tfor s, st := range *out.States {\n\t\t\tstates[s] = st\n\t\t}\n",
 		pkg: "./internal/muster", test: "TestOwnersCheckAnswersOnlyTheLiveSubsetItWasAsked", want: "an answer naming a subject that was not asked"},
+
+	{name: "owners/check: no states object reads as everyone revoked (client)", file: client, from: "if err == nil && out.States == nil {",
+		to:  "if err == nil && out.States == nil {\n\t\t\tout.States = &map[string]string{}\n\t\t}\n\t\tif false {",
+		pkg: "./internal/muster", test: "TestOwnersCheckWithoutAStatesObjectIsAProtocolError", want: "want a protocol error"},
+	{name: "owners/check: no states object reads as everyone revoked (poll)", file: client, from: "if err == nil && out.States == nil {",
+		to:  "if err == nil && out.States == nil {\n\t\t\tout.States = &map[string]string{}\n\t\t}\n\t\tif false {",
+		pkg: "./internal/server", test: "TestALivenessPollThatFailsEndsNoOne", want: "owners/check {}: Ada's session = 401"},
+	{name: "owners/check: one failed batch discards the answered ones", file: client, from: "\t\t\tcontinue\n\t\t}\n\t\tfor _, s := range batch {",
+		to:  "\t\t\treturn nil, e\n\t\t}\n\t\tfor _, s := range batch {",
+		pkg: "./internal/owners", test: "TestAFailedOwnersCheckBatchKeepsItsPeopleAndTheOtherBatchesApply", want: "want the first batch ended and the second kept"},
+	{name: "race: a revoked end deletes sessions made after the send", file: st, from: "json_each(?)) AND created_at <= ?`, list, ms(asOf))", to: "json_each(?)) AND ? IS NOT NULL`, list, ms(asOf))",
+		pkg: "./internal/server", test: "TestAPersonWhoReopensTheTabWhileTheCheckIsOnItsWayKeepsTheFreshSession", want: "revoked: the session made after the check was sent = 401"},
+	{name: "race: an expired end deletes sessions made after the send", file: st, from: "AS j) AND created_at <= ?`", to: "AS j) AND ? IS NOT NULL`",
+		pkg: "./internal/server", test: "TestAPersonWhoReopensTheTabWhileTheCheckIsOnItsWayKeepsTheFreshSession", want: "expired: the session made after the check was sent = 401"},
+	{name: "race: a revoked end ends meetings made after the send", file: st, from: "json_each(?)) AND created_at <= ? RETURNING", to: "json_each(?)) AND ? IS NOT NULL RETURNING",
+		pkg: "./internal/store", test: "TestTheEndKeepsWhatWasMadeAfterTheCheckWasSent", want: "revoked: a meeting made after the send"},
+	{name: "race: the cutoff taken when the answer arrives", file: own, from: "sent := a.now()\n\tstates, checkErr := a.Client.OwnersCheck(ctx, held)",
+		to:  "states, checkErr := a.Client.OwnersCheck(ctx, held)\n\tsent := a.now()",
+		pkg: "./internal/server", test: "TestAPersonWhoReopensTheTabWhileTheCheckIsOnItsWayKeepsTheFreshSession", want: "the session made after the check was sent = 401"},
 
 	// ---- boot ----
 	{name: "boot: skip the reconcile", file: own, from: "if err := a.checkOwners(ctx); err != nil {\n\t\tif errors.Is", to: "if err := error(nil); err != nil {\n\t\tif errors.Is",
@@ -231,6 +257,19 @@ var mutants = []mutant{
 	// ---- nothing of muster's about a person but the subject and name ----
 	{name: "storage: the display name read from the email", file: client, from: "DisplayName string `json:\"display_name\"`", to: "DisplayName string `json:\"email\"`",
 		pkg: "./internal/server", test: "TestNoMusterUserIDOrEmailIsEverStored", want: "the database holds Cy W.'s email"},
+
+	// The auditor's mutant: the redeem's owner id written to audit.at as an
+	// INTEGER, which the byte scan cannot see.
+	{name: "storage: an owner id written to audit.at as an INTEGER", file: client,
+		from: "Subject     string `json:\"subject\"`", to: "Subject     string `json:\"subject\"`\n\tID          int64  `json:\"id\"`",
+		more: []edit{
+			{srv, "s.store.CreateSession(r.Context(), subject, red.Owner.DisplayName, now)", "s.store.CreateSession(r.Context(), subject, red.Owner.DisplayName, now, red.Owner.ID)"},
+			{st, "func (s *Store) CreateSession(ctx context.Context, subject, displayName string, now time.Time) (string, time.Time, error) {",
+				"func (s *Store) CreateSession(ctx context.Context, subject, displayName string, now time.Time, ownerID ...int64) (string, time.Time, error) {"},
+			{st, "\tif err := audit(ctx, tx, now, subject, \"\", \"session.created\", \"\"); err != nil {",
+				"\tat := now\n\tif len(ownerID) > 0 && ownerID[0] != 0 {\n\t\tat = time.UnixMilli(ownerID[0])\n\t}\n\tif err := audit(ctx, tx, at, subject, \"\", \"session.created\", \"\"); err != nil {"},
+		},
+		pkg: "./internal/server", test: "TestNoMusterUserIDOrEmailIsEverStored", want: "the database holds a muster user id as an integer: audit.at = 3141592653"},
 
 	// ---- the link ----
 	{name: "link: code stored in clear (not hashed)", file: repo, from: `Hash(code), ms(now)`, to: `code, ms(now)`,
@@ -309,11 +348,13 @@ func main() {
 	restoreOnSignal()
 	sums := map[string][32]byte{}
 	for _, m := range mutants {
-		b, err := os.ReadFile(m.file)
-		if err != nil {
-			fatalf("%s: %v", m.file, err)
+		for _, e := range m.edits() {
+			b, err := os.ReadFile(e.file)
+			if err != nil {
+				fatalf("%s: %v", e.file, err)
+			}
+			sums[e.file] = sha256.Sum256(b)
 		}
-		sums[m.file] = sha256.Sum256(b)
 	}
 	failed := 0
 	fmt.Printf("%-58s %-9s %s\n", "mutant", "result", "killing test: message")
@@ -343,26 +384,37 @@ func main() {
 
 // run applies one mutant, runs its killing test, and restores the file.
 func run(m mutant) (string, string) {
-	orig, err := os.ReadFile(m.file)
-	if err != nil {
-		return "ERROR", err.Error()
+	orig := map[string][]byte{}
+	cur := map[string][]byte{}
+	for _, e := range m.edits() {
+		if _, ok := orig[e.file]; !ok {
+			b, err := os.ReadFile(e.file)
+			if err != nil {
+				return "ERROR", err.Error()
+			}
+			orig[e.file], cur[e.file] = b, b
+		}
+		if n := bytes.Count(cur[e.file], []byte(e.from)); n != 1 {
+			return "ERROR", fmt.Sprintf("the text to replace occurs %d times in %s, want exactly 1", n, e.file)
+		}
+		cur[e.file] = bytes.Replace(cur[e.file], []byte(e.from), []byte(e.to), 1)
 	}
-	if n := bytes.Count(orig, []byte(m.from)); n != 1 {
-		return "ERROR", fmt.Sprintf("the text to replace occurs %d times in %s, want exactly 1", n, m.file)
-	}
-	mut := bytes.Replace(orig, []byte(m.from), []byte(m.to), 1)
-	setLive(m.file, orig)
-	if err := os.WriteFile(m.file, mut, 0o644); err != nil {
-		return "ERROR", err.Error()
-	}
+	setLive(orig)
 	defer func() {
 		live.Lock()
 		defer live.Unlock()
-		if err := os.WriteFile(m.file, orig, 0o644); err != nil {
-			fatalf("restoring %s: %v", m.file, err)
+		for f, b := range orig {
+			if err := os.WriteFile(f, b, 0o644); err != nil {
+				fatalf("restoring %s: %v", f, err)
+			}
 		}
-		live.file, live.orig = "", nil
+		live.orig = nil
 	}()
+	for f, b := range cur {
+		if err := os.WriteFile(f, b, 0o644); err != nil {
+			return "ERROR", err.Error()
+		}
+	}
 	cmd := exec.Command("go", "test", "-count=1", "-run", "^"+m.test+"$", m.pkg)
 	out, err := cmd.CombinedOutput()
 	s := string(out)

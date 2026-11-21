@@ -114,6 +114,22 @@ func TestTheRedeemAnswerNamesASubjectAndNoUserIDOrEmail(t *testing.T) {
 	}
 }
 
+// A code lives 60 s: expires_at > now(), so it is refused at exactly 60 s
+// and spent one millisecond before.
+func TestACodeIsRefusedAtExactlySixtySeconds(t *testing.T) {
+	x := newFx(t)
+	late := x.f.MintApp(app.PluginID, ada.ID, "")
+	ok := x.f.MintApp(app.PluginID, bea.ID, "")
+	x.now = x.now.Add(time.Minute - time.Millisecond)
+	if st, _ := x.call("POST", "/plugin/v1/handoffs/redeem", app.Token, map[string]string{"code": ok}); st != 200 {
+		t.Fatalf("at 60 s - 1 ms = %d, want 200", st)
+	}
+	x.now = x.now.Add(time.Millisecond)
+	if st, _ := x.call("POST", "/plugin/v1/handoffs/redeem", app.Token, map[string]string{"code": late}); st != 404 {
+		t.Fatalf("at exactly 60 s = %d, want 404", st)
+	}
+}
+
 // One predicate, two consumers: each gate closed alone is 404 on act-for,
 // and owners/check names it: "expired" when act_until alone has passed,
 // "revoked" for every other gate. The open case is 202 and "live".

@@ -66,8 +66,12 @@ tab. muster never calls the plugin; the plugin calls muster.
    they reopen the tab. **Revoked** (they hid the app on Account → Apps, were
    disabled, or signed out everywhere) ends their sessions and their open
    meetings. A subject muster does not answer at all, or answers with any
-   other state, is treated as revoked. Nobody else is touched, and only an
-   answer ends anything: a muster that is down or failing ends nothing. The plugin does both before it serves anyone when
+   other state, is treated as revoked. Nobody else is touched, and only what
+   existed when the check was sent is ended: a tab the person reopened while
+   the answer was on its way keeps its fresh session. Only an answer ends
+   anything: a muster that is down or failing ends nothing, a reply with no
+   `states` object is not an answer, and when one batch of 200 subjects
+   fails, its people are kept while the answered batches apply. The plugin does both before it serves anyone when
    it starts, so what it slept through is applied first.
 
 ## Set it up

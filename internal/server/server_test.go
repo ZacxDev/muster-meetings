@@ -3,7 +3,9 @@ package server_test
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -12,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -735,6 +738,48 @@ func TestASubjectOwnersCheckDoesNotAnswerIsTreatedAsRevoked(t *testing.T) {
 	}
 }
 
+// 🔴 The reopen race, deterministically: owners/check decides Ada's state
+// and, before its answer reaches the plugin, Ada reopens the tab (a fresh
+// redeem, a fresh session). The answer is about what existed when the check
+// was sent, so it ends her old session (and, for revoked, the meeting she
+// had then) and keeps the fresh session.
+func TestAPersonWhoReopensTheTabWhileTheCheckIsOnItsWayKeepsTheFreshSession(t *testing.T) {
+	for name, end := range map[string]func(e *env){
+		"revoked": func(e *env) { e.fake.Hide(app.PluginID, ada.ID) },
+		"expired": func(e *env) { e.fake.Expire(app.PluginID, ada.ID) },
+	} {
+		e := newEnv(t)
+		old := e.enter(ada)
+		m := e.create(old)
+		end(e)
+		var fresh []byte
+		var freshStatus int
+		e.fake.SetOwnersCheck(0, "", func() {
+			e.clock.Add(time.Second)
+			e.fake.Show(app.PluginID, ada.ID)
+			e.fake.SignIn(ada.ID)
+			resp, body := e.framed(enterPath(e.fake.MintApp(app.PluginID, ada.ID, ""), app.PluginID))
+			freshStatus, fresh = resp.StatusCode, body
+		})
+		e.app.PollOnce(context.Background())
+		e.fake.SetOwnersCheck(0, "", nil)
+		mm := sessionAttr.FindSubmatch(fresh)
+		if freshStatus != 200 || mm == nil {
+			t.Fatalf("%s: the reopened tab = %d %s", name, freshStatus, fresh)
+		}
+		if resp, _ := e.do("GET", "/api/meetings", string(mm[1]), nil); resp.StatusCode != 200 {
+			t.Errorf("%s: the session made after the check was sent = %d, want 200", name, resp.StatusCode)
+		}
+		if resp, _ := e.do("GET", "/api/meetings", old, nil); resp.StatusCode != 401 {
+			t.Errorf("%s: the session from before the check = %d, want 401", name, resp.StatusCode)
+		}
+		want := map[string]string{"revoked": "ended", "expired": "open"}[name]
+		if st := e.meetingState(e.subject(ada), m.ID); st != want {
+			t.Errorf("%s: the meeting from before the check = %q, want %q", name, st, want)
+		}
+	}
+}
+
 // Only muster's answer ends a person or the app: an owners/check that fails,
 // a /self that fails, and plugins off on that muster each keep everything.
 func TestALivenessPollThatFailsEndsNoOne(t *testing.T) {
@@ -742,6 +787,10 @@ func TestALivenessPollThatFailsEndsNoOne(t *testing.T) {
 		"owners/check 503": func(e *env) { e.fake.SetFailOwnersCheck(true) },
 		"/self 503":        func(e *env) { e.fake.SetFailing(true) },
 		"no muster":        func(e *env) { e.fake.Close() },
+		// A 2xx with no states object is not an answer.
+		"owners/check the old live list": func(e *env) { e.fake.SetOwnersCheck(0, `{"live":[]}`, nil) },
+		"owners/check {}":                func(e *env) { e.fake.SetOwnersCheck(0, `{}`, nil) },
+		"owners/check states null":       func(e *env) { e.fake.SetOwnersCheck(0, `{"states":null}`, nil) },
 	} {
 		e := newEnv(t)
 		sa := e.enter(ada)
@@ -843,6 +892,78 @@ func TestNoMusterUserIDOrEmailIsEverStored(t *testing.T) {
 			t.Errorf("positive control: %q is not in the database files, so the scan cannot see rows", want)
 		}
 	}
+
+	// A user id stored as an INTEGER is a varint, invisible to the byte
+	// scan: every INTEGER column of every table is also queried for the ids.
+	ids := []int64{ada.ID, bea.ID, cy.ID}
+	db, err := sql.Open("sqlite", "file:"+e.dbPath+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	hits, cols := integerHits(t, db, ids)
+	for _, h := range hits {
+		t.Errorf("the database holds a muster user id as an integer: %s", h)
+	}
+	// The enumeration is not stale: it reaches every table's INTEGER columns.
+	for _, want := range []string{"owners.updated_at", "owner_sessions.created_at", "owner_sessions.expires_at", "meetings.created_at", "meetings.ended_at", "audit.at"} {
+		if !slices.Contains(cols, want) {
+			t.Errorf("positive control: the integer scan does not reach %s (it reached %v)", want, cols)
+		}
+	}
+	// And it can see one: an id written as an integer is caught.
+	if _, err := db.Exec(`UPDATE audit SET at = ? WHERE rowid = (SELECT min(rowid) FROM audit)`, cy.ID); err != nil {
+		t.Fatal(err)
+	}
+	if hits, _ := integerHits(t, db, ids); len(hits) != 1 || !strings.HasPrefix(hits[0], "audit.at") {
+		t.Fatalf("positive control: an id stored as an integer in audit.at was not caught: %v", hits)
+	}
+}
+
+// integerHits queries every INTEGER column of every table (enumerated from
+// sqlite_master and pragma table_info) for each id, and returns
+// "table.column = id" for each hit, and the columns it scanned.
+func integerHits(t *testing.T, db *sql.DB, ids []int64) (hits, cols []string) {
+	t.Helper()
+	rows, err := db.Query(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tables []string
+	for rows.Next() {
+		var n string
+		rows.Scan(&n)
+		tables = append(tables, n)
+	}
+	rows.Close()
+	for _, tb := range tables {
+		ci, err := db.Query(`SELECT name, type FROM pragma_table_info(?)`, tb)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ints []string
+		for ci.Next() {
+			var name, typ string
+			ci.Scan(&name, &typ)
+			if strings.Contains(strings.ToUpper(typ), "INT") {
+				ints = append(ints, name)
+			}
+		}
+		ci.Close()
+		for _, c := range ints {
+			cols = append(cols, tb+"."+c)
+			for _, id := range ids {
+				var n int
+				if err := db.QueryRow(`SELECT count(*) FROM "`+tb+`" WHERE "`+c+`" = ?`, id).Scan(&n); err != nil {
+					t.Fatal(err)
+				}
+				if n > 0 {
+					hits = append(hits, fmt.Sprintf("%s.%s = %d", tb, c, id))
+				}
+			}
+		}
+	}
+	return hits, cols
 }
 
 // ---- the link, again, for its owner only, while open ----

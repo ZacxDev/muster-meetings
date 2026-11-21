@@ -351,10 +351,13 @@ func (s *Store) EndAll(ctx context.Context, why string, now time.Time) (Ended, e
 }
 
 // EndSubjects acts on muster's word that the app may no longer act for these
-// people (each absent from owners/check's live): every session of theirs is
-// deleted and every open meeting of theirs ended, in one transaction. No
-// one else's row is touched.
-func (s *Store) EndSubjects(ctx context.Context, subjects []string, now time.Time) (Ended, error) {
+// people (owners/check answered them revoked): every session of theirs, and
+// every open meeting of theirs, created at or before asOf is ended, in one
+// transaction. asOf is when the check was sent: a session or meeting the
+// person made after it (they reopened the tab while the answer was on its
+// way) is newer than what muster answered about, and is kept. No one
+// else's row is touched.
+func (s *Store) EndSubjects(ctx context.Context, subjects []string, asOf, now time.Time) (Ended, error) {
 	var out Ended
 	if len(subjects) == 0 {
 		return out, nil
@@ -365,13 +368,13 @@ func (s *Store) EndSubjects(ctx context.Context, subjects []string, now time.Tim
 	}
 	defer tx.Rollback()
 	list := jsonStrings(subjects)
-	r, err := tx.ExecContext(ctx, `DELETE FROM owner_sessions WHERE subject IN (SELECT value FROM json_each(?))`, list)
+	r, err := tx.ExecContext(ctx, `DELETE FROM owner_sessions WHERE subject IN (SELECT value FROM json_each(?)) AND created_at <= ?`, list, ms(asOf))
 	if err != nil {
 		return out, err
 	}
 	out.Sessions, _ = r.RowsAffected()
-	rows, err := tx.QueryContext(ctx, `UPDATE meetings SET state = 'ended', ended_at = ? WHERE state = 'open' AND subject IN (SELECT value FROM json_each(?)) RETURNING id, subject`,
-		ms(now), list)
+	rows, err := tx.QueryContext(ctx, `UPDATE meetings SET state = 'ended', ended_at = ? WHERE state = 'open' AND subject IN (SELECT value FROM json_each(?)) AND created_at <= ? RETURNING id, subject`,
+		ms(now), list, ms(asOf))
 	if err != nil {
 		return out, err
 	}
@@ -399,9 +402,10 @@ func (s *Store) EndSubjects(ctx context.Context, subjects []string, now time.Tim
 }
 
 // EndSessions acts on muster's word that these people's grants expired:
-// every owner session of theirs is deleted, and their open meetings are
-// left running for the guests. It returns the sessions deleted.
-func (s *Store) EndSessions(ctx context.Context, subjects []string, now time.Time) (int64, error) {
+// every owner session of theirs created at or before asOf (when the check
+// was sent; see EndSubjects) is deleted, and their open meetings are left
+// running for the guests. It returns the sessions deleted.
+func (s *Store) EndSessions(ctx context.Context, subjects []string, asOf, now time.Time) (int64, error) {
 	if len(subjects) == 0 {
 		return 0, nil
 	}
@@ -410,7 +414,7 @@ func (s *Store) EndSessions(ctx context.Context, subjects []string, now time.Tim
 		return 0, err
 	}
 	defer tx.Rollback()
-	r, err := tx.ExecContext(ctx, `DELETE FROM owner_sessions WHERE subject IN (SELECT j.value FROM json_each(?) AS j)`, jsonStrings(subjects))
+	r, err := tx.ExecContext(ctx, `DELETE FROM owner_sessions WHERE subject IN (SELECT j.value FROM json_each(?) AS j) AND created_at <= ?`, jsonStrings(subjects), ms(asOf))
 	if err != nil {
 		return 0, err
 	}

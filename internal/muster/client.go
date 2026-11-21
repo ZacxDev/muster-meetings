@@ -243,10 +243,19 @@ const (
 )
 
 // OwnersCheck is POST /plugin/v1/owners/check: the state of each subject's
-// grant, {"states": {"<subject>": "live"|"expired"|"revoked"}}. 🔴 It fails
-// closed: a subject asked about but absent from the answer, or answered
-// with any other state, is StateRevoked, and a subject the answer names but
-// that was not asked is dropped. It sends batches of MaxCheckSubjects.
+// grant, {"states": {"<subject>": "live"|"expired"|"revoked"}}, sent in
+// batches of MaxCheckSubjects.
+//
+// 🔴 Within an answered batch it fails closed: a subject asked about but
+// absent from "states", or answered with any other state, is StateRevoked,
+// and a subject the answer names but that was not asked is dropped.
+//
+// A batch that is not answered is left out of the map entirely, and so
+// decides nothing: a refusal, a 5xx, no answer, or a 2xx with no "states"
+// object (the old {"live": [...]} shape, an empty body, {} or {"states":
+// null}), which is KindProtocol and never "everyone revoked". The batches
+// that were answered are still returned, with an error naming each failed
+// one. A 401 stops at once and returns it.
 func (c *Client) OwnersCheck(ctx context.Context, subjects []string) (map[string]string, error) {
 	for _, s := range subjects {
 		if !ValidSubject(s) {
@@ -254,16 +263,34 @@ func (c *Client) OwnersCheck(ctx context.Context, subjects []string) (map[string
 		}
 	}
 	states := make(map[string]string, len(subjects))
-	for i := 0; i < len(subjects); i += MaxCheckSubjects {
+	var first *Error
+	var failed []string
+	n := (len(subjects) + MaxCheckSubjects - 1) / MaxCheckSubjects
+	for i, b := 0, 1; i < len(subjects); i, b = i+MaxCheckSubjects, b+1 {
 		batch := subjects[i:min(i+MaxCheckSubjects, len(subjects))]
 		var out struct {
-			States map[string]string `json:"states"`
+			States *map[string]string `json:"states"`
 		}
-		if _, err := c.do(ctx, http.MethodPost, "/plugin/v1/owners/check", nil, map[string]any{"subjects": batch}, &out); err != nil {
-			return nil, err
+		st, err := c.do(ctx, http.MethodPost, "/plugin/v1/owners/check", nil, map[string]any{"subjects": batch}, &out)
+		if err == nil && out.States == nil {
+			err = &Error{Kind: KindProtocol, Status: st, Message: `owners/check answered no "states" object`}
+		}
+		if e := AsError(err); e != nil && e.Kind == KindAuth {
+			return states, err
+		}
+		if err != nil {
+			e := AsError(err)
+			if e == nil {
+				e = &Error{Kind: KindProtocol, Message: err.Error()}
+			}
+			if first == nil {
+				first = e
+			}
+			failed = append(failed, fmt.Sprintf("batch %d of %d (%d subjects): %v", b, n, len(batch), e))
+			continue
 		}
 		for _, s := range batch {
-			st := out.States[s]
+			st := (*out.States)[s]
 			switch st {
 			case StateLive, StateExpired:
 			default:
@@ -271,6 +298,11 @@ func (c *Client) OwnersCheck(ctx context.Context, subjects []string) (map[string
 			}
 			states[s] = st
 		}
+	}
+	if first != nil {
+		e := *first
+		e.Message = strings.Join(failed, "; ")
+		return states, &e
 	}
 	return states, nil
 }

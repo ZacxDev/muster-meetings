@@ -132,38 +132,45 @@ func (a *App) checkOwners(ctx context.Context) error {
 	if err != nil || len(held) == 0 {
 		return err
 	}
-	states, err := a.Client.OwnersCheck(ctx, held)
-	if e := muster.AsError(err); e != nil && e.Kind == muster.KindAuth {
+	// Only what existed when the check was sent is judged by its answer.
+	sent := a.now()
+	states, checkErr := a.Client.OwnersCheck(ctx, held)
+	if e := muster.AsError(checkErr); e != nil && e.Kind == muster.KindAuth {
 		a.Revoke(ctx, "owners/check answered 401")
 		return ErrRevoked
 	}
-	if err != nil {
-		return err
-	}
 	var revoked, expired []string
 	for _, s := range held {
-		switch states[s] {
+		st, answered := states[s]
+		if !answered {
+			continue // its batch failed: kept until muster answers
+		}
+		switch st {
 		case muster.StateLive:
 		case muster.StateExpired:
 			expired = append(expired, s)
-		default: // revoked, another state, or absent
+		default: // revoked, another state, or absent from an answered batch
 			revoked = append(revoked, s)
 		}
 	}
 	if len(expired) > 0 {
-		n, err := a.store.EndSessions(ctx, expired, a.now())
+		n, err := a.store.EndSessions(ctx, expired, sent, a.now())
 		if err != nil {
 			return err
 		}
 		a.log.Printf("owners: %d of %d people's grants expired: %d sessions deleted, their meetings kept", len(expired), len(held), n)
 	}
 	if len(revoked) > 0 {
-		res, err := a.store.EndSubjects(ctx, revoked, a.now())
+		res, err := a.store.EndSubjects(ctx, revoked, sent, a.now())
 		if err != nil {
 			return err
 		}
 		a.log.Printf("owners: muster revoked the app for %d of %d people: %d sessions deleted, %d meetings ended",
 			len(revoked), len(held), res.Sessions, res.Meetings)
+	}
+	if checkErr != nil {
+		a.log.Printf("owners: POST /plugin/v1/owners/check: %v (those people are kept: only an answer ends a person)", checkErr)
+		return checkErr
 	}
 	return nil
 }
@@ -184,9 +191,7 @@ func (a *App) PollOnce(ctx context.Context) {
 		a.log.Printf("owners: GET /plugin/v1/self: %v (keeping everything: only a 401 ends it)", err)
 		return
 	}
-	if err := a.checkOwners(ctx); err != nil && !errors.Is(err, ErrRevoked) {
-		a.log.Printf("owners: POST /plugin/v1/owners/check: %v (keeping everything: only an answer ends a person)", err)
-	}
+	_ = a.checkOwners(ctx) // it logs its own failures
 }
 
 // Run polls every interval until ctx ends.

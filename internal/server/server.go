@@ -6,6 +6,9 @@
 //	POST /api/meetings          New meeting: answers {"id", "join_url", "meeting"}
 //	GET  /api/meetings/{id}     one meeting, and its link while it is open
 //
+// Phase 2b adds the call (calls.go), the guest page and lobby (guest.go), and
+// on the internal listener LiveKit's webhook (machine.go).
+//
 // The plugin runs as one server-installed app (core PR 1h): one token serves
 // every person on the muster, each known by the pairwise subject muster's
 // redeem gives.
@@ -28,12 +31,16 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"net/netip"
+	"net/url"
 	"path"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/ZacxDev/muster-meetings/internal/livekit"
+	"github.com/ZacxDev/muster-meetings/internal/lobby"
 	"github.com/ZacxDev/muster-meetings/internal/muster"
 	"github.com/ZacxDev/muster-meetings/internal/owners"
 	"github.com/ZacxDev/muster-meetings/internal/store"
@@ -56,17 +63,48 @@ type Config struct {
 	// Now is the clock; default time.Now.
 	Now func() time.Time
 	// Log receives the access log (method, path with any code redacted,
-	// status, duration) and refusals. It never receives a code, a token or
-	// a query string.
+	// status, duration) and refusals. It never receives a code, a token, a
+	// ticket, a guest's name or a query string.
 	Log *log.Logger
+
+	// LiveKit is the server API client (rooms, participants) and the keys
+	// tokens are minted with.
+	LiveKit *livekit.Client
+	// LiveKitURL is where browsers connect for media signalling, e.g.
+	// wss://meet-rtc.example.test. It and its https twin are the only
+	// origins the pages may connect to besides their own.
+	LiveKitURL string
+	// ICE is the LiveKit client's ICE transport policy: "relay" (the
+	// deployment's: TURN over TLS on 443 is the only media path, decision
+	// 17), or "all" (a local LiveKit with no TURN).
+	ICE string
+	// TrustedProxies are the addresses of the ingress in front of the
+	// plugin: a knock from one of them is counted against the
+	// X-Forwarded-For client instead (lobby.ClientAddr).
+	TrustedProxies []netip.Prefix
+	// StreamRecheck is how often an event stream re-reads the database
+	// even with no change signalled (an end made elsewhere: the 24 h sweep,
+	// a revocation); default 5 s. ReconcileEvery is the reconcile loop's
+	// period; default 15 s (design).
+	StreamRecheck  time.Duration
+	ReconcileEvery time.Duration
+	// Heartbeat is how often an idle event stream sends a comment, so
+	// proxies keep it open; default 15 s.
+	Heartbeat time.Duration
 }
 
 // Server is the plugin's public handler.
 type Server struct {
-	cfg   Config
-	store *store.Store
-	app   *owners.App
-	mux   *http.ServeMux
+	cfg     Config
+	store   *store.Store
+	app     *owners.App
+	mux     *http.ServeMux
+	hub     *lobby.Hub
+	knocker *lobby.Knocker
+	limiter *lobby.Limiter
+	// rtcOrigins is the LiveKit signalling origin and its https twin, for
+	// connect-src.
+	rtcOrigins string
 }
 
 // New builds the handler.
@@ -74,7 +112,24 @@ func New(cfg Config, st *store.Store, app *owners.App) *Server {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	s := &Server{cfg: cfg, store: st, app: app, mux: http.NewServeMux()}
+	if cfg.StreamRecheck <= 0 {
+		cfg.StreamRecheck = 5 * time.Second
+	}
+	if cfg.ReconcileEvery <= 0 {
+		cfg.ReconcileEvery = 15 * time.Second
+	}
+	if cfg.Heartbeat <= 0 {
+		cfg.Heartbeat = 15 * time.Second
+	}
+	if cfg.ICE == "" {
+		cfg.ICE = "relay"
+	}
+	if cfg.Log == nil {
+		cfg.Log = log.New(io.Discard, "", 0)
+	}
+	s := &Server{cfg: cfg, store: st, app: app, mux: http.NewServeMux(), hub: lobby.NewHub(), limiter: lobby.NewLimiter(),
+		rtcOrigins: RTCOrigins(cfg.LiveKitURL)}
+	s.knocker = lobby.NewKnocker(app.Client, s.hub, st.LobbyCount, cfg.Log, cfg.Now)
 	static, err := fs.Sub(webFS, "web/static")
 	if err != nil {
 		panic(err)
@@ -84,6 +139,18 @@ func New(cfg Config, st *store.Store, app *owners.App) *Server {
 	s.mux.HandleFunc("GET /api/meetings", s.owner(s.handleListMeetings))
 	s.mux.HandleFunc("POST /api/meetings", s.owner(s.handleCreateMeeting))
 	s.mux.HandleFunc("GET /api/meetings/{id}", s.owner(s.handleGetMeeting))
+	s.mux.HandleFunc("POST /api/meetings/{id}/token", s.owner(s.handleOwnerToken))
+	s.mux.HandleFunc("POST /api/meetings/{id}/record", s.owner(s.handleSwitch(store.SwitchRecord)))
+	s.mux.HandleFunc("POST /api/meetings/{id}/ai", s.owner(s.handleSwitch(store.SwitchAI)))
+	s.mux.HandleFunc("GET /api/meetings/{id}/events", s.owner(s.handleOwnerEvents))
+	s.mux.HandleFunc("POST /api/meetings/{id}/lobby/{pid}/admit", s.owner(s.handleMove(store.EvAdmit)))
+	s.mux.HandleFunc("POST /api/meetings/{id}/lobby/{pid}/deny", s.owner(s.handleMove(store.EvDeny)))
+	s.mux.HandleFunc("DELETE /api/meetings/{id}/participants/{pid}", s.owner(s.handleMove(store.EvRemove)))
+	s.mux.HandleFunc("POST /api/meetings/{id}/end", s.owner(s.handleEnd))
+	s.mux.HandleFunc("GET /j/{code}", s.handleGuestPage)
+	s.mux.HandleFunc("POST /j/{code}/knock", s.handleKnock)
+	s.mux.HandleFunc("POST /j/{code}/wait", s.handleWait)
+	s.mux.HandleFunc("POST /j/{code}/events", s.handleGuestEvents)
 	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
 	})
@@ -100,9 +167,39 @@ const (
 
 // ownerPageCSP is the owner app's policy: its own script and style only, its
 // own API only, and framed by muster's exact origin alone.
-func (s *Server) ownerPageCSP() string {
-	return "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; media-src 'self' blob:; " +
-		"object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors " + s.cfg.MusterOrigin
+func (s *Server) ownerPageCSP() string { return s.pageCSP(s.cfg.MusterOrigin) }
+
+// guestPageCSP is the guest page's: the same, but framed by nobody.
+func (s *Server) guestPageCSP() string { return s.pageCSP("'none'") }
+
+// pageCSP is a page's policy (design: "Every page sets its own strict CSP"):
+// its own script, style and images; its own API and LiveKit's signalling
+// origin (wss, and https for the client's /rtc/validate check) and nothing
+// else; media from itself and blob:; framed by frameAncestors.
+func (s *Server) pageCSP(frameAncestors string) string {
+	connect := "'self'"
+	if s.rtcOrigins != "" {
+		connect += " " + s.rtcOrigins
+	}
+	return "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src " + connect + "; media-src 'self' blob:; " +
+		"object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors " + frameAncestors
+}
+
+// RTCOrigins is connect-src's LiveKit part for a signalling URL: its origin
+// and that origin's http(s) twin, "wss://h https://h" (or "ws://h http://h"
+// for a local LiveKit). "" for a URL that is not ws or wss.
+func RTCOrigins(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	switch u.Scheme {
+	case "wss":
+		return "wss://" + u.Host + " https://" + u.Host
+	case "ws":
+		return "ws://" + u.Host + " http://" + u.Host
+	}
+	return ""
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -440,7 +537,17 @@ func (s *Server) handleCreateMeeting(w http.ResponseWriter, r *http.Request, rep
 	if testHookBeforeCreate != nil {
 		testHookBeforeCreate()
 	}
-	c, err := repo.CreateMeeting(r.Context(), s.cfg.Now())
+	c, err := repo.CreateMeetingWith(r.Context(), s.cfg.Now(), func(room string) error {
+		if _, err := s.cfg.LiveKit.CreateRoom(r.Context(), room); err != nil {
+			return liveKitErr{err}
+		}
+		return nil
+	})
+	if lk := (liveKitErr{}); errors.As(err, &lk) {
+		s.cfg.Log.Printf("new meeting: LiveKit: %v", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": CallsUnavailable})
+		return
+	}
 	if errors.Is(err, store.ErrNoSession) {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="meetings"`)
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "no live owner session: " + EnterAgain})
@@ -483,13 +590,16 @@ func (s *Server) handleGetMeeting(w http.ResponseWriter, r *http.Request, repo *
 	writeJSON(w, http.StatusOK, map[string]any{"meeting": m, "link": link})
 }
 
-// Internal is the internal port's handler: GET /healthz.
-func Internal(st *store.Store, app *owners.App) http.Handler {
+// Internal is the internal port's handler: GET /healthz, and POST
+// /livekit/webhook (machine.go). It is never exposed by an ingress: LiveKit
+// reaches it in the cluster.
+func (s *Server) Internal() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST /livekit/webhook", s.handleWebhook)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
-		if err := st.Ping(ctx); err != nil || !app.Live() {
+		if err := s.store.Ping(ctx); err != nil || !s.app.Live() {
 			http.Error(w, "unhealthy", http.StatusServiceUnavailable)
 			return
 		}

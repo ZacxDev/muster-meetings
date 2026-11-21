@@ -22,6 +22,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ZacxDev/muster-meetings/internal/livekit"
+	"github.com/ZacxDev/muster-meetings/internal/livekittest"
 	"github.com/ZacxDev/muster-meetings/internal/muster"
 	"github.com/ZacxDev/muster-meetings/internal/mustertest"
 	"github.com/ZacxDev/muster-meetings/internal/owners"
@@ -61,14 +63,17 @@ func (c *clock) Add(d time.Duration) {
 }
 
 type env struct {
-	t      *testing.T
-	fake   *mustertest.Fake
-	store  *store.Store
-	dbPath string
-	app    *owners.App
-	srv    *httptest.Server
-	clock  *clock
-	log    *syncBuf
+	t        *testing.T
+	fake     *mustertest.Fake
+	lk       *livekittest.Fake
+	store    *store.Store
+	dbPath   string
+	app      *owners.App
+	server   *server.Server
+	srv      *httptest.Server
+	internal *httptest.Server
+	clock    *clock
+	log      *syncBuf
 }
 
 type syncBuf struct {
@@ -103,9 +108,26 @@ func newEnv(t *testing.T) *env {
 	if e.app, err = owners.Boot(context.Background(), c, st, lg, e.clock.Now); err != nil {
 		t.Fatal(err)
 	}
-	h := server.New(server.Config{PublicURL: publicURL, MusterOrigin: musterOrigin, Now: e.clock.Now, Log: lg}, st, e.app)
-	e.srv = httptest.NewServer(h)
+	e.lk = livekittest.New()
+	t.Cleanup(e.lk.Close)
+	e.lk.Now = e.clock.Now
+	lkc, err := livekit.NewClient(e.lk.URL, livekittest.Keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lkc.Now = e.clock.Now
+	e.server = server.New(server.Config{PublicURL: publicURL, MusterOrigin: musterOrigin, Now: e.clock.Now, Log: lg,
+		LiveKit: lkc, LiveKitURL: e.lk.WSURL(), ICE: "relay",
+		// The streams re-read the database often and send no heartbeat a
+		// test waits on; the reconcile loop runs only when a test calls it.
+		StreamRecheck: 50 * time.Millisecond, ReconcileEvery: time.Hour, Heartbeat: time.Hour}, st, e.app)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go e.server.Run(ctx)
+	e.srv = httptest.NewServer(e.server)
 	t.Cleanup(e.srv.Close)
+	e.internal = httptest.NewServer(e.server.Internal())
+	t.Cleanup(e.internal.Close)
 	return e
 }
 
@@ -1297,8 +1319,7 @@ func TestTheAppPageCarriesNoInlineScript(t *testing.T) {
 
 func TestHealthz(t *testing.T) {
 	e := newEnv(t)
-	srv := httptest.NewServer(server.Internal(e.store, e.app))
-	defer srv.Close()
+	srv := e.internal
 	get := func() int {
 		resp, err := http.Get(srv.URL + "/healthz")
 		if err != nil {

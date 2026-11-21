@@ -130,6 +130,25 @@ var migrations = []string{
 		event      TEXT    NOT NULL,
 		detail     TEXT    NOT NULL DEFAULT ''  -- never transcript text, item text, guest names, display names or codes
 	) STRICT;`,
+
+	// 3: phase 2b, the lobby (design: "Guests: links, the lobby, admission").
+	// One row per knock. The ticket and the LiveKit identity are random; the
+	// ticket is stored only as its SHA-256. display_name is what the guest
+	// typed (already checked: lobby.CleanName): shown to the owner as text,
+	// and never logged or audited.
+	`CREATE TABLE participants (
+		id            TEXT    PRIMARY KEY,
+		meeting_id    TEXT    NOT NULL REFERENCES meetings (id),
+		kind          TEXT    NOT NULL CHECK (kind IN ('owner', 'guest')),
+		display_name  TEXT    NOT NULL,
+		identity      TEXT    NOT NULL UNIQUE,
+		ticket_sha256 TEXT    NOT NULL UNIQUE,
+		state         TEXT    NOT NULL CHECK (state IN ('waiting', 'admitted', 'denied', 'removed', 'left', 'ended')),
+		knocked_at    INTEGER NOT NULL,
+		admitted_at   INTEGER,
+		left_at       INTEGER
+	) STRICT;
+	CREATE INDEX participants_meeting ON participants (meeting_id, knocked_at, id);`,
 }
 
 // ErrNeedsSubjectMap is a phase-2a database that holds owners or meetings:
@@ -343,6 +362,9 @@ func (s *Store) EndAll(ctx context.Context, why string, now time.Time) (Ended, e
 		return out, err
 	}
 	out.Meetings, _ = r.RowsAffected()
+	if err := endParticipants(ctx, tx, now); err != nil {
+		return out, err
+	}
 	if err := audit(ctx, tx, now, "", "", "app.revoked",
 		fmt.Sprintf("%s: %d sessions deleted, %d meetings ended", why, out.Sessions, out.Meetings)); err != nil {
 		return out, err
@@ -397,6 +419,9 @@ func (s *Store) EndSubjects(ctx context.Context, subjects []string, asOf, now ti
 		if err := audit(ctx, tx, now, e.subject, e.id, "meeting.ended", "muster no longer lets the app act for its owner"); err != nil {
 			return out, err
 		}
+	}
+	if err := endParticipants(ctx, tx, now); err != nil {
+		return out, err
 	}
 	return out, tx.Commit()
 }
@@ -485,6 +510,9 @@ func (s *Store) Sweep(ctx context.Context, now time.Time) (int64, error) {
 		if err := audit(ctx, tx, now, e.subject, e.id, "meeting.ended", "the 24 h cap"); err != nil {
 			return 0, err
 		}
+	}
+	if err := endParticipants(ctx, tx, now); err != nil {
+		return 0, err
 	}
 	return int64(len(all)), tx.Commit()
 }

@@ -350,7 +350,7 @@ profile) by name, with `MEETINGS_STT_TOKEN` the same value as muster's
 
 ### Upgrading from 3a
 
-3c adds the `nemotron` engine. **The default engine is unchanged** (`stt-engine=utterance`), so applying 3c's base to a 3a deployment changes nothing it runs: the new `stream-stt-url` param has a default, `MEETINGS_STREAM_STT_TOKEN` is an **optional** key of the Secret (a Secret without it still starts the pod), and the new NetworkPolicy rule (stt-nemotron's `:8000`) is appended **last**, so an overlay's patches by index (`/spec/egress/2` for stt-cohere, `/spec/egress/3` for DNS) keep their targets. To turn live captions on:
+3c adds the `nemotron` engine. **The default engine is unchanged** (`stt-engine=utterance`), so applying 3c's base to a 3a deployment changes nothing it runs: the new `stream-stt-url` param has a default and is read as an **optional** key (an overlay whose params ConfigMap lacks it still starts the pod), `MEETINGS_STREAM_STT_TOKEN` is an **optional** key of the Secret (a Secret without it still starts the pod), and the new NetworkPolicy rule (stt-nemotron's `:8000`) is appended **last**, so an overlay's patches by index (`/spec/egress/2` for stt-cohere, `/spec/egress/3` for DNS) keep their targets. To turn live captions on:
 
 1. Run muster's `stt-nemotron` image (its README) beside stt-cohere, with its own `STT_API_TOKEN`.
 2. Add `MEETINGS_STREAM_STT_TOKEN` (a copy of that token) to the `muster-meetings` Secret.
@@ -612,7 +612,14 @@ database.
    stream opens. A stream that drops after it opened (a cut connection, or
    an error close such as `bad_frame`, logged by its code) is reconnected up
    to 3 times, at 1, 2 and 4 s, with a gap marker over the audio no engine
-   took; a reconnect answered `503` goes to the fallback at once. When the
+   took (from the last final when a `flush` is unanswered, else from the
+   start of the utterance in progress, else from the drop: silence loses no
+   words); a reconnect answered `503` goes to the fallback at once. The 3
+   reconnects come back only once a connection has delivered a final, so a
+   server that closes every new stream before it has (an error on every
+   stream) sends the participant to the fallback. A `1013` close
+   (`overloaded`) is the server shedding load: the fallback at once, as for
+   a `503`, retried after 30 s. When the
    fallback is also full, its own caps apply and the panel says
    **"Transcript paused"**, which wins over "Captions delayed". Lines the
    fallback took are stored as the `utterance` engine's.

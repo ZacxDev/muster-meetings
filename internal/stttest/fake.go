@@ -260,14 +260,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	h := sha1.New()
-	io.WriteString(h, r.Header.Get("Sec-WebSocket-Key")+"258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
-	brw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " +
-		base64.StdEncoding.EncodeToString(h.Sum(nil)) + "\r\n\r\n")
-	if brw.Flush() != nil {
-		c.Close()
-		return
-	}
+	// The stream is live (DropAll and CloseAll reach it) BEFORE the 101 is
+	// written: a client that has its 101 can be dropped at once.
 	fc := &fconn{s: s, c: c, br: brw.Reader, rec: rec}
 	s.mu.Lock()
 	s.conns[fc] = true
@@ -278,6 +272,16 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 		c.Close()
 	}()
+	h := sha1.New()
+	io.WriteString(h, r.Header.Get("Sec-WebSocket-Key")+"258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
+	fc.wmu.Lock()
+	brw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " +
+		base64.StdEncoding.EncodeToString(h.Sum(nil)) + "\r\n\r\n")
+	err = brw.Flush()
+	fc.wmu.Unlock()
+	if err != nil {
+		return
+	}
 	fc.serve(idle, every, lines, delay)
 }
 

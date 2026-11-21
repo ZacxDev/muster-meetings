@@ -426,6 +426,14 @@ func TestKubernetesPlugin(t *testing.T) {
 			t.Errorf("%s: secretKeyRef.optional = %v, want %v", name, dig(e, "valueFrom", "secretKeyRef", "optional"), want)
 		}
 	}
+	// The same for the stream URL's params key: an overlay that replaces
+	// the params ConfigMap wholesale (no stream-stt-url) must still boot its
+	// utterance engine. The engine's own keys stay required.
+	for name, want := range map[string]any{"MEETINGS_STREAM_STT_URL": true, "MEETINGS_STT_ENGINE": nil, "MEETINGS_STT_URL": nil} {
+		if e, _ := envEntry(c, name); dig(e, "valueFrom", "configMapKeyRef", "optional") != want {
+			t.Errorf("%s: configMapKeyRef.optional = %v, want %v", name, dig(e, "valueFrom", "configMapKeyRef", "optional"), want)
+		}
+	}
 	for name, key := range map[string]string{"MEETINGS_STT_ENGINE": "stt-engine", "MEETINGS_STT_URL": "stt-url", "MEETINGS_STREAM_STT_URL": "stream-stt-url"} {
 		if e, _ := envEntry(c, name); dig(e, "valueFrom", "configMapKeyRef", "key") != key {
 			t.Errorf("%s = %v, want the params ConfigMap's %s", name, e, key)

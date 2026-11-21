@@ -186,5 +186,9 @@ func (e *Endpointer) Flush() []VADEvent {
 // silent-start check's measure.
 func (e *Endpointer) SpeechSamples() int64 { return e.speechN }
 
+// InSpeech says an utterance is in progress, and where it began (its
+// pre-roll included).
+func (e *Endpointer) InSpeech() (bool, int64) { return e.inSpeech, e.start }
+
 // Pos is how many samples the endpointer has consumed.
 func (e *Endpointer) Pos() int64 { return e.pos }

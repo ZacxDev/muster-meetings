@@ -393,9 +393,11 @@ func TestAMidStreamDropReconnectsThreeTimesThenFallsBackWithAGap(t *testing.T) {
 	if sw.Engine != "utterance" {
 		t.Fatalf("switched to %q, want utterance", sw.Engine)
 	}
+	// Only silence followed the last final (no flush unanswered, no
+	// utterance in progress): the gap starts at the drop, 2000 ms.
 	gaps := kindsOf(n.got(), stt.Gap)
-	if len(gaps) != 1 || gaps[0].StartMS != first.EndMS || gaps[0].EndMS <= gaps[0].StartMS {
-		t.Fatalf("gaps = %+v, want one from the last final's end (%d ms) to the fallback", gaps, first.EndMS)
+	if len(gaps) != 1 || gaps[0].StartMS != 2000 || gaps[0].EndMS <= gaps[0].StartMS {
+		t.Fatalf("gaps = %+v, want one from the drop (2000 ms) to the fallback (the last final ended at %d)", gaps, first.EndMS)
 	}
 	// No fourth reconnect: the next try is rule 1's, 30 s on.
 	at(11*time.Second, 3)
@@ -424,8 +426,8 @@ func TestAReconnectedStreamsTimesStartAtItsFirstSample(t *testing.T) {
 		t.Fatalf("%d upgrades, want 2", n.srv.Upgrades())
 	}
 	gaps := kindsOf(n.got(), stt.Gap)
-	if len(gaps) != 1 || gaps[0].StartMS != first.EndMS || gaps[0].EndMS != 2400 {
-		t.Fatalf("gaps = %+v, want %d–2400", gaps, first.EndMS)
+	if len(gaps) != 1 || gaps[0].StartMS != 2000 || gaps[0].EndMS != 2400 {
+		t.Fatalf("gaps = %+v, want 2000–2400 (the drop to the reconnect; the last final ended at %d)", gaps, first.EndMS)
 	}
 	if second.StartMS != 2400 || second.EndMS < 3400 {
 		t.Fatalf("the reconnected stream's final is %d–%d ms, want from 2400 (its first sample)", second.StartMS, second.EndMS)
@@ -526,5 +528,145 @@ func TestAQuietIngestEndsTheStreamAndTheNextAudioReopensIt(t *testing.T) {
 	}
 	if r := n.srv.Records()[0]; r.Close != 1000 {
 		t.Fatalf("the first stream closed with %d, want the server's 1000 after `end` (never its idle 1001)", r.Close)
+	}
+}
+
+// 🔴 A 1013 close (`overloaded`: the server's GPU is not keeping up) is a
+// refusal, not a drop: the participant goes to the utterance engine at once
+// and Nemotron is tried again only after 30 s. Reconnecting instead would
+// let a server that accepts and then sheds every stream keep the
+// participant reconnecting forever (six sheds: seven upgrades, never a
+// fallback).
+func TestAnOverloadedCloseSendsTheParticipantToTheFallback(t *testing.T) {
+	n := newNem(t)
+	n.open()
+	n.feed(cat(tone(1000, 5000, 0), level(1000, 0)))
+	n.waitSeg("the first final", 5*time.Second, func(g stt.Segment) bool { return g.Kind == stt.Final })
+	n.dropped(func() { n.srv.CloseAll("overloaded", 1013) })
+	sw := n.waitSeg("the fallback", 5*time.Second, func(g stt.Segment) bool { return g.Kind == stt.EngineSwitch })
+	if sw.Engine != "utterance" {
+		t.Fatalf("switched to %q", sw.Engine)
+	}
+	for _, d := range []time.Duration{time.Second, 3 * time.Second, 7 * time.Second, 29 * time.Second} {
+		n.clock.Set(t0.Add(d))
+		n.feed(level(80, 0))
+		if u := n.srv.Upgrades(); u != 1 {
+			t.Fatalf("at +%s: %d upgrades, want 1 (no reconnect after an overloaded close)", d, u)
+		}
+	}
+	n.clock.Set(t0.Add(30 * time.Second))
+	n.feed(level(80, 0))
+	if u := n.srv.Upgrades(); u != 2 {
+		t.Fatalf("at +30s: %d upgrades, want 2 (rule 1's retry)", u)
+	}
+	n.close()
+}
+
+// The reconnect budget comes back only with a connection that delivered a
+// final: connections closed again before any final (here bad_frame every
+// time, as a plugin bug would) use it up, 3 reconnects at 1, 2 and 4 s,
+// and the fourth drop sends the participant to the fallback.
+func TestStreamsThatDropBeforeAFinalUseUpTheReconnects(t *testing.T) {
+	n := newNem(t)
+	n.open()
+	n.feed(cat(tone(1000, 5000, 0), level(1000, 0)))
+	n.waitSeg("the first final", 5*time.Second, func(g stt.Segment) bool { return g.Kind == stt.Final })
+	at := time.Duration(0)
+	for i, wait := range []time.Duration{time.Second, 2 * time.Second, 4 * time.Second} {
+		n.dropped(func() { n.srv.CloseAll("bad_frame", 1003) })
+		at += wait
+		n.clock.Set(t0.Add(at))
+		n.feed(level(80, 0))
+		if u := n.srv.Upgrades(); u != i+2 {
+			t.Fatalf("reconnect %d at +%s: %d upgrades, want %d", i+1, at, u, i+2)
+		}
+		if len(kindsOf(n.got(), stt.EngineSwitch)) != 0 {
+			t.Fatalf("fell back after %d drops, want after 4", i+1)
+		}
+	}
+	n.dropped(func() { n.srv.CloseAll("bad_frame", 1003) })
+	sw := n.waitSeg("the fallback after the fourth drop", 5*time.Second, func(g stt.Segment) bool { return g.Kind == stt.EngineSwitch })
+	if sw.Engine != "utterance" {
+		t.Fatalf("switched to %q", sw.Engine)
+	}
+	at += 8 * time.Second
+	n.clock.Set(t0.Add(at))
+	n.feed(level(80, 0))
+	if u := n.srv.Upgrades(); u != 4 {
+		t.Fatalf("%d upgrades after the fallback, want 4 (no fifth before rule 1's 30 s)", u)
+	}
+	n.close()
+}
+
+// Where a drop's gap starts: words may have been lost only in audio no final
+// covers that held speech. After 10 minutes of silence it starts at the drop
+// (not at the last final, ten minutes back); mid-utterance at that
+// utterance's start; with a flush still unanswered at the last final.
+func TestADropsGapStartsWhereWordsMayHaveBeenLost(t *testing.T) {
+	t.Run("after 10 minutes of silence", func(t *testing.T) {
+		n := newNem(t)
+		n.open()
+		n.feed(cat(tone(1000, 5000, 0), level(1000, 0)))
+		n.waitSeg("the first final", 5*time.Second, func(g stt.Segment) bool { return g.Kind == stt.Final })
+		n.feed(level(600000, 0))
+		n.dropped(n.srv.DropAll)
+		n.feed(level(400, 0)) // lost: no connection until the reconnect
+		n.clock.Set(t0.Add(time.Second))
+		n.feed(level(80, 0))
+		gaps := kindsOf(n.close(), stt.Gap)
+		// The drop is at 602000 ms; the reconnect at 602400.
+		if len(gaps) != 1 || gaps[0].StartMS != 602000 || gaps[0].EndMS != 602400 {
+			t.Fatalf("gaps = %+v, want one from the drop (602000 ms) to the reconnect (602400)", gaps)
+		}
+	})
+	t.Run("mid-utterance", func(t *testing.T) {
+		n := newNem(t)
+		n.open()
+		n.feed(cat(level(2000, 0), tone(1200, 5000, 0)))
+		n.dropped(n.srv.DropAll)
+		n.clock.Set(t0.Add(time.Second))
+		n.feed(level(80, 0))
+		gaps := kindsOf(n.close(), stt.Gap)
+		// The utterance began at 2000 ms, its pre-roll 200 ms before.
+		if len(gaps) != 1 || gaps[0].StartMS != 1800 {
+			t.Fatalf("gaps = %+v, want one from the utterance's start (1800 ms)", gaps)
+		}
+	})
+	t.Run("a flush unanswered", func(t *testing.T) {
+		n := newNem(t)
+		n.srv.Set(func(s *stttest.Server) { s.FinalDelay = 2 * time.Second })
+		n.open()
+		n.feed(cat(level(1000, 0), tone(1000, 5000, 0), level(1000, 0)))
+		eventually(t, "the flush", func() bool { r := n.srv.Records(); return len(r) == 1 && len(r[0].Flushes) == 1 })
+		n.dropped(n.srv.DropAll)
+		n.clock.Set(t0.Add(time.Second))
+		n.feed(level(80, 0))
+		gaps := kindsOf(n.close(), stt.Gap)
+		if len(gaps) != 1 || gaps[0].StartMS != 0 {
+			t.Fatalf("gaps = %+v, want one from the last confirmed point (0 ms: the flushed utterance's final never came)", gaps)
+		}
+	})
+}
+
+// failEngine is a fallback that cannot open a stream.
+type failEngine struct{}
+
+func (failEngine) Name() string { return "utterance" }
+func (failEngine) Open(context.Context, stt.TrackRef) (stt.Stream, error) {
+	return nil, fmt.Errorf("no STT service configured")
+}
+
+// A fallback that fails to open is said in the log (the track is then not
+// transcribed until Nemotron takes it again), not passed over in silence.
+func TestAFallbackThatFailsToOpenIsLogged(t *testing.T) {
+	n := newNem(t)
+	n.eng.Fallback = failEngine{}
+	n.srv.Set(func(s *stttest.Server) { s.Refuse = 503 })
+	n.open()
+	n.feed(level(80, 0))
+	n.waitSeg("the switch", 5*time.Second, func(g stt.Segment) bool { return g.Kind == stt.EngineSwitch })
+	n.close()
+	if !strings.Contains(n.log.String(), "the fallback engine did not open a stream (no STT service configured)") {
+		t.Fatalf("the log does not say the fallback failed: %s", n.log.String())
 	}
 }

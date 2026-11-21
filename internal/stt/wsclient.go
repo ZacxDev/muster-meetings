@@ -214,8 +214,11 @@ func (w *wsConn) readMessage() (data []byte, text bool, err error) {
 			return nil, false, err
 		}
 		fin, op := h[0]&0x80 != 0, h[0]&0x0F
+		if h[0]&0x70 != 0 {
+			return nil, false, w.fail("stt: the stream server set reserved bits")
+		}
 		if h[1]&0x80 != 0 {
-			return nil, false, errors.New("stt: the stream server sent a masked frame")
+			return nil, false, w.fail("stt: the stream server sent a masked frame")
 		}
 		n := uint64(h[1] & 0x7F)
 		switch n {
@@ -232,8 +235,13 @@ func (w *wsConn) readMessage() (data []byte, text bool, err error) {
 			}
 			n = binary.BigEndian.Uint64(b[:])
 		}
+		// A control frame is at most 125 bytes and never fragmented (RFC
+		// 6455 5.5).
+		if op >= 0x8 && (n > 125 || !fin) {
+			return nil, false, w.fail("stt: the stream server sent a bad control frame")
+		}
 		if n > maxServerMessage || uint64(len(msg))+n > maxServerMessage {
-			return nil, false, errors.New("stt: a stream server message over 64 KiB")
+			return nil, false, w.fail("stt: a stream server message over 64 KiB")
 		}
 		payload := make([]byte, n)
 		if _, err := io.ReadFull(w.br, payload); err != nil {
@@ -241,11 +249,15 @@ func (w *wsConn) readMessage() (data []byte, text bool, err error) {
 		}
 		switch op {
 		case 0x8:
-			code := 1005 // no status
+			// Echo the server's code; a close with no code is answered with
+			// an empty close (1005 is never sent on the wire).
+			code := 1005
+			var echo []byte
 			if len(payload) >= 2 {
 				code = int(binary.BigEndian.Uint16(payload))
+				echo = payload[:2]
 			}
-			w.close(code)
+			w.closeWith(echo)
 			return nil, false, &CloseError{Code: code}
 		case 0x9:
 			if err := w.writeFrame(0xA, payload); err != nil {
@@ -274,9 +286,19 @@ func (w *wsConn) readMessage() (data []byte, text bool, err error) {
 }
 
 // close sends a close frame with code (once) and closes the socket.
-func (w *wsConn) close(code int) {
+func (w *wsConn) close(code int) { w.closeWith(binary.BigEndian.AppendUint16(nil, uint16(code))) }
+
+// closeWith sends a close frame with payload (once; empty is a close with no
+// code) and closes the socket.
+func (w *wsConn) closeWith(payload []byte) {
 	w.closeOnce.Do(func() {
-		_ = w.writeFrame(0x8, binary.BigEndian.AppendUint16(nil, uint16(code)))
+		_ = w.writeFrame(0x8, payload)
 		w.c.Close()
 	})
+}
+
+// fail is the server breaking the protocol: a 1002 close, and the error.
+func (w *wsConn) fail(why string) error {
+	w.close(1002)
+	return errors.New(why)
 }

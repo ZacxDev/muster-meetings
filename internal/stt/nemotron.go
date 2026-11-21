@@ -247,10 +247,15 @@ type nemConn struct {
 	sent   int64   // real samples sent (padding excluded)
 	ending atomic.Bool
 	done   chan struct{} // the reader is finished
-	// confirmed is the track sample up to which a final has come back:
-	// where a drop's gap begins.
-	confirmed atomic.Int64
-	reason    atomic.Value // the server's error frame code, if any
+	// confirmed is the track sample up to which a final has come back;
+	// unanswered the flushes sent whose final has not; finals how many
+	// finals came back (a connection that delivered none has not proved
+	// itself, and does not restore the reconnect budget).
+	confirmed  atomic.Int64
+	unanswered atomic.Int64
+	finals     atomic.Int64
+	reason     atomic.Value // the server's error frame code, if any
+	closeCode  atomic.Int64 // the server's close code, if it sent one
 }
 
 func (s *nemStream) Segments() <-chan Segment { return s.segs }
@@ -381,7 +386,13 @@ func (s *nemStream) dial() (*nemConn, error) {
 // panel's "Captions delayed" clears.
 func (s *nemStream) live(c *nemConn) {
 	back := s.mode == modeFallback
-	s.conn, s.mode, s.attempts = c, modeLive, 0
+	if s.mode != modeReconnect {
+		// A fresh start (the stream's, an idle end's, a return from the
+		// fallback): the whole reconnect budget. A reconnect keeps what it
+		// has used until its connection delivers a final (drop).
+		s.attempts = 0
+	}
+	s.conn, s.mode = c, modeLive
 	if back {
 		s.closeFallback()
 		s.e.logf("transcript: a track is back on Nemotron")
@@ -410,6 +421,8 @@ func (s *nemStream) toFallback(err error) {
 		if ferr == nil {
 			s.fb = fb
 			s.forward(fb, s.pos)
+		} else {
+			s.e.logf("transcript: the fallback engine did not open a stream (%v): the track is not transcribed until Nemotron takes it again", ferr)
 		}
 	}
 	s.emit(Segment{Kind: EngineSwitch, Engine: s.fallbackName()})
@@ -480,6 +493,7 @@ func (s *nemStream) chunk(pcm []int16) {
 			if ev.Utterance != nil {
 				// The endpointer found the end of an utterance (a pause of
 				// SilenceEnd, or MaxUtterance): the server finalises it.
+				s.conn.unanswered.Add(1)
 				if err := s.conn.ws.writeText(`{"type":"flush"}`); err != nil {
 					s.drop(s.conn, s.pos)
 					return
@@ -557,8 +571,16 @@ func itoa(n int64) string {
 	return string(b)
 }
 
-// drop is rule 2's start: c failed at track sample at. The audio from its
-// last final to the reconnect is a gap.
+// drop is rule 2's start: c failed at track sample at. The gap begins
+// where words may have been lost (lostFrom).
+//
+// 🔴 A server that closes with 1013 (`overloaded`: its GPU is not keeping
+// up) is saying what a 503 says: rule 1 at once, never a reconnect, or a
+// server that accepts and then sheds every stream would keep the
+// participant reconnecting forever. And the reconnect budget is restored
+// only by a connection that delivered a final: one that is closed again
+// before it has (bad_frame every time, an error on every stream) uses it
+// up, and the participant goes to the fallback.
 func (s *nemStream) drop(c *nemConn, at int64) {
 	if c == nil || s.conn != c {
 		return
@@ -569,12 +591,43 @@ func (s *nemStream) drop(c *nemConn, at int64) {
 	if r, ok := c.reason.Load().(string); ok && r != "" {
 		why = "the server sent " + r
 	}
-	s.e.logf("transcript: a track's Nemotron stream dropped (%s); reconnecting", why)
-	s.gapFrom = min(c.confirmed.Load(), at)
+	s.gapFrom = s.lostFrom(c, at)
 	// The caption in progress is gone with the connection.
 	s.emit(Segment{Kind: Partial, StartMS: ms(s.gapFrom), EndMS: ms(s.gapFrom)})
-	s.mode, s.attempts = modeReconnect, 0
-	s.nextAt = s.e.now().Add(s.reconnects[0])
+	if c.finals.Load() > 0 {
+		s.attempts = 0
+	}
+	s.mode = modeReconnect
+	if c.closeCode.Load() == 1013 {
+		s.e.logf("transcript: the Nemotron server shed a track's stream (overloaded, 1013)")
+		s.closeGap()
+		s.toFallback(&CloseError{Code: 1013, Reason: "overloaded"})
+		return
+	}
+	if s.attempts >= len(s.reconnects) {
+		s.e.logf("transcript: a track's Nemotron stream dropped again (%s) before it delivered a line; no reconnect left", why)
+		s.closeGap()
+		s.toFallback(errors.New("stt: the stream kept dropping: " + why))
+		return
+	}
+	s.e.logf("transcript: a track's Nemotron stream dropped (%s); reconnecting", why)
+	s.nextAt = s.e.now().Add(s.reconnects[s.attempts])
+}
+
+// lostFrom is where a drop's lost audio begins, at the latest at: the last
+// confirmed final when a flush is still unanswered (that utterance's words
+// were lost); else the start of the utterance in progress, if the
+// endpointer is in one; else nothing before at was speech that a final has
+// not covered (the audio since the last flush was silence), and the gap
+// starts at the drop.
+func (s *nemStream) lostFrom(c *nemConn, at int64) int64 {
+	from := at
+	if c.unanswered.Load() > 0 {
+		from = c.confirmed.Load()
+	} else if in, start := s.ep.InSpeech(); in {
+		from = max(c.confirmed.Load(), start)
+	}
+	return max(min(from, at), c.offset)
 }
 
 // dropped is a reader's report that its connection ended unasked.
@@ -586,13 +639,13 @@ func (s *nemStream) dropped(c *nemConn) {
 
 // reconnect is one of rule 2's attempts, at the current position.
 func (s *nemStream) reconnect() {
+	s.attempts++
 	c, err := s.dial()
 	if err == nil {
 		s.closeGap()
 		s.live(c)
 		return
 	}
-	s.attempts++
 	var ref *RefusedError
 	if errors.As(err, &ref) || s.attempts >= len(s.reconnects) {
 		// Refused (the server is full, or will not serve): rule 1 at once.
@@ -643,8 +696,11 @@ func (s *nemStream) read(c *nemConn) {
 		data, text, err := c.ws.readMessage()
 		if err != nil {
 			var ce *CloseError
-			if errors.As(err, &ce) && ce.Code == 1000 && c.ending.Load() {
-				return // the end we asked for
+			if errors.As(err, &ce) {
+				c.closeCode.Store(int64(ce.Code))
+				if ce.Code == 1000 && c.ending.Load() {
+					return // the end we asked for
+				}
 			}
 			c.ws.close(1001)
 			if s.ctx.Err() == nil && !c.ending.Load() {
@@ -672,6 +728,10 @@ func (s *nemStream) read(c *nemConn) {
 			s.emit(Segment{Kind: Partial, StartMS: off + m.StartMS, EndMS: off + m.EndMS, Text: m.Text, Engine: s.e.Name()})
 		case "final":
 			c.confirmed.Store(c.offset + m.EndMS*Rate/1000)
+			c.finals.Add(1)
+			if c.unanswered.Load() > 0 {
+				c.unanswered.Add(-1)
+			}
 			if m.Text = strings.TrimSpace(m.Text); m.Text == "" {
 				// Nothing was said (or a constant signal): no line, and
 				// the caption in progress, if any, clears.

@@ -96,7 +96,7 @@ spec:
             - name: MEETINGS_STT_URL
               valueFrom: {configMapKeyRef: {name: muster-meetings-params, key: stt-url}}
             - name: MEETINGS_STREAM_STT_URL
-              valueFrom: {configMapKeyRef: {name: muster-meetings-params, key: stream-stt-url}}
+              valueFrom: {configMapKeyRef: {name: muster-meetings-params, key: stream-stt-url, optional: true}}
             - name: MEETINGS_INGEST_LISTEN
               value: ":8082"
             - name: MEETINGS_INGEST_URL

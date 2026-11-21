@@ -60,8 +60,13 @@ type transcriber struct {
 	conns    map[string]*liveConn          // track → its ingest stream
 	partials map[string]map[string]partial // meeting → track → the partial
 	paused   map[string]bool               // track → the engine dropped audio, until its next final
-	delayed  map[string]bool               // track → on the nemotron engine's fallback (stt.EngineSwitch)
-	meetings map[string]string             // track → meeting, for paused
+	// delayed is track → the ingest stream whose engine stream is on the
+	// nemotron engine's fallback (stt.EngineSwitch). 🔴 Keyed by STREAM: an
+	// old stream draining after its replacement can neither set nor clear
+	// its successor's state, and counts only while it is the track's
+	// current stream (transcriptStatus).
+	delayed  map[string]*liveConn
+	meetings map[string]string // track → meeting, for paused
 	// restarts counts a track's egress restarts since its last healthy
 	// stretch; audioAt is when its current stream's audio began.
 	restarts map[string]int
@@ -106,7 +111,7 @@ type partial struct {
 
 func newTranscriber() *transcriber {
 	return &transcriber{runs: map[string]*run{}, conns: map[string]*liveConn{},
-		partials: map[string]map[string]partial{}, paused: map[string]bool{}, delayed: map[string]bool{}, meetings: map[string]string{},
+		partials: map[string]map[string]partial{}, paused: map[string]bool{}, delayed: map[string]*liveConn{}, meetings: map[string]string{},
 		restarts: map[string]int{}, audioAt: map[string]time.Time{}}
 }
 
@@ -582,20 +587,15 @@ func (s *Server) serveIngest(conn *ingest.Conn, t store.Track) {
 	}
 	s.tr.conns[t.Track] = lc
 	s.tr.meetings[t.Track] = t.MeetingID
-	// A new engine stream starts on the configured engine; it says so if it
-	// falls back (stt.EngineSwitch).
-	delete(s.tr.delayed, t.Track)
 	s.tr.mu.Unlock()
 	ctx, cancel := context.WithCancel(s.bg)
 	defer func() {
 		cancel()
 		s.tr.mu.Lock()
-		if cur := s.tr.conns[t.Track]; cur == lc || cur == nil {
+		if s.tr.conns[t.Track] == lc {
 			delete(s.tr.conns, t.Track)
-			// The engine's stream ended with it (streamEnded may already
-			// have deregistered it): the next starts on the configured
-			// engine, and says so if it falls back. A newer stream's own
-			// state is left alone.
+		}
+		if s.tr.delayed[t.Track] == lc {
 			delete(s.tr.delayed, t.Track)
 		}
 		if m := s.tr.partials[t.MeetingID]; m != nil {
@@ -628,7 +628,7 @@ func (s *Server) serveIngest(conn *ingest.Conn, t store.Track) {
 	go func() {
 		defer close(drained)
 		for seg := range stream.Segments() {
-			s.storeSegment(ctx, t, base.Load(), seg)
+			s.storeSegment(ctx, t, lc, base.Load(), seg)
 		}
 	}()
 	// The watcher closes the stream when it may no longer go on: the
@@ -713,7 +713,7 @@ read:
 // meeting time at base (the stream's first sample) plus its own sample time.
 // 🔴 Never its arrival time: a burst after a stall carries the times its
 // samples say.
-func (s *Server) storeSegment(ctx context.Context, t store.Track, base int64, seg stt.Segment) {
+func (s *Server) storeSegment(ctx context.Context, t store.Track, lc *liveConn, base int64, seg stt.Segment) {
 	if base < 0 {
 		base = 0
 	}
@@ -742,11 +742,15 @@ func (s *Server) storeSegment(ctx context.Context, t store.Track, base int64, se
 	case stt.EngineSwitch:
 		// "Captions delayed" exactly while the track is not on the
 		// configured engine (the nemotron engine's fallback).
+		// Only the track's current stream sets it, and a stream clears only
+		// its own.
 		s.tr.mu.Lock()
 		if seg.Engine != s.cfg.Engine.Name() {
-			s.tr.delayed[t.Track] = true
-			s.tr.meetings[t.Track] = t.MeetingID
-		} else {
+			if s.tr.conns[t.Track] == lc {
+				s.tr.delayed[t.Track] = lc
+				s.tr.meetings[t.Track] = t.MeetingID
+			}
+		} else if s.tr.delayed[t.Track] == lc {
 			delete(s.tr.delayed, t.Track)
 		}
 		s.tr.mu.Unlock()
@@ -811,7 +815,7 @@ func (s *Server) transcriptStatus(meetingID string, open []int64) string {
 		}
 	}
 	for track, d := range s.tr.delayed {
-		if d && s.tr.meetings[track] == meetingID {
+		if d != nil && d == s.tr.conns[track] && s.tr.meetings[track] == meetingID {
 			return CaptionsDelayed
 		}
 	}

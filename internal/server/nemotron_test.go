@@ -233,6 +233,105 @@ func TestARestartedStreamOnNemotronIsNotLeftCaptionsDelayed(t *testing.T) {
 	wantStatus("")
 }
 
+// ctlEngine is an engine named "nemotron" whose streams the test drives:
+// each Open is announced, and the test sends the stream's segments.
+type ctlEngine struct{ opened chan *ctlStream }
+
+type ctlStream struct{ segs chan stt.Segment }
+
+func (*ctlEngine) Name() string { return "nemotron" }
+func (e *ctlEngine) Open(context.Context, stt.TrackRef) (stt.Stream, error) {
+	s := &ctlStream{segs: make(chan stt.Segment, 16)}
+	e.opened <- s
+	return s, nil
+}
+func (*ctlStream) Write([]int16) error            { return nil }
+func (s *ctlStream) Segments() <-chan stt.Segment { return s.segs }
+func (*ctlStream) Close() error                   { return nil }
+
+// 🔴 "Captions delayed" is per STREAM. A track's first stream falls back,
+// then its egress dies and a second stream takes over while the first is
+// still draining: the first's state no longer counts (the status clears at
+// once, not when the old stream's drain ends); and when the second is on
+// its fallback, a late switch from the first (either way) neither moves nor
+// clears it. Only the second's own return clears it.
+func TestALateSwitchFromAReplacedStreamCannotTouchItsSuccessor(t *testing.T) {
+	eng := &ctlEngine{opened: make(chan *ctlStream, 4)}
+	e := newEnvOpts(t, nil, func(c *server.Config) { c.Engine = eng })
+	e.lk.EgressAudio = func(room, identity, track string) []byte { return egresstest.Speech(60000) }
+	e.lk.EgressPace = 5 * time.Millisecond
+	c := e.meeting(ada)
+	e.started(c)
+	owner := e.open("GET", "/api/meetings/"+c.ID+"/events", c.Sess, nil)
+	tr := e.publish(c, store.OwnerIdentity, "MICROPHONE")
+	next := func() *ctlStream {
+		t.Helper()
+		select {
+		case s := <-eng.opened:
+			t.Cleanup(func() { close(s.segs) })
+			return s
+		case <-time.After(5 * time.Second):
+			t.Fatal("no engine stream opened")
+			return nil
+		}
+	}
+	wantStatus := func(want string) {
+		t.Helper()
+		for {
+			ev := owner.want("transcript")
+			var s statusEvent
+			json.Unmarshal([]byte(ev.Data), &s)
+			if s.Status == want {
+				return
+			}
+		}
+	}
+	toFallback := stt.Segment{Kind: stt.EngineSwitch, Engine: "utterance"}
+	back := stt.Segment{Kind: stt.EngineSwitch, Engine: "nemotron"}
+
+	s1 := next()
+	s1.segs <- toFallback
+	wantStatus(server.CaptionsDelayed)
+	e.lk.KillEgress(e.egressOf(tr, 1).ID)
+	s2 := next()
+	// The first stream is still draining (its segments are open), and no
+	// longer the track's: the status clears.
+	wantStatus("")
+	s2.segs <- toFallback
+	wantStatus(server.CaptionsDelayed)
+	s1.segs <- toFallback
+	s1.segs <- back
+	s2.segs <- stt.Segment{Kind: stt.Final, Text: "marker line"}
+	// A stream sends a pass's segments before its status, so read on past
+	// the marker until the stream has been quiet for 500 ms.
+	marker := false
+	for {
+		d := 5 * time.Second
+		if marker {
+			d = 500 * time.Millisecond
+		}
+		ev, ok := owner.next(d)
+		if !ok {
+			if !marker {
+				t.Fatal("the marker line never came")
+			}
+			break
+		}
+		if ev.Name == "transcript" {
+			var st statusEvent
+			json.Unmarshal([]byte(ev.Data), &st)
+			if st.Status != server.CaptionsDelayed {
+				t.Fatalf("a late switch from the replaced stream changed the successor's status to %q", st.Status)
+			}
+		}
+		if ev.Name == "segment" && strings.Contains(ev.Data, "marker line") {
+			marker = true
+		}
+	}
+	s2.segs <- back
+	wantStatus("")
+}
+
 // The silent-start flag is telemetry: a log line naming the track (never a
 // speaker or text) and /healthz's warning; nothing is stored or shown.
 func TestASilentStartFlagIsLoggedAndCountedNotStored(t *testing.T) {

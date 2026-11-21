@@ -3,6 +3,7 @@ package owners_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -22,40 +23,44 @@ var (
 	t0  = time.Date(2031, 3, 14, 15, 9, 26, 0, time.UTC)
 	// testLinkKey: 32 bytes, no pattern any code names.
 	testLinkKey = []byte("fixture link key 7a6b5c4d3e2f109")
-	// Fixture ids that equal no constant the code or the fake names (the
-	// fake's Default is plugin 3, owner 1).
-	pA = mustertest.Plugin{Token: "mpl_tokenA_7f3c", PluginID: 12, PluginName: "meet-a", OwnerID: 7, OwnerLogin: "a@example.test", OwnerKind: "person", Capabilities: []string{"app", "tasks"}}
-	pB = mustertest.Plugin{Token: "mpl_tokenB_91e0", PluginID: 19, PluginName: "meet-b", OwnerID: 41, OwnerLogin: "b@example.test", OwnerKind: "person", Capabilities: []string{"app"}}
+	// Fixtures that equal no constant the code or the fake names (the fake's
+	// DefaultApp is plugin 3).
+	app = mustertest.App{Token: "mpl_server_7f3c91e0", PluginID: 12, PluginName: "meet-srv", Capabilities: []string{"app", "tasks"}}
+	ada = mustertest.Person{ID: 4093716825, Email: "ada.lovelace@example.test", DisplayName: "Ada L."}
+	bea = mustertest.Person{ID: 2718281828, Email: "bea.k@example.test", DisplayName: "Bea K."}
 )
 
-func setup(t *testing.T, ps ...mustertest.Plugin) (*mustertest.Fake, *store.Store, []*muster.Client, *bytes.Buffer) {
+func now() time.Time { return t0 }
+
+func setup(t *testing.T) (*mustertest.Fake, *store.Store, *muster.Client, *bytes.Buffer) {
 	t.Helper()
 	f := mustertest.New()
 	t.Cleanup(f.Close)
-	var cs []*muster.Client
-	for _, p := range ps {
-		f.AddPlugin(p)
-		c, err := muster.New(f.URL, p.Token)
-		if err != nil {
-			t.Fatal(err)
-		}
-		cs = append(cs, c)
+	f.Now = now
+	f.Install(app)
+	f.AddPerson(ada)
+	f.AddPerson(bea)
+	c, err := muster.New(f.URL, app.Token)
+	if err != nil {
+		t.Fatal(err)
 	}
 	st, err := store.Open(filepath.Join(t.TempDir(), "m.db"), testLinkKey)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	return f, st, cs, &bytes.Buffer{}
+	return f, st, c, &bytes.Buffer{}
 }
 
-func now() time.Time { return t0 }
-
-// mkMeeting makes an open meeting for p's owner through a session minted
-// through p's token, as the server would.
-func mkMeeting(t *testing.T, st *store.Store, p mustertest.Plugin) store.Created {
+// held gives p a session and an open meeting, as the server would after a
+// real redeem through the fake, and returns p's subject and the session.
+func held(t *testing.T, f *mustertest.Fake, st *store.Store, c *muster.Client, p mustertest.Person) (string, string, string) {
 	t.Helper()
-	tok, _, err := st.CreateSession(ctx, p.OwnerID, p.PluginID, t0)
+	red, err := c.Redeem(ctx, f.MintApp(app.PluginID, p.ID, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, _, err := st.CreateSession(ctx, red.Owner.Subject, red.Owner.DisplayName, t0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,159 +68,151 @@ func mkMeeting(t *testing.T, st *store.Store, p mustertest.Plugin) store.Created
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := st.ForSession(sess).CreateMeeting(ctx, t0)
+	m, err := st.ForSession(sess).CreateMeeting(ctx, t0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return c
+	return red.Owner.Subject, tok, m.Meeting.ID
 }
 
-// "Session revocation: a 401 from the fake /self deletes the owner's sessions
-// and ends their meetings within one poll. Red if: the poll's handler is a
-// no-op."
-func TestAPollThatMusterAnswers401DeletesTheOwnersSessionsAndEndsTheirMeetings(t *testing.T) {
-	f, st, cs, buf := setup(t, pA, pB)
-	reg, err := owners.Boot(ctx, cs, st, log.New(buf, "", 0), now)
+func state(t *testing.T, st *store.Store, subject, id string) string {
+	t.Helper()
+	m, err := st.ForSubject(subject).Meeting(ctx, id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sa, _, _ := st.CreateSession(ctx, pA.OwnerID, pA.PluginID, t0)
-	sb, _, _ := st.CreateSession(ctx, pB.OwnerID, pB.PluginID, t0)
-	ma := mkMeeting(t, st, pA)
-	mb := mkMeeting(t, st, pB)
-
-	reg.PollOnce(ctx) // both live: nothing changes
-	if _, err := st.LookupSession(ctx, sa, t0); err != nil {
-		t.Fatalf("a live token's session was dropped by a poll: %v", err)
-	}
-
-	f.Revoke(pA.Token)
-	reg.PollOnce(ctx)
-
-	if _, err := st.LookupSession(ctx, sa, t0); err != store.ErrNotFound {
-		t.Fatalf("revoked owner's session after one poll = %v, want deleted", err)
-	}
-	if m, _ := st.ForOwner(pA.OwnerID).Meeting(ctx, ma.Meeting.ID); m.State != "ended" {
-		t.Fatalf("revoked owner's meeting after one poll = %q, want ended", m.State)
-	}
-	if _, ok := reg.Lookup(pA.PluginID); ok {
-		t.Fatal("the revoked token is still in the registry")
-	}
-	// The other owner is untouched.
-	if _, err := st.LookupSession(ctx, sb, t0); err != nil {
-		t.Fatalf("the other owner's session = %v", err)
-	}
-	if m, _ := st.ForOwner(pB.OwnerID).Meeting(ctx, mb.Meeting.ID); m.State != "open" {
-		t.Fatalf("the other owner's meeting = %q", m.State)
-	}
-	if _, ok := reg.Lookup(pB.PluginID); !ok {
-		t.Fatal("the other token left the registry")
-	}
-	if strings.Contains(buf.String(), pA.Token) {
-		t.Fatal("the log names a token")
-	}
+	return m.State
 }
 
-// Only muster's 401 ends a token: a 5xx or no answer keeps it (the positive
-// control for "a poll revokes": the poll is not simply revoking on error).
-func TestAPollThatFailsOtherwiseKeepsTheToken(t *testing.T) {
-	f, st, cs, buf := setup(t, pA)
-	reg, err := owners.Boot(ctx, cs, st, log.New(buf, "", 0), now)
+func TestBootReadsTheServerApp(t *testing.T) {
+	_, st, c, buf := setup(t)
+	a, err := owners.Boot(ctx, c, st, log.New(buf, "", 0), now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sa, _, _ := st.CreateSession(ctx, pA.OwnerID, pA.PluginID, t0)
-	f.Off = true // 404: plugins off on that server
-	reg.PollOnce(ctx)
-	f.Close() // no answer at all
-	reg.PollOnce(ctx)
-	if _, ok := reg.Lookup(pA.PluginID); !ok {
-		t.Fatal("a token was dropped without muster's 401")
-	}
-	if _, err := st.LookupSession(ctx, sa, t0); err != nil {
-		t.Fatalf("a session was dropped without muster's 401: %v", err)
+	if a.PluginID != app.PluginID || a.Name != app.PluginName || !a.FilesTasks || !a.Live() {
+		t.Fatalf("Boot = plugin %d %q tasks %v live %v", a.PluginID, a.Name, a.FilesTasks, a.Live())
 	}
 }
 
-// Two tokens for one owner (two app tabs): revoking one deletes the sessions
-// minted through it but leaves the owner's meetings to the other.
-func TestRevokingOneOfAnOwnersTwoTokensKeepsTheirMeetings(t *testing.T) {
-	p2 := pB
-	p2.OwnerID, p2.OwnerLogin = pA.OwnerID, pA.OwnerLogin
-	f, st, cs, buf := setup(t, pA, p2)
-	reg, err := owners.Boot(ctx, cs, st, log.New(buf, "", 0), now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s1, _, _ := st.CreateSession(ctx, pA.OwnerID, pA.PluginID, t0)
-	s2, _, _ := st.CreateSession(ctx, pA.OwnerID, p2.PluginID, t0)
-	m := mkMeeting(t, st, pA)
-	f.Revoke(pA.Token)
-	reg.PollOnce(ctx)
-	if _, err := st.LookupSession(ctx, s1, t0); err != store.ErrNotFound {
-		t.Fatal("the revoked token's session survived")
-	}
-	if _, err := st.LookupSession(ctx, s2, t0); err != nil {
-		t.Fatal("the other token's session was dropped")
-	}
-	if got, _ := st.ForOwner(pA.OwnerID).Meeting(ctx, m.Meeting.ID); got.State != "open" {
-		t.Fatal("the owner's meeting ended while another token still serves them")
-	}
-}
-
-func TestBootRefusesATokenWithoutAppOrATeamsToken(t *testing.T) {
-	noApp := pA
-	noApp.Capabilities = []string{"messages", "viewer"}
-	team := pB
-	team.OwnerKind = "team"
-	for name, p := range map[string]mustertest.Plugin{"no app": noApp, "team": team} {
-		_, st, cs, buf := setup(t, p)
-		if _, err := owners.Boot(ctx, cs, st, log.New(buf, "", 0), now); err == nil {
+// fork 8: one server token. A person's own token (scope person), or a
+// server app without `app`, refuses to boot.
+func TestBootRefusesAPersonalTokenOrOneWithoutApp(t *testing.T) {
+	f, st, _, buf := setup(t)
+	personal := mustertest.Personal{Token: "mpl_personal_a81c", PluginID: 23, OwnerID: ada.ID, OwnerLogin: ada.Email, Capabilities: []string{"app"}}
+	f.AddPersonal(personal)
+	noApp := mustertest.App{Token: "mpl_server_noapp_33d0", PluginID: 29, PluginName: "no-app", Capabilities: []string{"tasks"}}
+	f.Install(noApp)
+	for name, tok := range map[string]string{"a personal token": personal.Token, "no app": noApp.Token} {
+		c, _ := muster.New(f.URL, tok)
+		if _, err := owners.Boot(ctx, c, st, log.New(buf, "", 0), now); err == nil {
 			t.Errorf("%s: Boot accepted it", name)
-		} else if strings.Contains(err.Error(), p.Token) {
-			t.Errorf("%s: the refusal names the token: %v", name, err)
+		} else if strings.Contains(err.Error(), tok) || strings.Contains(err.Error(), ada.Email) {
+			t.Errorf("%s: the refusal names the token or the owner: %v", name, err)
 		}
 	}
 }
 
-// A token revoked while the plugin was down: Boot leaves it out, and deletes
-// the sessions and ends the meetings it slept through.
-func TestBootAppliesARevocationThePluginSleptThrough(t *testing.T) {
-	f, st, cs, buf := setup(t, pA, pB)
-	sa, _, _ := st.CreateSession(ctx, pA.OwnerID, pA.PluginID, t0)
-	sb, _, _ := st.CreateSession(ctx, pB.OwnerID, pB.PluginID, t0)
-	ma := mkMeeting(t, st, pA)
-	f.Revoke(pA.Token)
-	reg, err := owners.Boot(ctx, cs, st, log.New(buf, "", 0), now)
-	if err != nil {
-		t.Fatal(err)
+// An uninstall the plugin slept through: Boot's /self gets 401, ends every
+// session and open meeting, and refuses to serve.
+func TestBootThatMusterAnswers401EndsEverything(t *testing.T) {
+	f, st, c, buf := setup(t)
+	sa, ta, ma := held(t, f, st, c, ada)
+	sb, tb, mb := held(t, f, st, c, bea)
+	f.Uninstall(app.PluginID)
+	if _, err := owners.Boot(ctx, c, st, log.New(buf, "", 0), now); !errors.Is(err, owners.ErrRevoked) {
+		t.Fatalf("Boot after an uninstall = %v, want ErrRevoked", err)
 	}
-	if _, ok := reg.Lookup(pA.PluginID); ok || reg.Live() != 1 {
-		t.Fatalf("Boot serves the revoked token (live %d)", reg.Live())
+	for name, tok := range map[string]string{"Ada": ta, "Bea": tb} {
+		if _, err := st.LookupSession(ctx, tok, t0); err != store.ErrNotFound {
+			t.Errorf("%s's session survived the boot: %v", name, err)
+		}
 	}
-	if _, err := st.LookupSession(ctx, sa, t0); err != store.ErrNotFound {
-		t.Fatal("a session of the revoked token survived the boot")
-	}
-	if _, err := st.LookupSession(ctx, sb, t0); err != nil {
-		t.Fatal("a live token's session was dropped at boot")
-	}
-	if m, _ := st.ForOwner(pA.OwnerID).Meeting(ctx, ma.Meeting.ID); m.State != "ended" {
-		t.Fatal("the revoked owner's meeting stayed open")
-	}
-	// Every token dead: nothing to serve.
-	f.Revoke(pB.Token)
-	if _, err := owners.Boot(ctx, cs, st, log.New(buf, "", 0), now); err == nil {
-		t.Fatal("Boot with no live token succeeded")
+	if state(t, st, sa, ma) != "ended" || state(t, st, sb, mb) != "ended" {
+		t.Fatal("an open meeting survived a boot whose /self was 401")
 	}
 }
 
-func TestBootStopsWhenMusterDoesNotAnswer(t *testing.T) {
+// 🔴 The boot reconcile: before serving anyone, Boot asks owners/check about
+// every subject it holds and ends each one muster no longer answers live,
+// so a Hide, a disable, or a reinstall's new subjects (fork 7) that the
+// plugin slept through is applied first. Bea, still live, is untouched.
+func TestBootEndsWhoMusterNoLongerAnswersLive(t *testing.T) {
+	f, st, c, buf := setup(t)
+	sa, ta, ma := held(t, f, st, c, ada)
+	sb, tb, mb := held(t, f, st, c, bea)
+	// A subject from a former install muster has never heard of.
+	gone := "Gq3Ws8Ed1Rf6Tg0Yh5Uj2k"
+	gtok, _, _ := st.CreateSession(ctx, gone, "Old", t0)
+	f.Hide(app.PluginID, ada.ID)
+
+	a, err := owners.Boot(ctx, c, st, log.New(buf, "", 0), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.LookupSession(ctx, ta, t0); err != store.ErrNotFound {
+		t.Errorf("boot: Ada's session survived (%v): the reconcile did not run", err)
+	}
+	if state(t, st, sa, ma) != "ended" {
+		t.Errorf("boot: Ada's meeting stayed open")
+	}
+	if _, err := st.LookupSession(ctx, gtok, t0); err != store.ErrNotFound {
+		t.Errorf("boot: a former install's subject kept its session")
+	}
+	if _, err := st.LookupSession(ctx, tb, t0); err != nil {
+		t.Errorf("boot: Bea's session was dropped: %v", err)
+	}
+	if state(t, st, sb, mb) != "open" {
+		t.Errorf("boot: Bea's meeting was ended")
+	}
+	if !a.Live() {
+		t.Fatal("one person's end revoked the app")
+	}
+	if strings.Contains(buf.String(), app.Token) || strings.Contains(buf.String(), sa) {
+		t.Fatalf("the log names the token or a subject: %s", buf)
+	}
+}
+
+// Boot will not serve on a reconcile it could not do.
+func TestBootStopsWhenOwnersCheckFailsOrMusterDoesNotAnswer(t *testing.T) {
+	f, st, c, buf := setup(t)
+	_, ta, _ := held(t, f, st, c, ada)
+	f.SetFailOwnersCheck(true)
+	if _, err := owners.Boot(ctx, c, st, log.New(buf, "", 0), now); err == nil {
+		t.Fatal("Boot with a failing owners/check succeeded")
+	}
+	if _, err := st.LookupSession(ctx, ta, t0); err != nil {
+		t.Fatalf("a failing owners/check ended a session: %v", err)
+	}
 	dead := httptest.NewServer(http.NotFoundHandler())
 	url := dead.URL
 	dead.Close()
-	c, _ := muster.New(url, pA.Token)
-	_, st, _, buf := setup(t)
-	if _, err := owners.Boot(ctx, []*muster.Client{c}, st, log.New(buf, "", 0), now); err == nil {
+	c2, _ := muster.New(url, app.Token)
+	if _, err := owners.Boot(ctx, c2, st, log.New(buf, "", 0), now); err == nil {
 		t.Fatal("Boot without muster succeeded")
+	}
+}
+
+// Rotate keeps the subjects (fork 7): the new token's owners/check still
+// answers Ada live. The old token is dead for good.
+func TestARotatedTokenEndsEverythingAndTheNewOneKeepsTheSubjects(t *testing.T) {
+	f, st, c, buf := setup(t)
+	a, err := owners.Boot(ctx, c, st, log.New(buf, "", 0), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sa, ta, _ := held(t, f, st, c, ada)
+	f.Rotate(app.PluginID, "mpl_server_rotated_4c2e")
+	a.PollOnce(ctx)
+	if a.Live() {
+		t.Fatal("the rotated-away token is still live")
+	}
+	if _, err := st.LookupSession(ctx, ta, t0); err != store.ErrNotFound {
+		t.Fatal("a session survived the rotation")
+	}
+	c2, _ := muster.New(f.URL, "mpl_server_rotated_4c2e")
+	live, err := c2.OwnersCheck(ctx, []string{sa})
+	if err != nil || !live[sa] {
+		t.Fatalf("the new token's owners/check = %v, %v: the subject was lost", live, err)
 	}
 }

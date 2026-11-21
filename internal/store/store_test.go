@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ZacxDev/muster-meetings/internal/store"
+	_ "modernc.org/sqlite"
 )
 
 // t0 is an arbitrary fixed instant, not a round number of anything the code
@@ -38,11 +40,17 @@ func open(t *testing.T) (*store.Store, string) {
 	return s, p
 }
 
-// owner returns a repository for ownerID built from a live session (minted
-// through plugin ownerID+100), as the server builds one.
-func owner(t *testing.T, s *store.Store, ownerID int64, at time.Time) *store.OwnerRepo {
+// Two subjects (22 base64url characters each), neither drawn by anything.
+const (
+	subA = "Aa1Bb2Cc3Dd4Ee5Ff6Gg7h"
+	subB = "Zz9Yy8Xx7Ww6Vv5Uu4Tt3s"
+)
+
+// owner returns a repository for subject built from a live session, as the
+// server builds one.
+func owner(t *testing.T, s *store.Store, subject string, at time.Time) *store.OwnerRepo {
 	t.Helper()
-	tok, _, err := s.CreateSession(ctx, ownerID, ownerID+100, at)
+	tok, _, err := s.CreateSession(ctx, subject, "fixture name", at)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,9 +61,9 @@ func owner(t *testing.T, s *store.Store, ownerID int64, at time.Time) *store.Own
 	return s.ForSession(sess)
 }
 
-func mk(t *testing.T, s *store.Store, ownerID int64, at time.Time) store.Created {
+func mk(t *testing.T, s *store.Store, subject string, at time.Time) store.Created {
 	t.Helper()
-	c, err := owner(t, s, ownerID, at).CreateMeeting(ctx, at)
+	c, err := owner(t, s, subject, at).CreateMeeting(ctx, at)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,14 +139,14 @@ func TestJoinCodeIsTheKeyedHMACOfTheMeetingID(t *testing.T) {
 // an open meeting answers its owner.
 func TestAnotherKeyGivesTheOwnerAnotherLink(t *testing.T) {
 	s, p := open(t)
-	c := mk(t, s, 7, t0)
+	c := mk(t, s, subA, t0)
 	s.Close()
 	other, err := store.Open(p, keyB)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer other.Close()
-	got, err := other.ForOwner(7).Link(ctx, c.Meeting.ID, t0)
+	got, err := other.ForSubject(subA).Link(ctx, c.Meeting.ID, t0)
 	if err != nil || got == c.JoinCode || !joinCodeShape.MatchString(got) {
 		t.Fatalf("under another key = %q, %v; want another well-formed code than %q", got, err, c.JoinCode)
 	}
@@ -149,7 +157,7 @@ func TestAnotherKeyGivesTheOwnerAnotherLink(t *testing.T) {
 // scan sees the row).
 func TestJoinCodeIsNeverStoredInClear(t *testing.T) {
 	s, p := open(t)
-	c := mk(t, s, 7, t0)
+	c := mk(t, s, subA, t0)
 	all := dbBytes(t, p)
 	if bytes.Contains(all, []byte(c.JoinCode)) {
 		t.Fatalf("the join code itself is in the database")
@@ -180,7 +188,7 @@ func TestSessionTokenAndMeetingIDShapes(t *testing.T) {
 
 func TestSessionTokenIsStoredOnlyHashed(t *testing.T) {
 	s, p := open(t)
-	tok, _, err := s.CreateSession(ctx, 7, 12, t0)
+	tok, _, err := s.CreateSession(ctx, subA, "fixture name", t0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +205,7 @@ func TestSessionTokenIsStoredOnlyHashed(t *testing.T) {
 
 func TestSessionLivesEightHoursBoundToItsOwner(t *testing.T) {
 	s, _ := open(t)
-	tok, exp, err := s.CreateSession(ctx, 7, 12, t0)
+	tok, exp, err := s.CreateSession(ctx, subA, "fixture name", t0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,8 +213,8 @@ func TestSessionLivesEightHoursBoundToItsOwner(t *testing.T) {
 		t.Fatalf("expires %s, want %s", exp, want)
 	}
 	got, err := s.LookupSession(ctx, tok, t0.Add(8*time.Hour-time.Millisecond))
-	if err != nil || got.OwnerID != 7 || got.PluginID != 12 || got.TokenSHA256 != store.Hash(tok) {
-		t.Fatalf("one ms before expiry = %+v, %v; want owner 7 plugin 12", got, err)
+	if err != nil || got.Subject != subA || got.TokenSHA256 != store.Hash(tok) {
+		t.Fatalf("one ms before expiry = %+v, %v; want subject %s", got, err, subA)
 	}
 	if _, err := s.LookupSession(ctx, tok, t0.Add(8*time.Hour)); err != store.ErrNotFound {
 		t.Fatalf("at expiry = %v, want ErrNotFound", err)
@@ -223,20 +231,20 @@ func TestSessionLivesEightHoursBoundToItsOwner(t *testing.T) {
 
 func TestCreatingAMeetingNeedsTheSessionStillLive(t *testing.T) {
 	s, _ := open(t)
-	if _, err := s.ForOwner(7).CreateMeeting(ctx, t0); err != store.ErrNoSession {
+	if _, err := s.ForSubject(subA).CreateMeeting(ctx, t0); err != store.ErrNoSession {
 		t.Fatalf("a repository with no session made a meeting: %v", err)
 	}
-	r := owner(t, s, 7, t0)
-	if _, err := s.RevokePlugin(ctx, 107, 7, true, t0); err != nil {
+	r := owner(t, s, subA, t0)
+	if _, err := s.EndSubjects(ctx, []string{subA}, t0); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := r.CreateMeeting(ctx, t0); err != store.ErrNoSession {
 		t.Fatalf("after the session was revoked = %v, want ErrNoSession", err)
 	}
-	if list, _, _ := s.ForOwner(7).ListMeetings(ctx, nil, 10); len(list) != 0 {
+	if list, _, _ := s.ForSubject(subA).ListMeetings(ctx, nil, 10); len(list) != 0 {
 		t.Fatalf("a revoked owner has %d meetings", len(list))
 	}
-	r = owner(t, s, 7, t0)
+	r = owner(t, s, subA, t0)
 	if _, err := r.CreateMeeting(ctx, t0.Add(8*time.Hour)); err != store.ErrNoSession {
 		t.Fatalf("with the session expired = %v, want ErrNoSession", err)
 	}
@@ -251,10 +259,10 @@ func TestCreatingAMeetingNeedsTheSessionStillLive(t *testing.T) {
 // B's. Red if: the repository's owner filter is removed."
 func TestOwnerRepoNeverReturnsAnotherOwnersMeetings(t *testing.T) {
 	s, _ := open(t)
-	a, b := s.ForOwner(7), s.ForOwner(41)
-	ma1 := mk(t, s, 7, t0)
-	mb := mk(t, s, 41, t0.Add(time.Minute))
-	ma2 := mk(t, s, 7, t0.Add(2*time.Minute))
+	a, b := s.ForSubject(subA), s.ForSubject(subB)
+	ma1 := mk(t, s, subA, t0)
+	mb := mk(t, s, subB, t0.Add(time.Minute))
+	ma2 := mk(t, s, subA, t0.Add(2*time.Minute))
 
 	list, next, err := a.ListMeetings(ctx, nil, 50)
 	if err != nil || next != nil || len(list) != 2 || list[0].ID != ma2.Meeting.ID || list[1].ID != ma1.Meeting.ID {
@@ -279,7 +287,7 @@ func TestOwnerRepoNeverReturnsAnotherOwnersMeetings(t *testing.T) {
 
 func TestListPagesNewestFirst(t *testing.T) {
 	s, _ := open(t)
-	r := owner(t, s, 7, t0)
+	r := owner(t, s, subA, t0)
 	var ids []string
 	for i := 0; i < 5; i++ {
 		c, err := r.CreateMeeting(ctx, t0.Add(time.Duration(i)*time.Second))
@@ -310,7 +318,7 @@ func TestListPagesNewestFirst(t *testing.T) {
 
 func TestANewMeetingIsOpenWithRecordAndAIOnAndLinkFor24Hours(t *testing.T) {
 	s, _ := open(t)
-	c := mk(t, s, 7, t0)
+	c := mk(t, s, subA, t0)
 	m := c.Meeting
 	if m.State != "open" || !m.Record || !m.AI || !m.CreatedAt.Equal(t0.Truncate(time.Millisecond)) ||
 		!m.LinkExpiresAt.Equal(m.CreatedAt.Add(24*time.Hour)) || m.StartedAt != nil || m.EndedAt != nil || m.Title != "" {
@@ -325,22 +333,22 @@ func TestANewMeetingIsOpenWithRecordAndAIOnAndLinkFor24Hours(t *testing.T) {
 
 func TestOnlyTheOwnerReadsTheLink(t *testing.T) {
 	s, _ := open(t)
-	c := mk(t, s, 7, t0)
-	if got, err := s.ForOwner(41).Link(ctx, c.Meeting.ID, t0); err != store.ErrNotFound || got != "" {
+	c := mk(t, s, subA, t0)
+	if got, err := s.ForSubject(subB).Link(ctx, c.Meeting.ID, t0); err != store.ErrNotFound || got != "" {
 		t.Fatalf("another owner reading the link = %q, %v; want ErrNotFound", got, err)
 	}
-	if got, err := s.ForOwner(7).Link(ctx, c.Meeting.ID, t0); err != nil || got != c.JoinCode {
+	if got, err := s.ForSubject(subA).Link(ctx, c.Meeting.ID, t0); err != nil || got != c.JoinCode {
 		t.Fatalf("positive control: the owner's link = %q, %v; want the code made with it", got, err)
 	}
 }
 
 func TestAnEndedMeetingHasNoLink(t *testing.T) {
 	s, _ := open(t)
-	c := mk(t, s, 7, t0)
-	if _, err := s.RevokePlugin(ctx, 107, 7, true, t0.Add(time.Minute)); err != nil {
+	c := mk(t, s, subA, t0)
+	if _, err := s.EndSubjects(ctx, []string{subA}, t0.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := s.ForOwner(7).Link(ctx, c.Meeting.ID, t0.Add(time.Minute)); err != store.ErrNoLink || got != "" {
+	if got, err := s.ForSubject(subA).Link(ctx, c.Meeting.ID, t0.Add(time.Minute)); err != store.ErrNoLink || got != "" {
 		t.Fatalf("an ended meeting's link = %q, %v; want ErrNoLink", got, err)
 	}
 }
@@ -348,8 +356,8 @@ func TestAnEndedMeetingHasNoLink(t *testing.T) {
 // At 24 h the link is gone even before the sweep ends the meeting.
 func TestTheLinkIsGoneAt24Hours(t *testing.T) {
 	s, _ := open(t)
-	c := mk(t, s, 7, t0)
-	r := s.ForOwner(7)
+	c := mk(t, s, subA, t0)
+	r := s.ForSubject(subA)
 	if got, err := r.Link(ctx, c.Meeting.ID, t0.Add(24*time.Hour-time.Millisecond)); err != nil || got != c.JoinCode {
 		t.Fatalf("one ms before 24 h = %q, %v; want the link", got, err)
 	}
@@ -358,80 +366,149 @@ func TestTheLinkIsGoneAt24Hours(t *testing.T) {
 	}
 }
 
-// ---- revocation and its scope ----
+// ---- ending: everyone, or some people ----
 
-func TestRevokePluginDeletesItsSessionsAndEndsTheOwnersOpenMeetings(t *testing.T) {
+// The store refuses to key a person on anything but a subject: a decimal
+// user id, an email cut to 22 characters (which the column's length CHECK
+// alone would let through), or nothing.
+func TestCreateSessionRefusesAnythingButASubject(t *testing.T) {
 	s, _ := open(t)
-	tA, _, _ := s.CreateSession(ctx, 7, 12, t0)
-	tB, _, _ := s.CreateSession(ctx, 41, 19, t0)
-	ma := mk(t, s, 7, t0)
-	mb := mk(t, s, 41, t0)
-	res, err := s.RevokePlugin(ctx, 12, 7, true, t0.Add(time.Minute))
-	if err != nil || res.Sessions != 1 || res.Meetings != 1 {
-		t.Fatalf("RevokePlugin = %+v, %v", res, err)
+	for _, bad := range []string{"4093716825", "ada.lovelace@example.t", "", subA[:21], subA + "x"} {
+		if _, _, err := s.CreateSession(ctx, bad, "fixture name", t0); err != store.ErrBadSubject {
+			t.Errorf("CreateSession(%q) = %v, want ErrBadSubject", bad, err)
+		}
+	}
+	if n, _ := s.CountSessions(ctx); n != 0 {
+		t.Fatalf("%d sessions made for non-subjects", n)
+	}
+	if _, _, err := s.CreateSession(ctx, subA, "fixture name", t0); err != nil {
+		t.Fatalf("positive control: a subject = %v", err)
+	}
+}
+
+// One person's end touches only that person's rows.
+func TestEndSubjectsEndsOnlyThoseSubjects(t *testing.T) {
+	s, _ := open(t)
+	tA, _, _ := s.CreateSession(ctx, subA, "fixture name", t0)
+	tB, _, _ := s.CreateSession(ctx, subB, "fixture name", t0)
+	ma := mk(t, s, subA, t0)
+	mb := mk(t, s, subB, t0)
+	res, err := s.EndSubjects(ctx, []string{subA}, t0.Add(time.Minute))
+	// subA holds two sessions (tA and mk's own) and one meeting.
+	if err != nil || res.Sessions != 2 || res.Meetings != 1 {
+		t.Fatalf("EndSubjects = %+v, %v; want 2 sessions, 1 meeting", res, err)
 	}
 	if _, err := s.LookupSession(ctx, tA, t0.Add(time.Minute)); err != store.ErrNotFound {
-		t.Fatalf("A's session after revoke = %v", err)
+		t.Fatalf("A's session after A's end = %v", err)
 	}
-	if m, _ := s.ForOwner(7).Meeting(ctx, ma.Meeting.ID); m.State != "ended" || m.EndedAt == nil {
-		t.Fatalf("A's meeting after revoke = %+v", m)
+	if m, _ := s.ForSubject(subA).Meeting(ctx, ma.Meeting.ID); m.State != "ended" || m.EndedAt == nil {
+		t.Fatalf("A's meeting after A's end = %+v", m)
 	}
-	// B, served by another token, is untouched.
 	if _, err := s.LookupSession(ctx, tB, t0.Add(time.Minute)); err != nil {
-		t.Fatalf("B's session after A's revoke = %v", err)
+		t.Fatalf("B's session after A's end = %v", err)
 	}
-	if m, _ := s.ForOwner(41).Meeting(ctx, mb.Meeting.ID); m.State != "open" {
-		t.Fatalf("B's meeting after A's revoke = %+v", m)
+	if m, _ := s.ForSubject(subB).Meeting(ctx, mb.Meeting.ID); m.State != "open" {
+		t.Fatalf("B's meeting after A's end = %+v", m)
+	}
+}
+
+func TestEndAllEndsEverySessionAndMeeting(t *testing.T) {
+	s, _ := open(t)
+	mk(t, s, subA, t0)
+	mb := mk(t, s, subB, t0)
+	res, err := s.EndAll(ctx, "fixture", t0.Add(time.Minute))
+	if err != nil || res.Sessions != 2 || res.Meetings != 2 {
+		t.Fatalf("EndAll = %+v, %v", res, err)
+	}
+	if n, _ := s.CountSessions(ctx); n != 0 {
+		t.Fatalf("%d sessions after EndAll", n)
+	}
+	if m, _ := s.ForSubject(subB).Meeting(ctx, mb.Meeting.ID); m.State != "ended" {
+		t.Fatalf("B's meeting after EndAll = %+v", m)
 	}
 }
 
 func TestSweepEndsAMeetingAt24HoursAndNotBefore(t *testing.T) {
 	s, _ := open(t)
-	c := mk(t, s, 7, t0)
+	c := mk(t, s, subA, t0)
 	if n, err := s.Sweep(ctx, t0.Add(24*time.Hour-time.Millisecond)); err != nil || n != 0 {
 		t.Fatalf("sweep one ms short = %d, %v", n, err)
 	}
 	if n, err := s.Sweep(ctx, t0.Add(24*time.Hour)); err != nil || n != 1 {
 		t.Fatalf("sweep at 24 h = %d, %v", n, err)
 	}
-	if m, _ := s.ForOwner(7).Meeting(ctx, c.Meeting.ID); m.State != "ended" {
+	if m, _ := s.ForSubject(subA).Meeting(ctx, c.Meeting.ID); m.State != "ended" {
 		t.Fatalf("after sweep = %+v", m)
 	}
 }
 
-func TestReconcileLiveDropsWhatNoLiveTokenServes(t *testing.T) {
+// HeldSubjects is who owners/check is asked about: a live session, or an
+// open meeting, each alone; never an expired session or an ended meeting.
+func TestHeldSubjectsAreLiveSessionsAndOpenMeetings(t *testing.T) {
 	s, _ := open(t)
-	dead, _, _ := s.CreateSession(ctx, 7, 12, t0)
-	live, _, _ := s.CreateSession(ctx, 41, 19, t0)
-	ma := mk(t, s, 7, t0)
-	mb := mk(t, s, 41, t0)
-	res, err := s.ReconcileLive(ctx, []int64{19, 141}, []int64{41}, t0)
-	if err != nil || res.Sessions != 2 || res.Meetings != 1 {
-		t.Fatalf("ReconcileLive = %+v, %v", res, err)
+	const (
+		subC = "Cc3Dd4Ee5Ff6Gg7Hh8Ii9j" // an open meeting, its session expired
+		subD = "Dd4Ee5Ff6Gg7Hh8Ii9Jj0k" // an ended meeting, its session expired
+	)
+	s.CreateSession(ctx, subA, "fixture name", t0.Add(2*time.Hour)) // a live session only
+	mk(t, s, subC, t0)
+	md := mk(t, s, subD, t0)
+	if _, err := s.EndSubjects(ctx, []string{subD}, t0); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := s.LookupSession(ctx, dead, t0); err != store.ErrNotFound {
-		t.Fatal("a session of a dead token survived")
+	at := t0.Add(8*time.Hour + time.Minute) // C's and D's sessions expired, A's not
+	got, err := s.HeldSubjects(ctx, at)
+	if err != nil || strings.Join(got, ",") != subA+","+subC {
+		t.Fatalf("HeldSubjects = %v, %v; want [%s %s]", got, err, subA, subC)
 	}
-	if _, err := s.LookupSession(ctx, live, t0); err != nil {
-		t.Fatal("a session of a live token was dropped")
+	if m, _ := s.ForSubject(subD).Meeting(ctx, md.Meeting.ID); m.State != "ended" {
+		t.Fatal("fixture: D's meeting is not ended")
 	}
-	if m, _ := s.ForOwner(7).Meeting(ctx, ma.Meeting.ID); m.State != "ended" {
-		t.Fatal("an unserved owner's meeting stayed open")
+}
+
+// A phase-2a database holds owners and meetings keyed on muster user ids:
+// migration 2 refuses it rather than drop them. An empty one migrates.
+func TestA2aDatabaseWithDataIsRefusedAndAnEmptyOneMigrates(t *testing.T) {
+	dir := t.TempDir()
+	mk2a := func(name string, rows bool) string {
+		p := filepath.Join(dir, name)
+		db, err := sql.Open("sqlite", "file:"+p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		if _, err := db.Exec(store.Migration1ForTest + `; PRAGMA user_version = 1`); err != nil {
+			t.Fatal(err)
+		}
+		if rows {
+			if _, err := db.Exec(`INSERT INTO owners (owner_id, owner_login, token_ref, updated_at) VALUES (4093716825, 'ada.lovelace@example.test', 12, 1)`); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return p
 	}
-	if m, _ := s.ForOwner(41).Meeting(ctx, mb.Meeting.ID); m.State != "open" {
-		t.Fatal("a served owner's meeting was ended")
+	if _, err := store.Open(mk2a("held.db", true), keyA); err != store.ErrNeedsSubjectMap {
+		t.Fatalf("a 2a database with an owner = %v, want ErrNeedsSubjectMap", err)
+	}
+	s, err := store.Open(mk2a("empty.db", false), keyA)
+	if err != nil {
+		t.Fatalf("an empty 2a database = %v", err)
+	}
+	defer s.Close()
+	if _, _, err := s.CreateSession(ctx, subA, "fixture name", t0); err != nil {
+		t.Fatalf("after migrating: %v", err)
 	}
 }
 
 func TestReopenKeepsDataAndRefusesANewerSchema(t *testing.T) {
 	s, p := open(t)
-	c := mk(t, s, 7, t0)
+	c := mk(t, s, subA, t0)
 	s.Close()
 	s2, err := store.Open(p, keyA)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m, err := s2.ForOwner(7).Meeting(ctx, c.Meeting.ID); err != nil || m.ID != c.Meeting.ID {
+	if m, err := s2.ForSubject(subA).Meeting(ctx, c.Meeting.ID); err != nil || m.ID != c.Meeting.ID {
 		t.Fatalf("after reopen = %+v, %v", m, err)
 	}
 	if err := s2.SetUserVersionForTest(99); err != nil {

@@ -2,13 +2,14 @@
 // (muster's `app` capability) where the owner makes a meeting and shares its
 // link. This build is phase 2a of docs/design/meetings.md in muster: the
 // hand-off and owner sessions, the /self poll, the database, the meetings
-// list and New meeting with its link. Calls (LiveKit), the guest page and the
-// lobby come next.
+// list and New meeting with its link, as one server-installed app (core PR
+// 1h): an admin installs it once, and every person on the muster gets the
+// tab. Calls (LiveKit), the guest page and the lobby come next.
 //
 // Configuration is read from the environment only (see .env.example):
 //
 //	MUSTER_URL                where the plugin calls muster (https, or http to localhost)
-//	MUSTER_PLUGIN_TOKEN       the mpl_… token(s) minted on muster's /plugins with App tab checked, comma-separated
+//	MUSTER_PLUGIN_TOKEN       the ONE mpl_… token an admin's install on muster's /admin/apps showed
 //	MUSTER_ORIGIN             muster's origin as browsers see it: the only page that may frame the app
 //	MEETINGS_PUBLIC_URL       this plugin's own origin, e.g. https://meet.example.test
 //	MEETINGS_LINK_KEY         32 random bytes, base64: every meeting's link code is derived from it
@@ -49,7 +50,7 @@ func main() {
 // Config is everything the plugin reads from its environment.
 type Config struct {
 	URL            string
-	Tokens         []string
+	Token          string
 	MusterOrigin   string
 	PublicURL      string
 	LinkKey        []byte
@@ -65,19 +66,18 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	c := Config{URL: base, Listen: ":8080", InternalListen: ":8081", StateDir: "./state"}
-	for _, t := range strings.Split(getenv("MUSTER_PLUGIN_TOKEN"), ",") {
-		if t = strings.TrimSpace(t); t != "" {
-			c.Tokens = append(c.Tokens, t)
-		}
+	// Exactly one server token (fork 8). A comma is 2a's list of per-person
+	// tokens: refused, never split, so no list is ever half-served.
+	c.Token = strings.TrimSpace(getenv("MUSTER_PLUGIN_TOKEN"))
+	if c.Token == "" {
+		return Config{}, errors.New("MUSTER_PLUGIN_TOKEN is not set: an admin installs Meetings on muster's /admin/apps, which shows the token once")
 	}
-	if len(c.Tokens) == 0 {
-		return Config{}, errors.New("MUSTER_PLUGIN_TOKEN is not set (mint one on muster's /plugins page with App tab checked)")
+	if strings.Contains(c.Token, ",") {
+		// Never echo it: a mistaken value may still be a secret.
+		return Config{}, errors.New("MUSTER_PLUGIN_TOKEN holds a comma: it takes exactly one server-installed app's token, not a list (its value is not shown)")
 	}
-	for i, t := range c.Tokens {
-		if !strings.HasPrefix(t, muster.TokenPrefix) || len(t) <= len(muster.TokenPrefix) {
-			// Never echo it: a mistaken value may still be a secret.
-			return Config{}, fmt.Errorf("MUSTER_PLUGIN_TOKEN: token %d of %d does not start with %q (its value is not shown)", i+1, len(c.Tokens), muster.TokenPrefix)
-		}
+	if !strings.HasPrefix(c.Token, muster.TokenPrefix) || len(c.Token) <= len(muster.TokenPrefix) {
+		return Config{}, fmt.Errorf("MUSTER_PLUGIN_TOKEN does not start with %q (its value is not shown)", muster.TokenPrefix)
 	}
 	if c.MusterOrigin, err = CheckOrigin("MUSTER_ORIGIN", getenv("MUSTER_ORIGIN")); err != nil {
 		return Config{}, err
@@ -130,11 +130,9 @@ func run(logger *log.Logger) error {
 	if err != nil {
 		return err
 	}
-	clients := make([]*muster.Client, len(cfg.Tokens))
-	for i, t := range cfg.Tokens {
-		if clients[i], err = muster.New(cfg.URL, t); err != nil {
-			return err
-		}
+	client, err := muster.New(cfg.URL, cfg.Token)
+	if err != nil {
+		return err
 	}
 	st, err := store.Open(filepath.Join(cfg.StateDir, "meetings.db"), cfg.LinkKey)
 	if err != nil {
@@ -144,20 +142,20 @@ func run(logger *log.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	bootCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	reg, err := owners.Boot(bootCtx, clients, st, logger, time.Now)
+	app, err := owners.Boot(bootCtx, client, st, logger, time.Now)
 	cancel()
 	if err != nil {
 		return err
 	}
-	logger.Print(startupLine(cfg, reg.Live()))
+	logger.Print(startupLine(cfg, app.Name, app.PluginID, app.FilesTasks))
 
-	go reg.Run(ctx, owners.PollInterval)
+	go app.Run(ctx, owners.PollInterval)
 	go sweep(ctx, st, logger)
 
-	pub := &http.Server{Addr: cfg.Listen, Handler: server.New(server.Config{PublicURL: cfg.PublicURL, MusterOrigin: cfg.MusterOrigin, Log: logger}, st, reg),
+	pub := &http.Server{Addr: cfg.Listen, Handler: server.New(server.Config{PublicURL: cfg.PublicURL, MusterOrigin: cfg.MusterOrigin, Log: logger}, st, app),
 		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 32 << 10,
 		BaseContext: func(net.Listener) context.Context { return ctx }}
-	internal := &http.Server{Addr: cfg.InternalListen, Handler: server.Internal(st, reg), ReadHeaderTimeout: 5 * time.Second}
+	internal := &http.Server{Addr: cfg.InternalListen, Handler: server.Internal(st, app), ReadHeaderTimeout: 5 * time.Second}
 	errc := make(chan error, 2)
 	go func() { errc <- pub.ListenAndServe() }()
 	go func() { errc <- internal.ListenAndServe() }()
@@ -196,7 +194,11 @@ func sweep(ctx context.Context, st *store.Store, logger *log.Logger) {
 
 // startupLine is the first line the plugin logs. It names muster by scheme and
 // host only (muster.Redact): whatever else the address held could be the token.
-func startupLine(cfg Config, live int) string {
-	return fmt.Sprintf("muster-meetings: talking to %s for %d owner token(s); serving %s on %s (internal %s), framed by %s",
-		muster.Redact(cfg.URL), live, cfg.PublicURL, cfg.Listen, cfg.InternalListen, cfg.MusterOrigin)
+func startupLine(cfg Config, name string, pluginID int64, tasks bool) string {
+	files := "without"
+	if tasks {
+		files = "with"
+	}
+	return fmt.Sprintf("muster-meetings: talking to %s as server app %q (plugin %d, %s Files tasks); serving %s on %s (internal %s), framed by %s",
+		muster.Redact(cfg.URL), name, pluginID, files, cfg.PublicURL, cfg.Listen, cfg.InternalListen, cfg.MusterOrigin)
 }

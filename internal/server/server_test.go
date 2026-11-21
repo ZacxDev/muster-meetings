@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -26,16 +27,20 @@ import (
 )
 
 // Fixtures: ids, hosts and origins that equal no constant the code or the
-// fake names (the fake's Default is plugin 3, owner 1).
+// fake names (the fake's DefaultApp is plugin 3). The people's user ids,
+// emails and display names are pairwise distinct, and the ids are long
+// enough that no timestamp or counter could hold one by chance.
 const (
 	publicURL    = "https://meet.example.test"
 	musterOrigin = "https://hub.example.test"
 )
 
 var (
-	pA = mustertest.Plugin{Token: "mpl_tokenA_7f3c", PluginID: 12, PluginName: "meet-a", OwnerID: 7, OwnerLogin: "a@example.test", OwnerKind: "person", Capabilities: []string{"app", "tasks"}}
-	pB = mustertest.Plugin{Token: "mpl_tokenB_91e0", PluginID: 19, PluginName: "meet-b", OwnerID: 41, OwnerLogin: "b@example.test", OwnerKind: "person", Capabilities: []string{"app"}}
-	t0 = time.Date(2031, 3, 14, 15, 9, 26, 0, time.UTC)
+	app   = mustertest.App{Token: "mpl_server_7f3c91e0", PluginID: 12, PluginName: "meet-srv", Capabilities: []string{"app", "tasks"}}
+	other = mustertest.App{Token: "mpl_server_other_5d21", PluginID: 19, PluginName: "meet-other", Capabilities: []string{"app"}}
+	ada   = mustertest.Person{ID: 4093716825, Email: "ada.lovelace@example.test", DisplayName: "Ada L."}
+	bea   = mustertest.Person{ID: 2718281828, Email: "bea.k@example.test", DisplayName: "Bea K."}
+	t0    = time.Date(2031, 3, 14, 15, 9, 26, 0, time.UTC)
 	// testLinkKey: 32 bytes, no pattern any code names.
 	testLinkKey = []byte("fixture link key 0f9e1d2c3b4a596")
 )
@@ -53,13 +58,14 @@ func (c *clock) Add(d time.Duration) {
 }
 
 type env struct {
-	t     *testing.T
-	fake  *mustertest.Fake
-	store *store.Store
-	reg   *owners.Registry
-	srv   *httptest.Server
-	clock *clock
-	log   *syncBuf
+	t      *testing.T
+	fake   *mustertest.Fake
+	store  *store.Store
+	dbPath string
+	app    *owners.App
+	srv    *httptest.Server
+	clock  *clock
+	log    *syncBuf
 }
 
 type syncBuf struct {
@@ -75,26 +81,26 @@ func newEnv(t *testing.T) *env {
 	e := &env{t: t, fake: mustertest.New(), clock: &clock{t: t0}, log: &syncBuf{}}
 	t.Cleanup(e.fake.Close)
 	e.fake.Now = e.clock.Now
-	var cs []*muster.Client
-	for _, p := range []mustertest.Plugin{pA, pB} {
-		e.fake.AddPlugin(p)
-		c, err := muster.New(e.fake.URL, p.Token)
-		if err != nil {
-			t.Fatal(err)
-		}
-		cs = append(cs, c)
+	e.fake.Install(app)
+	e.fake.Install(other)
+	e.fake.AddPerson(ada)
+	e.fake.AddPerson(bea)
+	c, err := muster.New(e.fake.URL, app.Token)
+	if err != nil {
+		t.Fatal(err)
 	}
-	st, err := store.Open(filepath.Join(t.TempDir(), "meetings.db"), testLinkKey)
+	e.dbPath = filepath.Join(t.TempDir(), "meetings.db")
+	st, err := store.Open(e.dbPath, testLinkKey)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
 	e.store = st
 	lg := log.New(e.log, "", 0)
-	if e.reg, err = owners.Boot(context.Background(), cs, st, lg, e.clock.Now); err != nil {
+	if e.app, err = owners.Boot(context.Background(), c, st, lg, e.clock.Now); err != nil {
 		t.Fatal(err)
 	}
-	h := server.New(server.Config{PublicURL: publicURL, MusterOrigin: musterOrigin, Now: e.clock.Now, Log: lg}, st, e.reg)
+	h := server.New(server.Config{PublicURL: publicURL, MusterOrigin: musterOrigin, Now: e.clock.Now, Log: lg}, st, e.app)
 	e.srv = httptest.NewServer(h)
 	t.Cleanup(e.srv.Close)
 	return e
@@ -123,7 +129,7 @@ func (e *env) do(method, path, bearer string, body any, hdr ...string) (*http.Re
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
 	for i := 0; i+1 < len(hdr); i += 2 {
-		req.Header.Set(hdr[i], hdr[i+1])
+		req.Header.Add(hdr[i], hdr[i+1])
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -134,24 +140,35 @@ func (e *env) do(method, path, bearer string, body any, hdr ...string) (*http.Re
 	return resp, raw
 }
 
+// inFrame is what a current browser sends when muster's page frames /enter.
+var inFrame = []string{"Sec-Fetch-Dest", "iframe", "Sec-Fetch-Mode", "navigate", "Sec-Fetch-Site", "same-site"}
+
+// framed is GET path as muster's frame loads it.
+func (e *env) framed(path string) (*http.Response, []byte) {
+	e.t.Helper()
+	return e.do("GET", path, "", nil, inFrame...)
+}
+
 func enterPath(code string, pluginID int64) string {
 	return "/enter?muster_code=" + url.QueryEscape(code) + "&muster_plugin=" + strconv.FormatInt(pluginID, 10)
 }
 
 var sessionAttr = regexp.MustCompile(`data-session="(mmo_[A-Za-z0-9_-]{43})"`)
 
-// enter opens the app as muster's frame does, and returns the session.
-func (e *env) enter(p mustertest.Plugin) string {
+// enter opens the app as muster's frame does, for p, and returns the
+// session.
+func (e *env) enter(p mustertest.Person) string {
 	e.t.Helper()
-	resp, body := e.do("GET", enterPath(e.fake.MintApp(p.PluginID, ""), p.PluginID), "", nil)
+	resp, body := e.framed(enterPath(e.fake.MintApp(app.PluginID, p.ID, ""), app.PluginID))
 	m := sessionAttr.FindSubmatch(body)
 	if resp.StatusCode != 200 || m == nil {
-		e.t.Fatalf("enter as plugin %d = %d %s", p.PluginID, resp.StatusCode, body)
+		e.t.Fatalf("enter as %s = %d %s", p.DisplayName, resp.StatusCode, body)
 	}
 	return string(m[1])
 }
 
-// sessions is the number of owner sessions in the database.
+func (e *env) subject(p mustertest.Person) string { return e.fake.Subject(app.PluginID, p.ID) }
+
 type created struct {
 	ID      string `json:"id"`
 	JoinURL string `json:"join_url"`
@@ -177,11 +194,24 @@ func (e *env) sessions() int {
 	return n
 }
 
+// meetingState is the state of the person's meeting id; subject is theirs
+// (taken before an uninstall, which deletes the fake's grants).
+func (e *env) meetingState(subject, id string) string {
+	e.t.Helper()
+	m, err := e.store.ForSubject(subject).Meeting(context.Background(), id)
+	if err != nil {
+		e.t.Fatalf("meeting %s of %s: %v", id, subject, err)
+	}
+	return m.State
+}
+
+func (e *env) redeems() int { return e.fake.CountCalls("POST", "/plugin/v1/handoffs/redeem") }
+
 // ---- /enter: the redeem ----
 
 func TestEnterRedeemsAnAppCodeAndRendersTheAppWithABearerSession(t *testing.T) {
 	e := newEnv(t)
-	resp, body := e.do("GET", enterPath(e.fake.MintApp(pB.PluginID, ""), pB.PluginID), "", nil)
+	resp, body := e.framed(enterPath(e.fake.MintApp(app.PluginID, bea.ID, ""), app.PluginID))
 	if resp.StatusCode != 200 {
 		t.Fatalf("enter = %d %s", resp.StatusCode, body)
 	}
@@ -189,18 +219,211 @@ func TestEnterRedeemsAnAppCodeAndRendersTheAppWithABearerSession(t *testing.T) {
 	if m == nil {
 		t.Fatalf("no session in the page: %s", body)
 	}
-	// The redeem went to muster with the token muster_plugin names.
-	if calls := e.fake.Calls(); calls[len(calls)-1] != "POST /plugin/v1/handoffs/redeem "+pB.Token {
+	// The redeem went to muster with the one server token.
+	if calls := e.fake.Calls(); calls[len(calls)-1] != "POST /plugin/v1/handoffs/redeem "+app.Token {
 		t.Fatalf("last muster call = %q", calls[len(calls)-1])
 	}
-	// The session is B's: it lists B's meetings, and makes them as B.
+	// The session is Bea's: her subject's meetings, made as her.
 	resp, raw := e.do("POST", "/api/meetings", string(m[1]), map[string]any{})
 	if resp.StatusCode != 201 {
 		t.Fatalf("create = %d %s", resp.StatusCode, raw)
 	}
-	list, _, _ := e.store.ForOwner(pB.OwnerID).ListMeetings(context.Background(), nil, 10)
+	list, _, _ := e.store.ForSubject(e.subject(bea)).ListMeetings(context.Background(), nil, 10)
 	if len(list) != 1 {
-		t.Fatalf("owner %d has %d meetings, want the one just made", pB.OwnerID, len(list))
+		t.Fatalf("Bea has %d meetings, want the one just made", len(list))
+	}
+}
+
+// 🔴 The sign-in CSRF gate (design: "/enter refuses unless Sec-Fetch-Dest:
+// iframe"). With one server token, a link to /enter carrying someone else's
+// unspent code would sign its opener in as that someone. Every load that is
+// not a frame's is refused BEFORE muster is asked, so the code is not spent:
+// the same code then still works from the frame it was minted for.
+func TestEnterRefusesUnlessLoadedInAFrameBeforeAnyRedeem(t *testing.T) {
+	cases := []struct {
+		name string
+		hdr  []string
+		msg  string
+	}{
+		{"Sec-Fetch-Dest document", []string{"Sec-Fetch-Dest", "document", "Sec-Fetch-Mode", "navigate", "Sec-Fetch-Site", "cross-site"}, server.EnterNotFramed},
+		{"Sec-Fetch-Dest empty", []string{"Sec-Fetch-Dest", "empty", "Sec-Fetch-Mode", "cors", "Sec-Fetch-Site", "cross-site"}, server.EnterNotFramed},
+		{"Sec-Fetch-Dest frame", []string{"Sec-Fetch-Dest", "frame", "Sec-Fetch-Site", "cross-site"}, server.EnterNotFramed},
+		{"Sec-Fetch-Dest IFRAME", []string{"Sec-Fetch-Dest", "IFRAME", "Sec-Fetch-Site", "cross-site"}, server.EnterNotFramed},
+		{"Sec-Fetch-Dest twice", []string{"Sec-Fetch-Dest", "iframe", "Sec-Fetch-Dest", "document", "Sec-Fetch-Site", "cross-site"}, server.EnterNotFramed},
+		{"no Sec-Fetch-Dest beside other Sec-Fetch headers", []string{"Sec-Fetch-Mode", "navigate", "Sec-Fetch-Site", "cross-site"}, server.EnterNotFramed},
+		{"no Sec-Fetch at all", nil, server.EnterOldBrowser},
+	}
+	for _, c := range cases {
+		e := newEnv(t)
+		code := e.fake.MintApp(app.PluginID, ada.ID, "")
+		resp, body := e.do("GET", enterPath(code, app.PluginID), "", nil, c.hdr...)
+		if resp.StatusCode == 200 || sessionAttr.Match(body) {
+			t.Errorf("%s: enter = %d (sessions %d): a session was made outside a frame", c.name, resp.StatusCode, e.sessions())
+			continue
+		}
+		if n := e.redeems(); n != 0 {
+			t.Errorf("%s: refused, but made %d redeem call: the code was spent", c.name, n)
+		}
+		if resp.StatusCode != 403 || !strings.Contains(string(body), c.msg) {
+			t.Errorf("%s: the page says %d %s; want 403 %q", c.name, resp.StatusCode, body, c.msg)
+		}
+		if directive(resp.Header.Get("Content-Security-Policy"), "frame-ancestors") != musterOrigin {
+			t.Errorf("%s: the refusal lost frame-ancestors", c.name)
+		}
+		// Positive control: the same code, untouched, opens the app from
+		// muster's frame.
+		if resp, body := e.framed(enterPath(code, app.PluginID)); resp.StatusCode != 200 || !sessionAttr.Match(body) {
+			t.Errorf("%s: the frame's own load of the same code = %d %s", c.name, resp.StatusCode, body)
+		}
+	}
+}
+
+// 🔴 "/enter accepts only purpose app, an app target and scope: server with
+// an owner.subject". Each fixture breaks exactly one, so each check is
+// reached on its own.
+func TestEnterRefusesAnythingButAServerAppCodeNamingASubject(t *testing.T) {
+	appT := map[string]any{"app": map[string]any{}}
+	mirror := map[string]any{"mirror": map[string]any{"host": "ws", "session": "main", "window": "@3"}}
+	both := map[string]any{"app": map[string]any{}, "mirror": map[string]any{"host": "ws", "session": "main", "window": "@3"}}
+	subj := "Zq9wE1rT5yU3iO7pA2sD4f" // 22 base64url characters, not drawn by the fake
+	owner := map[string]any{"subject": subj, "display_name": "Cy"}
+	cases := map[string]map[string]any{
+		"purpose view, target app":   {"owner": owner, "scope": "server", "purpose": "view", "target": appT},
+		"purpose empty, target app":  {"owner": owner, "scope": "server", "purpose": "", "target": appT},
+		"purpose app, target mirror": {"owner": owner, "scope": "server", "purpose": "app", "target": mirror},
+		"purpose app, both targets":  {"owner": owner, "scope": "server", "purpose": "app", "target": both},
+		"purpose app, no target":     {"owner": owner, "scope": "server", "purpose": "app", "target": map[string]any{}},
+		"scope person":               {"owner": owner, "scope": "person", "purpose": "app", "target": appT},
+		"no scope":                   {"owner": owner, "purpose": "app", "target": appT},
+		// A personal token's answer: a user id, no subject.
+		"a personal answer": {"owner_id": ada.ID, "purpose": "app", "target": appT},
+		"subject missing":   {"owner": map[string]any{"display_name": "Cy"}, "scope": "server", "purpose": "app", "target": appT},
+		"subject a user id": {"owner": map[string]any{"subject": strconv.FormatInt(ada.ID, 10), "display_name": "Cy"}, "scope": "server", "purpose": "app", "target": appT},
+		"subject 21 chars":  {"owner": map[string]any{"subject": subj[:21], "display_name": "Cy"}, "scope": "server", "purpose": "app", "target": appT},
+		"subject an email":  {"owner": map[string]any{"subject": "ada.lovelace@example.t", "display_name": "Cy"}, "scope": "server", "purpose": "app", "target": appT},
+	}
+	for name, answer := range cases {
+		e := newEnv(t)
+		resp, body := e.framed(enterPath(e.fake.MintRaw(app.PluginID, answer), app.PluginID))
+		if resp.StatusCode != 403 || !strings.Contains(string(body), server.EnterWrongKind) {
+			t.Errorf("%s: enter = %d %s; want 403 %q", name, resp.StatusCode, body, server.EnterWrongKind)
+		}
+		if sessionAttr.Match(body) || e.sessions() != 0 {
+			t.Errorf("%s: a session was made (%d)", name, e.sessions())
+		}
+	}
+	// Positive control: the same harness with the right answer admits.
+	e := newEnv(t)
+	resp, body := e.framed(enterPath(e.fake.MintRaw(app.PluginID, map[string]any{"owner": owner, "scope": "server", "purpose": "app", "target": appT}), app.PluginID))
+	if resp.StatusCode != 200 || !sessionAttr.Match(body) || e.sessions() != 1 {
+		t.Fatalf("positive control: enter = %d, sessions %d", resp.StatusCode, e.sessions())
+	}
+}
+
+// muster_plugin no longer picks a token: it must be this app's own id, and a
+// code redeems only with the app it was minted for.
+func TestEnterRedeemsOnlyForThisServerApp(t *testing.T) {
+	e := newEnv(t)
+	// Another plugin id in the frame's URL never reaches muster, whatever
+	// the code.
+	resp, body := e.framed(enterPath(e.fake.MintApp(other.PluginID, ada.ID, ""), other.PluginID))
+	if resp.StatusCode != 403 || !strings.Contains(string(body), server.EnterNotSetUp) || sessionAttr.Match(body) {
+		t.Fatalf("another plugin id = %d %s", resp.StatusCode, body)
+	}
+	if n := e.redeems(); n != 0 {
+		t.Fatalf("another plugin id: %d redeem calls, want none", n)
+	}
+	// Another app's code presented as this app's: muster's one 404.
+	resp, body = e.framed(enterPath(e.fake.MintApp(other.PluginID, ada.ID, ""), app.PluginID))
+	if resp.StatusCode != 403 || !strings.Contains(string(body), server.EnterRefused) || e.sessions() != 0 {
+		t.Fatalf("another app's code = %d %s (sessions %d); want 403 %q", resp.StatusCode, body, e.sessions(), server.EnterRefused)
+	}
+	// A code is single use: a reload of the same URL is refused.
+	code := e.fake.MintApp(app.PluginID, bea.ID, "")
+	if resp, _ := e.framed(enterPath(code, app.PluginID)); resp.StatusCode != 200 {
+		t.Fatalf("first use = %d", resp.StatusCode)
+	}
+	if resp, body := e.framed(enterPath(code, app.PluginID)); resp.StatusCode != 403 || sessionAttr.Match(body) {
+		t.Fatalf("second use = %d", resp.StatusCode)
+	}
+	// So is an expired one (muster's 60 s).
+	code = e.fake.MintApp(app.PluginID, bea.ID, "")
+	e.clock.Add(61 * time.Second)
+	if resp, _ := e.framed(enterPath(code, app.PluginID)); resp.StatusCode != 403 {
+		t.Fatalf("an expired code = %d", resp.StatusCode)
+	}
+}
+
+func TestEnterWithoutACodeSaysOpenItFromMusterAgain(t *testing.T) {
+	e := newEnv(t)
+	for _, p := range []string{"/enter", "/enter?muster_plugin=12", "/enter?muster_code=short&muster_plugin=12",
+		"/enter?muster_code=" + strings.Repeat("a", 43) + "&muster_plugin=x", "/enter?muster_code=" + strings.Repeat("a", 43) + "&muster_plugin=-12"} {
+		resp, body := e.framed(p)
+		if resp.StatusCode != 400 || !strings.Contains(string(body), server.EnterAgain) || sessionAttr.Match(body) {
+			t.Errorf("GET %s = %d %s", p, resp.StatusCode, body)
+		}
+		if directive(resp.Header.Get("Content-Security-Policy"), "frame-ancestors") != musterOrigin {
+			t.Errorf("GET %s: the refusal cannot be shown in muster's frame", p)
+		}
+	}
+	if n := e.redeems(); n != 0 {
+		t.Fatalf("a malformed request reached muster %d times", n)
+	}
+}
+
+// Fail closed: a muster that is down, or answers 5xx, admits nobody.
+func TestEnterFailsClosedWhenMusterIsDownOrFailing(t *testing.T) {
+	e := newEnv(t)
+	code := e.fake.MintApp(app.PluginID, ada.ID, "")
+	e.fake.SetFailing(true)
+	resp, body := e.framed(enterPath(code, app.PluginID))
+	if resp.StatusCode != 502 || !strings.Contains(string(body), server.EnterNoMuster) || sessionAttr.Match(body) || e.sessions() != 0 {
+		t.Fatalf("muster failing: enter = %d %s (sessions %d); want 502", resp.StatusCode, body, e.sessions())
+	}
+	e.fake.SetFailing(false)
+	e.fake.Close()
+	resp, body = e.framed(enterPath(code, app.PluginID))
+	if resp.StatusCode != 502 || sessionAttr.Match(body) || e.sessions() != 0 {
+		t.Fatalf("muster down: enter = %d %s (sessions %d); want 502", resp.StatusCode, body, e.sessions())
+	}
+	if !e.app.Live() {
+		t.Fatal("a muster outage revoked the token")
+	}
+}
+
+// muster's 401 on the redeem is the token dying (uninstalled, or rotated
+// away): everything ends at once, for everyone.
+func TestEnterThatMusterAnswers401EndsEverything(t *testing.T) {
+	e := newEnv(t)
+	sa, sb := e.enter(ada), e.enter(bea)
+	code := e.fake.MintApp(app.PluginID, ada.ID, "")
+	e.fake.Rotate(app.PluginID, "mpl_server_rotated_4c2e")
+	resp, _ := e.framed(enterPath(code, app.PluginID))
+	if resp.StatusCode != 403 {
+		t.Fatalf("enter with a rotated-away token = %d", resp.StatusCode)
+	}
+	for name, s := range map[string]string{"Ada": sa, "Bea": sb} {
+		if resp, _ := e.do("GET", "/api/meetings", s, nil); resp.StatusCode != 401 {
+			t.Errorf("%s's session after the 401 = %d", name, resp.StatusCode)
+		}
+	}
+	if n := e.sessions(); n != 0 {
+		t.Fatalf("%d sessions left", n)
+	}
+}
+
+// The ref is a hint: passed to the page only when it is one of this
+// person's own meetings.
+func TestEnterPassesTheRefOnlyForTheOwnersOwnMeeting(t *testing.T) {
+	e := newEnv(t)
+	ownID, otherID := e.create(e.enter(ada)).ID, e.create(e.enter(bea)).ID
+	_, body := e.framed(enterPath(e.fake.MintApp(app.PluginID, ada.ID, ownID), app.PluginID))
+	if !strings.Contains(string(body), `data-ref="`+ownID+`"`) {
+		t.Fatalf("the person's own ref was dropped: %s", body)
+	}
+	_, body = e.framed(enterPath(e.fake.MintApp(app.PluginID, ada.ID, otherID), app.PluginID))
+	if strings.Contains(string(body), "data-ref") || !sessionAttr.Match(body) {
+		t.Fatalf("another person's ref reached the page: %s", body)
 	}
 }
 
@@ -208,7 +431,7 @@ func TestEnterRedeemsAnAppCodeAndRendersTheAppWithABearerSession(t *testing.T) {
 // exact origin and nothing else, no referrer, not cached, and no cookie.
 func TestEnterHeadersFrameAncestorsIsMustersOriginAndNoCookieIsSet(t *testing.T) {
 	e := newEnv(t)
-	resp, _ := e.do("GET", enterPath(e.fake.MintApp(pA.PluginID, ""), pA.PluginID), "", nil)
+	resp, _ := e.framed(enterPath(e.fake.MintApp(app.PluginID, ada.ID, ""), app.PluginID))
 	h := resp.Header
 	csp := h.Get("Content-Security-Policy")
 	if got := directive(csp, "frame-ancestors"); got != musterOrigin {
@@ -249,150 +472,11 @@ func directive(csp, name string) string {
 	return ""
 }
 
-// "/enter refuses any answer whose purpose is not app or whose target is not
-// {"app": {}}", and one whose owner is not the token's. Each fixture breaks
-// exactly one of the three, so each check is reached on its own.
-func TestEnterRefusesAnythingButAnAppCodeForTheTokensOwner(t *testing.T) {
-	app := map[string]any{"app": map[string]any{}}
-	mirror := map[string]any{"mirror": map[string]any{"host": "ws", "session": "main", "window": "@3"}}
-	both := map[string]any{"app": map[string]any{}, "mirror": map[string]any{"host": "ws", "session": "main", "window": "@3"}}
-	cases := map[string]map[string]any{
-		"purpose view, target app":   {"owner_id": pA.OwnerID, "purpose": "view", "target": app},
-		"purpose empty, target app":  {"owner_id": pA.OwnerID, "purpose": "", "target": app},
-		"purpose app, target mirror": {"owner_id": pA.OwnerID, "purpose": "app", "target": mirror},
-		"purpose app, both targets":  {"owner_id": pA.OwnerID, "purpose": "app", "target": both},
-		"purpose app, no target":     {"owner_id": pA.OwnerID, "purpose": "app", "target": map[string]any{}},
-		"another owner":              {"owner_id": pB.OwnerID, "purpose": "app", "target": app},
-	}
-	for name, answer := range cases {
-		e := newEnv(t)
-		resp, body := e.do("GET", enterPath(e.fake.MintRaw(pA.PluginID, answer), pA.PluginID), "", nil)
-		if resp.StatusCode != 403 || !strings.Contains(string(body), server.EnterWrongKind) {
-			t.Errorf("%s: enter = %d %s; want 403 %q", name, resp.StatusCode, body, server.EnterWrongKind)
-		}
-		if sessionAttr.Match(body) || e.sessions() != 0 {
-			t.Errorf("%s: a session was made (%d)", name, e.sessions())
-		}
-	}
-	// Positive control: the same harness with the right answer admits.
-	e := newEnv(t)
-	resp, body := e.do("GET", enterPath(e.fake.MintRaw(pA.PluginID, map[string]any{"owner_id": pA.OwnerID, "purpose": "app", "target": app}), pA.PluginID), "", nil)
-	if resp.StatusCode != 200 || !sessionAttr.Match(body) || e.sessions() != 1 {
-		t.Fatalf("positive control: enter = %d, sessions %d", resp.StatusCode, e.sessions())
-	}
-}
-
-// The plugin is bound: muster_plugin picks the token the code is redeemed
-// with, and a code redeems only with the token it was minted for.
-func TestEnterRedeemsWithTheTokenMusterPluginNamesAndNoOther(t *testing.T) {
-	e := newEnv(t)
-	codeB := e.fake.MintApp(pB.PluginID, "")
-	// B's code presented as A's: redeemed with A's token, which muster refuses.
-	resp, body := e.do("GET", enterPath(codeB, pA.PluginID), "", nil)
-	if resp.StatusCode != 403 || !strings.Contains(string(body), server.EnterRefused) || e.sessions() != 0 {
-		t.Fatalf("B's code as plugin A = %d %s (sessions %d); want 403 %q", resp.StatusCode, body, e.sessions(), server.EnterRefused)
-	}
-	if calls := e.fake.Calls(); calls[len(calls)-1] != "POST /plugin/v1/handoffs/redeem "+pA.Token {
-		t.Fatalf("the redeem used another token: %q", calls[len(calls)-1])
-	}
-	// A plugin id the server holds no token for never reaches muster.
-	before := e.fake.CountCalls("POST", "/plugin/v1/handoffs/redeem")
-	resp, body = e.do("GET", enterPath(e.fake.MintApp(mustertest.Default.PluginID, ""), mustertest.Default.PluginID), "", nil)
-	if resp.StatusCode != 403 || !strings.Contains(string(body), server.EnterNotSetUp) {
-		t.Fatalf("an unserved plugin = %d %s", resp.StatusCode, body)
-	}
-	if e.fake.CountCalls("POST", "/plugin/v1/handoffs/redeem") != before {
-		t.Fatal("an unserved plugin's code was sent to muster")
-	}
-	// A code is single use: a reload of the same URL is refused.
-	code := e.fake.MintApp(pB.PluginID, "")
-	if resp, _ := e.do("GET", enterPath(code, pB.PluginID), "", nil); resp.StatusCode != 200 {
-		t.Fatalf("first use = %d", resp.StatusCode)
-	}
-	resp, body = e.do("GET", enterPath(code, pB.PluginID), "", nil)
-	if resp.StatusCode != 403 || sessionAttr.Match(body) {
-		t.Fatalf("second use = %d", resp.StatusCode)
-	}
-	// So is an expired one (muster's 60 s).
-	code = e.fake.MintApp(pB.PluginID, "")
-	e.clock.Add(61 * time.Second)
-	if resp, _ := e.do("GET", enterPath(code, pB.PluginID), "", nil); resp.StatusCode != 403 {
-		t.Fatalf("an expired code = %d", resp.StatusCode)
-	}
-}
-
-func TestEnterWithoutACodeSaysOpenItFromMusterAgain(t *testing.T) {
-	e := newEnv(t)
-	for _, p := range []string{"/enter", "/enter?muster_plugin=12", "/enter?muster_code=short&muster_plugin=12",
-		"/enter?muster_code=" + strings.Repeat("a", 43) + "&muster_plugin=x", "/enter?muster_code=" + strings.Repeat("a", 43) + "&muster_plugin=-12"} {
-		resp, body := e.do("GET", p, "", nil)
-		if resp.StatusCode != 400 || !strings.Contains(string(body), server.EnterAgain) || sessionAttr.Match(body) {
-			t.Errorf("GET %s = %d %s", p, resp.StatusCode, body)
-		}
-		if directive(resp.Header.Get("Content-Security-Policy"), "frame-ancestors") != musterOrigin {
-			t.Errorf("GET %s: the refusal cannot be shown in muster's frame", p)
-		}
-	}
-	if n := e.fake.CountCalls("POST", "/plugin/v1/handoffs/redeem"); n != 0 {
-		t.Fatalf("a malformed request reached muster %d times", n)
-	}
-}
-
-// Fail closed: a muster that is down, or answers 5xx, admits nobody.
-func TestEnterFailsClosedWhenMusterIsDownOrFailing(t *testing.T) {
-	e := newEnv(t)
-	code := e.fake.MintApp(pA.PluginID, "")
-	e.fake.SetFailing(true)
-	resp, body := e.do("GET", enterPath(code, pA.PluginID), "", nil)
-	if resp.StatusCode != 502 || !strings.Contains(string(body), server.EnterNoMuster) || sessionAttr.Match(body) || e.sessions() != 0 {
-		t.Fatalf("muster failing: enter = %d %s (sessions %d); want 502", resp.StatusCode, body, e.sessions())
-	}
-	e.fake.SetFailing(false)
-	e.fake.Close()
-	resp, body = e.do("GET", enterPath(code, pA.PluginID), "", nil)
-	if resp.StatusCode != 502 || sessionAttr.Match(body) || e.sessions() != 0 {
-		t.Fatalf("muster down: enter = %d %s (sessions %d); want 502", resp.StatusCode, body, e.sessions())
-	}
-	if _, ok := e.reg.Lookup(pA.PluginID); !ok {
-		t.Fatal("a muster outage revoked the token")
-	}
-}
-
-// muster's 401 on the redeem is the token dying: it is revoked at once.
-func TestEnterThatMusterAnswers401RevokesTheToken(t *testing.T) {
-	e := newEnv(t)
-	sess := e.enter(pA)
-	code := e.fake.MintApp(pA.PluginID, "")
-	e.fake.Revoke(pA.Token)
-	resp, _ := e.do("GET", enterPath(code, pA.PluginID), "", nil)
-	if resp.StatusCode != 403 {
-		t.Fatalf("enter with a revoked token = %d", resp.StatusCode)
-	}
-	if resp, _ := e.do("GET", "/api/meetings", sess, nil); resp.StatusCode != 401 {
-		t.Fatalf("the revoked token's session still works: %d", resp.StatusCode)
-	}
-}
-
-// The ref is a hint: passed to the page only when it is one of this owner's
-// own meetings.
-func TestEnterPassesTheRefOnlyForTheOwnersOwnMeeting(t *testing.T) {
-	e := newEnv(t)
-	ownID, otherID := e.create(e.enter(pA)).ID, e.create(e.enter(pB)).ID
-	_, body := e.do("GET", enterPath(e.fake.MintApp(pA.PluginID, ownID), pA.PluginID), "", nil)
-	if !strings.Contains(string(body), `data-ref="`+ownID+`"`) {
-		t.Fatalf("the owner's own ref was dropped: %s", body)
-	}
-	_, body = e.do("GET", enterPath(e.fake.MintApp(pA.PluginID, otherID), pA.PluginID), "", nil)
-	if strings.Contains(string(body), "data-ref") || !sessionAttr.Match(body) {
-		t.Fatalf("another owner's ref reached the page: %s", body)
-	}
-}
-
 // ---- owner sessions: bearer only ----
 
 func TestOwnerRoutesRefuseAnythingButALiveBearerSession(t *testing.T) {
 	e := newEnv(t)
-	sess := e.enter(pA)
+	sess := e.enter(ada)
 	bad := map[string][]string{
 		"no credential":        nil,
 		"the token as cookie":  {"Cookie", "session=" + sess},
@@ -402,7 +486,8 @@ func TestOwnerRoutesRefuseAnythingButALiveBearerSession(t *testing.T) {
 		"unknown":              {"Authorization", "Bearer " + store.NewSessionToken()},
 		"its hash":             {"Authorization", "Bearer " + store.Hash(sess)},
 		"truncated":            {"Authorization", "Bearer " + sess[:len(sess)-1]},
-		"the muster token":     {"Authorization", "Bearer " + pA.Token},
+		"the muster token":     {"Authorization", "Bearer " + app.Token},
+		"the subject":          {"Authorization", "Bearer " + e.subject(ada)},
 		"two spaces":           {"Authorization", "Bearer  " + sess},
 		"lower-case scheme...": {"Authorization", "bearer " + sess},
 	}
@@ -423,70 +508,82 @@ func TestOwnerRoutesRefuseAnythingButALiveBearerSession(t *testing.T) {
 	}
 }
 
-// 🔴 The revocation race: a New meeting admitted just before a revocation,
-// whose insert runs just after it, must not leave an open meeting for the
-// revoked owner. The hook holds the request between its admission and its
-// insert while the revocation runs to the end, deterministically.
+// 🔴 The revocation race: a New meeting admitted just before muster said
+// the app may no longer act (for anyone, or for this person), whose insert
+// runs just after it, must not leave an open meeting. The hook holds the
+// request between its admission and its insert while the revocation runs to
+// the end, deterministically.
 func TestANewMeetingRacingARevocationLeavesNoOpenMeeting(t *testing.T) {
-	e := newEnv(t)
-	sess := e.enter(pA)
-	reached, release := make(chan struct{}), make(chan struct{})
-	server.SetBeforeCreateHookForTest(t, func() {
-		close(reached)
-		<-release
-	})
-	type result struct {
-		status int
-		body   string
-	}
-	done := make(chan result, 1)
-	go func() {
-		resp, raw := e.do("POST", "/api/meetings", sess, map[string]any{})
-		done <- result{resp.StatusCode, string(raw)}
-	}()
-	<-reached // admitted: the token was live a moment ago
-	e.fake.Revoke(pA.Token)
-	e.reg.PollOnce(context.Background()) // the whole revocation, while the create waits
-	server.SetBeforeCreateHookForTest(t, nil)
-	close(release)
-	r := <-done
-
-	list, _, _ := e.store.ForOwner(pA.OwnerID).ListMeetings(context.Background(), nil, 10)
-	for _, m := range list {
-		if m.State == "open" {
-			t.Fatalf("an open meeting for the revoked owner: %+v (create answered %d %s)", m, r.status, r.body)
+	for name, revoke := range map[string]func(e *env){
+		"uninstall":   func(e *env) { e.fake.Uninstall(app.PluginID) },
+		"Hide by Ada": func(e *env) { e.fake.Hide(app.PluginID, ada.ID) },
+	} {
+		e := newEnv(t)
+		sess := e.enter(ada)
+		reached, release := make(chan struct{}), make(chan struct{})
+		server.SetBeforeCreateHookForTest(t, func() {
+			close(reached)
+			<-release
+		})
+		type result struct {
+			status int
+			body   string
 		}
-	}
-	if r.status != 401 {
-		t.Fatalf("the raced create = %d %s, want 401", r.status, r.body)
+		done := make(chan result, 1)
+		go func() {
+			resp, raw := e.do("POST", "/api/meetings", sess, map[string]any{})
+			done <- result{resp.StatusCode, string(raw)}
+		}()
+		<-reached // admitted: the grant was live a moment ago
+		revoke(e)
+		e.app.PollOnce(context.Background()) // the whole revocation, while the create waits
+		server.SetBeforeCreateHookForTest(t, nil)
+		close(release)
+		r := <-done
+
+		list, _, _ := e.store.ForSubject(e.subject(ada)).ListMeetings(context.Background(), nil, 10)
+		for _, m := range list {
+			if m.State == "open" {
+				t.Errorf("%s: an open meeting after the revocation: %+v (create answered %d %s)", name, m, r.status, r.body)
+			}
+		}
+		if r.status != 401 {
+			t.Errorf("%s: the raced create = %d %s, want 401", name, r.status, r.body)
+		}
 	}
 }
 
-// A session whose token is no longer served is refused even while its row
-// survives (the revocation's own delete failed, say): liveness is checked
-// on every request, not only by the poll's delete.
-func TestASessionOfATokenNotServedIsRefused(t *testing.T) {
+// Once muster refused the token, the app refuses every owner request at once,
+// even a session whose row exists (one made after the uninstall's delete,
+// here): the app's liveness is checked on every request, not only by the
+// poll's delete.
+func TestASessionIsRefusedOnceTheAppIsDeadEvenIfItsRowSurvives(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
-	// Plugin 3 (the fake's Default) is not in this server's registry.
-	unserved, _, _ := e.store.CreateSession(ctx, mustertest.Default.OwnerID, mustertest.Default.PluginID, t0)
-	// Plugin 12 is served, but for owner 7, not 41.
-	crossed, _, _ := e.store.CreateSession(ctx, pB.OwnerID, pA.PluginID, t0)
-	for name, tok := range map[string]string{"an unserved token's": unserved, "a session naming another owner of a served token": crossed} {
-		if resp, _ := e.do("GET", "/api/meetings", tok, nil); resp.StatusCode != 401 {
-			t.Errorf("%s session = %d, want 401", name, resp.StatusCode)
-		}
+	e.enter(ada)
+	subA := e.subject(ada)
+	before, _, err := e.store.CreateSession(ctx, subA, "Ada L.", t0)
+	if err != nil {
+		t.Fatal(err)
 	}
-	ok, _, _ := e.store.CreateSession(ctx, pA.OwnerID, pA.PluginID, t0)
-	if resp, _ := e.do("GET", "/api/meetings", ok, nil); resp.StatusCode != 200 {
-		t.Fatalf("positive control: a served token's session = %d", resp.StatusCode)
+	if resp, _ := e.do("GET", "/api/meetings", before, nil); resp.StatusCode != 200 {
+		t.Fatalf("positive control: a session row while the app is live = %d", resp.StatusCode)
+	}
+	e.fake.Uninstall(app.PluginID)
+	e.app.PollOnce(ctx)
+	after, _, err := e.store.CreateSession(ctx, subA, "Ada L.", t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp, _ := e.do("GET", "/api/meetings", after, nil); resp.StatusCode != 401 {
+		t.Fatalf("a session made after the uninstall = %d, want 401", resp.StatusCode)
 	}
 }
 
 // Eight hours (decision 12), by the server's clock.
 func TestAnOwnerSessionEndsAfterEightHours(t *testing.T) {
 	e := newEnv(t)
-	sess := e.enter(pA)
+	sess := e.enter(ada)
 	e.clock.Add(8*time.Hour - time.Second)
 	if resp, _ := e.do("GET", "/api/meetings", sess, nil); resp.StatusCode != 200 {
 		t.Fatalf("one second before 8 h = %d", resp.StatusCode)
@@ -497,45 +594,120 @@ func TestAnOwnerSessionEndsAfterEightHours(t *testing.T) {
 	}
 }
 
-// ---- the /self poll ends sessions on revoke ----
+// ---- liveness: the /self poll and owners/check ----
 
-func TestTheSelfPollEndsARevokedOwnersSessionsAndMeetingsAndNoOneElses(t *testing.T) {
+// 🔴 Uninstall ends everything: /self's 401 within one poll deletes every
+// person's sessions and ends every open meeting, and /enter refuses without
+// asking muster.
+func TestUninstallEndsEverySessionAndMeeting(t *testing.T) {
 	e := newEnv(t)
-	sa, sb := e.enter(pA), e.enter(pB)
-	_, ra := e.do("POST", "/api/meetings", sa, map[string]any{})
-	_, rb := e.do("POST", "/api/meetings", sb, map[string]any{})
-	var ma, mb struct{ ID string }
-	json.Unmarshal(ra, &ma)
-	json.Unmarshal(rb, &mb)
+	sa, sb := e.enter(ada), e.enter(bea)
+	subA, subB := e.subject(ada), e.subject(bea)
+	ma, mb := e.create(sa), e.create(sb)
 
-	e.fake.Revoke(pA.Token)
-	e.reg.PollOnce(context.Background())
+	e.app.PollOnce(context.Background()) // both live: nothing changes
+	if resp, _ := e.do("GET", "/api/meetings", sa, nil); resp.StatusCode != 200 {
+		t.Fatalf("positive control: Ada's session after a live poll = %d", resp.StatusCode)
+	}
 
-	if resp, _ := e.do("GET", "/api/meetings", sa, nil); resp.StatusCode != 401 {
-		t.Fatalf("the revoked owner's session after one poll = %d, want 401", resp.StatusCode)
+	e.fake.Uninstall(app.PluginID)
+	e.app.PollOnce(context.Background())
+
+	for name, s := range map[string]string{"Ada": sa, "Bea": sb} {
+		if resp, _ := e.do("GET", "/api/meetings", s, nil); resp.StatusCode != 401 {
+			t.Errorf("%s's session after the uninstall poll = %d, want 401", name, resp.StatusCode)
+		}
 	}
-	if n := e.sessions(); n != 1 {
-		t.Fatalf("%d sessions left in the database, want only B's", n)
+	if n := e.sessions(); n != 0 {
+		t.Errorf("%d sessions left in the database after the uninstall, want 0", n)
 	}
-	if m, _ := e.store.ForOwner(pA.OwnerID).Meeting(context.Background(), ma.ID); m.State != "ended" || m.EndedAt == nil {
-		t.Fatalf("the revoked owner's meeting = %+v, want ended", m)
+	if st := e.meetingState(subA, ma.ID); st != "ended" {
+		t.Errorf("Ada's meeting after the uninstall = %q, want ended", st)
 	}
-	resp, raw := e.do("GET", "/api/meetings/"+mb.ID, sb, nil)
-	if resp.StatusCode != 200 || !strings.Contains(string(raw), `"state":"open"`) {
-		t.Fatalf("the other owner after A's revoke = %d %s", resp.StatusCode, raw)
+	if st := e.meetingState(subB, mb.ID); st != "ended" {
+		t.Errorf("Bea's meeting after the uninstall = %q, want ended", st)
 	}
-	// And the revoked tab cannot come back in.
-	resp, body := e.do("GET", enterPath(e.fake.MintApp(pA.PluginID, ""), pA.PluginID), "", nil)
-	if resp.StatusCode != 403 || !strings.Contains(string(body), server.EnterNotSetUp) {
-		t.Fatalf("enter after revoke = %d %s", resp.StatusCode, body)
+	before := e.redeems()
+	resp, body := e.framed(enterPath(e.fake.MintApp(app.PluginID, ada.ID, ""), app.PluginID))
+	if resp.StatusCode != 403 || !strings.Contains(string(body), server.EnterNotSetUp) || e.redeems() != before {
+		t.Fatalf("enter after the uninstall = %d %s (%d new redeems)", resp.StatusCode, body, e.redeems()-before)
 	}
 }
 
-// ---- another owner's meetings are never visible ----
+// 🔴 A person muster no longer answers live in owners/check (each reason
+// alone) loses their sessions and open meetings within one poll; the other
+// person keeps theirs.
+func TestAPersonMusterNoLongerAnswersLiveLosesTheirSessionsAndMeetingsAndNoOneElse(t *testing.T) {
+	for name, end := range map[string]func(e *env){
+		"hidden":                func(e *env) { e.fake.Hide(app.PluginID, ada.ID) },
+		"disabled":              func(e *env) { e.fake.Disable(ada.ID) },
+		"signed out everywhere": func(e *env) { e.clock.Add(3 * time.Second); e.fake.SignOutEverywhere(ada.ID) },
+		// Ada's grant (and her session) end at t0 + 8 h; Bea's a minute later.
+		"the 8 h grant ran out":   func(e *env) { e.clock.Add(8*time.Hour - time.Minute) },
+		"the app was uninstalled": nil, // a separate case: TestUninstallEndsEverySessionAndMeeting
+	} {
+		if end == nil {
+			continue
+		}
+		e := newEnv(t)
+		sa := e.enter(ada)
+		ma := e.create(sa)
+		e.clock.Add(time.Minute)
+		sb := e.enter(bea) // Bea's grant runs a minute past Ada's
+		mb := e.create(sb)
 
-func TestAnotherOwnersMeetingsAreNeverVisible(t *testing.T) {
+		end(e)
+		e.app.PollOnce(context.Background())
+
+		if resp, _ := e.do("GET", "/api/meetings", sa, nil); resp.StatusCode != 401 {
+			t.Errorf("%s: Ada's session after the poll = %d, want 401", name, resp.StatusCode)
+		}
+		if st := e.meetingState(e.subject(ada), ma.ID); st != "ended" {
+			t.Errorf("%s: Ada's meeting after the poll = %q, want ended", name, st)
+		}
+		if st := e.meetingState(e.subject(bea), mb.ID); st != "open" {
+			t.Errorf("%s: Bea's meeting after Ada's end = %q, want open", name, st)
+		}
+		if resp, _ := e.do("GET", "/api/meetings", sb, nil); resp.StatusCode != 200 {
+			t.Errorf("%s: Bea's session after Ada's end = %d, want 200", name, resp.StatusCode)
+		}
+		if !e.app.Live() {
+			t.Errorf("%s: one person's end revoked the app", name)
+		}
+	}
+}
+
+// Only muster's answer ends a person or the app: an owners/check that fails,
+// a /self that fails, and plugins off on that muster each keep everything.
+func TestALivenessPollThatFailsEndsNoOne(t *testing.T) {
+	for name, fail := range map[string]func(e *env){
+		"owners/check 503": func(e *env) { e.fake.SetFailOwnersCheck(true) },
+		"/self 503":        func(e *env) { e.fake.SetFailing(true) },
+		"no muster":        func(e *env) { e.fake.Close() },
+	} {
+		e := newEnv(t)
+		sa := e.enter(ada)
+		ma := e.create(sa)
+		e.fake.Hide(app.PluginID, ada.ID) // were muster asked, Ada would end
+		fail(e)
+		e.app.PollOnce(context.Background())
+		if resp, _ := e.do("GET", "/api/meetings", sa, nil); resp.StatusCode != 200 {
+			t.Errorf("%s: Ada's session = %d, want 200 (no answer ends no one)", name, resp.StatusCode)
+		}
+		if st := e.meetingState(e.subject(ada), ma.ID); st != "open" {
+			t.Errorf("%s: Ada's meeting = %q, want open", name, st)
+		}
+		if !e.app.Live() {
+			t.Errorf("%s: the app was revoked without muster's 401", name)
+		}
+	}
+}
+
+// ---- another person's meetings are never visible ----
+
+func TestAnotherPersonsMeetingsAreNeverVisible(t *testing.T) {
 	e := newEnv(t)
-	sa, sb := e.enter(pA), e.enter(pB)
+	sa, sb := e.enter(ada), e.enter(bea)
 	ids := []string{e.create(sa).ID, e.create(sa).ID}
 	cb := e.create(sb)
 
@@ -554,9 +726,64 @@ func TestAnotherOwnersMeetingsAreNeverVisible(t *testing.T) {
 			t.Fatalf("B reading A's %s = %d %s; want the same 404 as an unknown id (%s)", id, resp.StatusCode, raw, unknown)
 		}
 	}
-	// Positive control: A reads its own.
+	// Positive control: Ada reads her own.
 	if resp, raw := e.do("GET", "/api/meetings/"+ids[0], sa, nil); resp.StatusCode != 200 || !strings.Contains(string(raw), ids[0]) {
-		t.Fatalf("A reading its own = %d %s", resp.StatusCode, raw)
+		t.Fatalf("A reading her own = %d %s", resp.StatusCode, raw)
+	}
+}
+
+// ---- nothing of muster's about a person but the subject and display name ----
+
+// 🔴 No muster user id and no email is ever stored. An invariant guard: the
+// plugin's client has no field for either, so the plugin never receives them
+// from a muster that follows the design. The scan also covers a muster that
+// misbehaves and sends both anyway, beside the subject. Every write path
+// runs first (sessions, meetings, a person's end, the sweep, the audit), and
+// the database file and its WAL are read as bytes.
+func TestNoMusterUserIDOrEmailIsEverStored(t *testing.T) {
+	e := newEnv(t)
+	sa, sb := e.enter(ada), e.enter(bea)
+	e.create(sa)
+	e.create(sb)
+	cy := mustertest.Person{ID: 3141592653, Email: "cy.leaky@example.test", DisplayName: "Cy W."}
+	leakySubject := "Lk7Yq2Rf8Hs1Jd4Ng6Pv0w"
+	resp, body := e.framed(enterPath(e.fake.MintRaw(app.PluginID, map[string]any{
+		"owner_id": cy.ID, "owner_login": cy.Email, "email": cy.Email,
+		"owner": map[string]any{"subject": leakySubject, "display_name": cy.DisplayName, "id": cy.ID, "email": cy.Email},
+		"scope": "server", "purpose": "app", "target": map[string]any{"app": map[string]any{}}}), app.PluginID))
+	m := sessionAttr.FindSubmatch(body)
+	if resp.StatusCode != 200 || m == nil {
+		t.Fatalf("the leaky answer = %d %s", resp.StatusCode, body)
+	}
+	e.create(string(m[1]))
+	e.fake.Hide(app.PluginID, bea.ID)
+	e.app.PollOnce(context.Background())
+	e.clock.Add(24 * time.Hour)
+	if _, err := e.store.Sweep(context.Background(), e.clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	var all []byte
+	for _, f := range []string{e.dbPath, e.dbPath + "-wal"} {
+		b, err := os.ReadFile(f)
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		all = append(all, b...)
+	}
+	for _, p := range []mustertest.Person{ada, bea, cy} {
+		if bytes.Contains(all, []byte(strconv.FormatInt(p.ID, 10))) {
+			t.Errorf("the database holds %s's muster user id %d", p.DisplayName, p.ID)
+		}
+		if bytes.Contains(all, []byte(p.Email)) {
+			t.Errorf("the database holds %s's email %s", p.DisplayName, p.Email)
+		}
+	}
+	// Positive controls: the scan sees what IS stored, from the same redeems.
+	for _, want := range []string{e.subject(ada), e.subject(bea), leakySubject, ada.DisplayName, bea.DisplayName, cy.DisplayName} {
+		if !bytes.Contains(all, []byte(want)) {
+			t.Errorf("positive control: %q is not in the database files, so the scan cannot see rows", want)
+		}
 	}
 }
 
@@ -574,15 +801,10 @@ func (e *env) meetingLink(sess, id string) (int, *string, string) {
 
 func TestTheLinkIsTheOwnersOnlyAndOnlyWhileOpen(t *testing.T) {
 	e := newEnv(t)
-	sa, sb := e.enter(pA), e.enter(pB)
-	_, raw := e.do("POST", "/api/meetings", sa, map[string]any{})
-	var c struct {
-		ID      string `json:"id"`
-		JoinURL string `json:"join_url"`
-	}
-	json.Unmarshal(raw, &c)
+	sa, sb := e.enter(ada), e.enter(bea)
+	c := e.create(sa)
 	code := joinURL.FindStringSubmatch(c.JoinURL)[1]
-	// Another owner: the same 404 as any unknown meeting, no code anywhere.
+	// Another person: the same 404 as any unknown meeting, no code anywhere.
 	if st, link, body := e.meetingLink(sb, c.ID); st != 404 || link != nil || strings.Contains(body, code) {
 		t.Fatalf("B reading A's meeting = %d %s", st, body)
 	}
@@ -594,9 +816,10 @@ func TestTheLinkIsTheOwnersOnlyAndOnlyWhileOpen(t *testing.T) {
 		t.Fatalf("A's own open meeting: %d, link %v", st, link)
 	}
 	// At 24 h, before any sweep: no link (the 8 h session is gone, so the
-	// owner enters again).
+	// owner enters again). The fake's session sign-in is renewed, as a
+	// browser that stayed signed in has it.
 	e.clock.Add(24 * time.Hour)
-	sa = e.enter(pA)
+	sa = e.enter(ada)
 	if st, link, body := e.meetingLink(sa, c.ID); st != 200 || link != nil || strings.Contains(body, code) {
 		t.Fatalf("at 24 h = %d %s; want 200 with link null", st, body)
 	}
@@ -604,20 +827,13 @@ func TestTheLinkIsTheOwnersOnlyAndOnlyWhileOpen(t *testing.T) {
 
 func TestAnEndedMeetingAnswersNoLink(t *testing.T) {
 	e := newEnv(t)
-	sb := e.enter(pB)
-	_, raw := e.do("POST", "/api/meetings", sb, map[string]any{})
-	var c struct {
-		ID      string `json:"id"`
-		JoinURL string `json:"join_url"`
-	}
-	json.Unmarshal(raw, &c)
-	// The 24 h sweep ends it (2a's end path the owner can still look at: a
-	// revocation ends the owner's sessions too).
+	sb := e.enter(bea)
+	c := e.create(sb)
 	e.clock.Add(24 * time.Hour)
 	if _, err := e.store.Sweep(context.Background(), e.clock.Now()); err != nil {
 		t.Fatal(err)
 	}
-	sb = e.enter(pB)
+	sb = e.enter(bea)
 	st, link, body := e.meetingLink(sb, c.ID)
 	if st != 200 || link != nil || !strings.Contains(body, `"state":"ended"`) || strings.Contains(body, joinURL.FindStringSubmatch(c.JoinURL)[1]) {
 		t.Fatalf("an ended meeting = %d %s; want 200, ended, link null", st, body)
@@ -630,7 +846,7 @@ var joinURL = regexp.MustCompile(`^https://meet\.example\.test/j/([A-Za-z0-9_-]{
 
 func TestNewMeetingAnswersItsIDAndALinkOnThePluginsOrigin(t *testing.T) {
 	e := newEnv(t)
-	sess := e.enter(pA)
+	sess := e.enter(ada)
 	resp, raw := e.do("POST", "/api/meetings", sess, nil)
 	var c struct {
 		ID      string `json:"id"`
@@ -654,8 +870,6 @@ func TestNewMeetingAnswersItsIDAndALinkOnThePluginsOrigin(t *testing.T) {
 		!c.Meeting.CreatedAt.Equal(t0) || !c.Meeting.LinkExpiresAt.Equal(t0.Add(24*time.Hour)) {
 		t.Fatalf("created = %s", raw)
 	}
-	// The list never carries the code; the meeting itself gives the owner
-	// the same link back while it is open.
 	if _, raw := e.do("GET", "/api/meetings", sess, nil); strings.Contains(string(raw), m[1]) {
 		t.Fatalf("the list names the join code: %s", raw)
 	}
@@ -666,7 +880,6 @@ func TestNewMeetingAnswersItsIDAndALinkOnThePluginsOrigin(t *testing.T) {
 	if json.Unmarshal(raw, &one); one.Link == nil || *one.Link != c.JoinURL {
 		t.Fatalf("GET one meeting's link = %s, want %q", raw, c.JoinURL)
 	}
-	// Two meetings, two links.
 	if c2 := e.create(sess); c2.JoinURL == c.JoinURL || !joinURL.MatchString(c2.JoinURL) {
 		t.Fatalf("second link = %q, first %q", c2.JoinURL, c.JoinURL)
 	}
@@ -676,13 +889,14 @@ func TestNewMeetingAnswersItsIDAndALinkOnThePluginsOrigin(t *testing.T) {
 // {}. Anything else is refused, so a client can't believe it set one.
 func TestNewMeetingTakesNoOptions(t *testing.T) {
 	e := newEnv(t)
-	sess := e.enter(pA)
+	sess := e.enter(ada)
+	e.enter(bea)
 	for name, body := range map[string]string{
-		"a title":       `{"title":"x"}`,
-		"a record flag": `{"record":false}`,
-		"another owner": `{"owner_id":41}`,
-		"not JSON":      `title=x`,
-		"too big":       `{` + strings.Repeat(" ", 5000) + `}`,
+		"a title":         `{"title":"x"}`,
+		"a record flag":   `{"record":false}`,
+		"another subject": `{"subject":"` + e.subject(bea) + `"}`,
+		"not JSON":        `title=x`,
+		"too big":         `{` + strings.Repeat(" ", 5000) + `}`,
 	} {
 		resp, raw := e.do("POST", "/api/meetings", sess, body)
 		if resp.StatusCode != 400 {
@@ -694,8 +908,8 @@ func TestNewMeetingTakesNoOptions(t *testing.T) {
 			t.Errorf("body %q = %d %s", body, resp.StatusCode, raw)
 		}
 	}
-	if list, _, _ := e.store.ForOwner(pB.OwnerID).ListMeetings(context.Background(), nil, 10); len(list) != 0 {
-		t.Fatal("a body naming another owner made a meeting for them")
+	if list, _, _ := e.store.ForSubject(e.subject(bea)).ListMeetings(context.Background(), nil, 10); len(list) != 0 {
+		t.Fatal("a body naming another subject made a meeting for them")
 	}
 }
 
@@ -703,7 +917,7 @@ func TestNewMeetingTakesNoOptions(t *testing.T) {
 // list item never has a link, and a created meeting answers id and join_url.
 func TestTheMeetingAPIShapes(t *testing.T) {
 	e := newEnv(t)
-	sess := e.enter(pA)
+	sess := e.enter(ada)
 	c := e.create(sess)
 	keys := func(raw []byte) []string {
 		var m map[string]json.RawMessage
@@ -754,13 +968,10 @@ func mustJSON(t *testing.T, v any) []byte {
 
 func TestTheListIsNewestFirstAndPaged(t *testing.T) {
 	e := newEnv(t)
-	sess := e.enter(pA)
+	sess := e.enter(ada)
 	var ids []string
 	for i := 0; i < 3; i++ {
-		_, raw := e.do("POST", "/api/meetings", sess, map[string]any{})
-		var c struct{ ID string }
-		json.Unmarshal(raw, &c)
-		ids = append(ids, c.ID)
+		ids = append(ids, e.create(sess).ID)
 		e.clock.Add(time.Second)
 	}
 	type page struct {
@@ -789,12 +1000,10 @@ func TestTheListIsNewestFirstAndPaged(t *testing.T) {
 
 func TestNoResponseSetsACookie(t *testing.T) {
 	e := newEnv(t)
-	sess := e.enter(pA)
-	_, raw := e.do("POST", "/api/meetings", sess, map[string]any{})
-	var c struct{ ID string }
-	json.Unmarshal(raw, &c)
+	sess := e.enter(ada)
+	c := e.create(sess)
 	for _, r := range [][3]string{
-		{"GET", enterPath(e.fake.MintApp(pA.PluginID, ""), pA.PluginID), ""},
+		{"GET", enterPath(e.fake.MintApp(app.PluginID, ada.ID, ""), app.PluginID), ""},
 		{"GET", "/enter", ""},
 		{"GET", "/api/meetings", sess},
 		{"POST", "/api/meetings", sess},
@@ -807,7 +1016,7 @@ func TestNoResponseSetsACookie(t *testing.T) {
 		if r[0] == "POST" {
 			body = map[string]any{}
 		}
-		resp, _ := e.do(r[0], r[1], r[2], body)
+		resp, _ := e.do(r[0], r[1], r[2], body, inFrame...)
 		if sc := resp.Header.Values("Set-Cookie"); len(sc) != 0 {
 			t.Errorf("%s %s set a cookie: %q", r[0], r[1], sc)
 		}
@@ -820,7 +1029,7 @@ func TestNoResponseSetsACookie(t *testing.T) {
 // Only the owner app may be framed, and only by muster.
 func TestEveryOtherResponseRefusesToBeFramed(t *testing.T) {
 	e := newEnv(t)
-	sess := e.enter(pA)
+	sess := e.enter(ada)
 	for _, p := range []string{"/api/meetings", "/static/app.js", "/nothing-here"} {
 		resp, _ := e.do("GET", p, sess, nil)
 		if fa := directive(resp.Header.Get("Content-Security-Policy"), "frame-ancestors"); fa != "'none'" || resp.Header.Get("X-Frame-Options") != "DENY" {
@@ -831,33 +1040,30 @@ func TestEveryOtherResponseRefusesToBeFramed(t *testing.T) {
 
 func TestTheLogCarriesNoCodeTokenOrQuery(t *testing.T) {
 	e := newEnv(t)
-	code := e.fake.MintApp(pA.PluginID, "")
-	_, body := e.do("GET", enterPath(code, pA.PluginID), "", nil)
+	code := e.fake.MintApp(app.PluginID, ada.ID, "")
+	_, body := e.framed(enterPath(code, app.PluginID))
 	sess := string(sessionAttr.FindSubmatch(body)[1])
-	_, raw := e.do("POST", "/api/meetings", sess, map[string]any{})
-	var c struct {
-		JoinURL string `json:"join_url"`
-	}
-	json.Unmarshal(raw, &c)
+	c := e.create(sess)
 	join := joinURL.FindStringSubmatch(c.JoinURL)[1]
-	_, raw = e.do("GET", "/api/meetings", sess, nil)
-	var l struct{ Meetings []struct{ ID string } }
-	json.Unmarshal(raw, &l)
-	e.do("GET", "/api/meetings/"+l.Meetings[0].ID, sess, nil)
+	e.do("GET", "/api/meetings", sess, nil)
+	e.do("GET", "/api/meetings/"+c.ID, sess, nil)
 	e.do("GET", "/j/"+join, "", nil)
 	e.do("GET", "/j/"+join+"/wait", "", nil)
 	// A refused enter logs its reason: still no code.
-	e.do("GET", enterPath(code, pA.PluginID), "", nil)
+	e.framed(enterPath(code, app.PluginID))
+	e.fake.Hide(app.PluginID, ada.ID)
+	e.app.PollOnce(context.Background())
 	got := e.log.String()
-	// Positive controls: the lines are there to be searched.
-	// Each is independent of the redaction under test, so a broken redaction
-	// fails below, on the secret, not here.
-	for _, want := range []string{"http GET /enter", "http POST /api/meetings 201", "http GET /j/", "/wait 404", "enter: refused 403"} {
+	// Positive controls: the lines are there to be searched. Each is
+	// independent of the redaction under test, so a broken redaction fails
+	// below, on the secret, not here.
+	for _, want := range []string{"http GET /enter", "http POST /api/meetings 201", "http GET /j/", "/wait 404", "enter: refused 403", "no longer lets the app act for 1 of 1"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("the log lacks %q (so this scan proves nothing):\n%s", want, got)
 		}
 	}
-	for name, secret := range map[string]string{"hand-off code": code, "session": sess[4:], "join code": join, "muster token": pA.Token, "query": "muster_code"} {
+	for name, secret := range map[string]string{"hand-off code": code, "session": sess[4:], "join code": join, "muster token": app.Token,
+		"query": "muster_code", "subject": e.subject(ada), "display name": ada.DisplayName} {
 		if strings.Contains(got, secret) {
 			t.Errorf("the log carries the %s:\n%s", name, got)
 		}
@@ -887,7 +1093,10 @@ func TestRedactPath(t *testing.T) {
 
 func TestTheAppPageCarriesNoInlineScript(t *testing.T) {
 	e := newEnv(t)
-	_, body := e.do("GET", enterPath(e.fake.MintApp(pA.PluginID, ""), pA.PluginID), "", nil)
+	_, body := e.framed(enterPath(e.fake.MintApp(app.PluginID, ada.ID, ""), app.PluginID))
+	if !sessionAttr.Match(body) {
+		t.Fatalf("not the app page: %s", body)
+	}
 	for _, m := range regexp.MustCompile(`<script[^>]*>`).FindAll(body, -1) {
 		if !bytes.Contains(m, []byte(`src="/static/app.js"`)) {
 			t.Errorf("inline script %s: the CSP would block it", m)
@@ -909,15 +1118,27 @@ func TestTheAppPageCarriesNoInlineScript(t *testing.T) {
 
 func TestHealthz(t *testing.T) {
 	e := newEnv(t)
-	srv := httptest.NewServer(server.Internal(e.store, e.reg))
+	srv := httptest.NewServer(server.Internal(e.store, e.app))
 	defer srv.Close()
-	resp, err := http.Get(srv.URL + "/healthz")
-	if err != nil || resp.StatusCode != 200 {
-		t.Fatalf("healthz = %v %v", resp, err)
+	get := func() int {
+		resp, err := http.Get(srv.URL + "/healthz")
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
 	}
-	resp.Body.Close()
+	if st := get(); st != 200 {
+		t.Fatalf("healthz = %d", st)
+	}
 	// The public listener does not serve it.
 	if resp, _ := e.do("GET", "/healthz", "", nil); resp.StatusCode != 404 {
 		t.Fatalf("public /healthz = %d", resp.StatusCode)
+	}
+	// A dead token is unhealthy: the operator redeploys with a new one.
+	e.fake.Uninstall(app.PluginID)
+	e.app.PollOnce(context.Background())
+	if st := get(); st != 503 {
+		t.Fatalf("healthz after the uninstall = %d, want 503", st)
 	}
 }

@@ -31,6 +31,7 @@ var (
 	joinCodeRE     = regexp.MustCompile(`^[A-Za-z0-9_-]{22}$`)
 	sessionTokenRE = regexp.MustCompile(`^mmo_[A-Za-z0-9_-]{43}$`)
 	meetingIDRE    = regexp.MustCompile(`^[A-Za-z0-9_-]{16}$`)
+	subjectRE      = regexp.MustCompile(`^[A-Za-z0-9_-]{22}$`)
 )
 
 func random(n int) string {
@@ -54,6 +55,11 @@ func NewMeetingID() string { return random(MeetingIDBytes) }
 func ValidJoinCode(s string) bool     { return joinCodeRE.MatchString(s) }
 func ValidSessionToken(s string) bool { return sessionTokenRE.MatchString(s) }
 func ValidMeetingID(s string) bool    { return meetingIDRE.MatchString(s) }
+
+// ValidSubject is the shape of the subject muster's server-app redeem gives:
+// 128 random bits, 22 base64url characters (design: "Data model and
+// migration 0171"). A decimal user id, an email or "" is not one.
+func ValidSubject(s string) bool { return subjectRE.MatchString(s) }
 
 // Hash is the stored form of a code or token: hex SHA-256.
 func Hash(s string) string {

@@ -168,21 +168,31 @@ func (s *Store) LiveTracksOf(ctx context.Context, meetingID string) ([]Track, er
 
 // OpenGap opens a gap marker on track at atMS (meeting time), unless one is
 // open already: no audio of it is being transcribed from then on.
-func (s *Store) OpenGap(ctx context.Context, track string, atMS int64, engine string) error {
+//
+// 🔴 Only on an ACTIVE track of a LIVE meeting, checked in the same
+// transaction (ErrGone otherwise): a gap opened on a track that has just
+// ended would never close, and OpenGaps would say "Transcript paused" for
+// the rest of the meeting.
+func (s *Store) OpenGap(ctx context.Context, track string, atMS int64, engine string, now time.Time) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	var meetingID, identity, speaker string
-	var open bool
-	err = tx.QueryRowContext(ctx, `SELECT meeting_id, identity, speaker, gap_segment IS NOT NULL FROM tracks WHERE track = ?`, track).
-		Scan(&meetingID, &identity, &speaker, &open)
+	var open, live bool
+	err = tx.QueryRowContext(ctx, `SELECT t.meeting_id, t.identity, t.speaker, t.gap_segment IS NOT NULL,
+			t.state = 'active' AND m.state = 'open' AND m.created_at > ?
+		FROM tracks t JOIN meetings m ON m.id = t.meeting_id WHERE t.track = ?`, cutoff(now), track).
+		Scan(&meetingID, &identity, &speaker, &open, &live)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
 	if err != nil || open {
 		return err
+	}
+	if !live {
+		return ErrGone
 	}
 	r, err := tx.ExecContext(ctx, `INSERT INTO segments (meeting_id, identity, speaker, kind, start_ms, engine) VALUES (?, ?, ?, 'gap', ?, ?)`,
 		meetingID, identity, speaker, max(atMS, 0), engine)

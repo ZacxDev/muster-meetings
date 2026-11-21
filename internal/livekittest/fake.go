@@ -74,6 +74,12 @@ type Fake struct {
 	// silent, until the egress is stopped or killed.
 	EgressAudio func(room, identity, track string) []byte
 	EgressPace  time.Duration
+	// StartHook, when set, runs (outside the fake's lock) at each
+	// StartTrackEgress with its 1-based number, and may block; true refuses
+	// the start as LiveKit does with no Egress. A test orders an interleaving
+	// with it.
+	StartHook func(n int) bool
+	starts    int
 	// refuse is how many of the next StartTrackEgress calls are refused (no
 	// Egress capacity, as LiveKit answers it).
 	refuse   int
@@ -549,6 +555,18 @@ func (f *Fake) egressTwirp(w http.ResponseWriter, r *http.Request) {
 			f.mu.Unlock()
 			twirpErr(w, 403, "permission_denied", "permissions denied")
 			return
+		}
+		f.starts++
+		if hook := f.StartHook; hook != nil {
+			n := f.starts
+			f.mu.Unlock()
+			refused := hook(n)
+			f.mu.Lock()
+			if refused {
+				f.mu.Unlock()
+				twirpErr(w, 503, "unavailable", "no response from servers")
+				return
+			}
 		}
 		if f.refuse > 0 {
 			f.refuse--

@@ -53,7 +53,7 @@ var DefaultEgressBackoff = []time.Duration{time.Second, 2 * time.Second, 4 * tim
 type transcriber struct {
 	mu       sync.Mutex
 	runs     map[string]*run               // track → its egress start loop
-	conns    map[string]*ingest.Conn       // track → its ingest stream
+	conns    map[string]*liveConn          // track → its ingest stream
 	partials map[string]map[string]partial // meeting → track → the partial
 	paused   map[string]bool               // track → the engine dropped audio, until its next final
 	meetings map[string]string             // track → meeting, for paused
@@ -62,7 +62,27 @@ type transcriber struct {
 	restarts map[string]int
 	audioAt  map[string]time.Time
 	textOnce atomic.Bool
+	// gapMu makes "is a current stream connected? if not, open a gap"
+	// (egressLoop) and "a current stream's first audio closes the gap"
+	// (serveIngest) one step each, so neither can fall between the other's
+	// check and write and leave a gap open while audio flows.
+	gapMu sync.Mutex
 }
+
+// liveConn is a registered ingest stream and the egress nonce its token
+// carried.
+type liveConn struct {
+	conn  *ingest.Conn
+	nonce string
+}
+
+// Test hooks (nil outside tests): testHookBeforeRegister runs in
+// handleIngest between the token check and the stream's registration;
+// testHookGapCheck inside egressLoop's gap step, after its check.
+var (
+	testHookBeforeRegister func(track string)
+	testHookGapCheck       func(track string)
+)
 
 // HealthyStream is how long a track's stream must have carried audio for
 // its egress-restart backoff to start again from the first step.
@@ -77,7 +97,7 @@ type partial struct {
 }
 
 func newTranscriber() *transcriber {
-	return &transcriber{runs: map[string]*run{}, conns: map[string]*ingest.Conn{},
+	return &transcriber{runs: map[string]*run{}, conns: map[string]*liveConn{},
 		partials: map[string]map[string]partial{}, paused: map[string]bool{}, meetings: map[string]string{},
 		restarts: map[string]int{}, audioAt: map[string]time.Time{}}
 }
@@ -152,10 +172,10 @@ func (s *Server) onTrackUnpublished(ctx context.Context, tr livekit.TrackInfo) {
 		return
 	}
 	s.cancelRun(t.Track)
-	s.forgetTrack(t.MeetingID, t.Track)
 	if err := s.store.EndTrack(ctx, t.Track); err != nil {
 		s.cfg.Log.Printf("transcript: ending a track: %v", err)
 	}
+	s.forgetTrack(t.MeetingID, t.Track)
 	if closed, _ := s.store.CloseGap(ctx, t.Track, s.sinceStart(t.MeetingStart)); closed {
 		s.hub.Changed(t.MeetingID)
 	}
@@ -185,7 +205,7 @@ func (s *Server) onEgressEnded(ctx context.Context, info livekit.EgressInfo) {
 	s.closeConn(t.Track, ingest.CloseGoingAway, "its egress ended")
 	wait := s.restartWait(t.Track)
 	s.cfg.Log.Printf("transcript: a track's egress ended (%s); starting a new one in %s", info.Status, wait)
-	if err := s.store.OpenGap(ctx, t.Track, s.sinceStart(t.MeetingStart), s.cfg.Engine.Name()); err == nil {
+	if err := s.store.OpenGap(ctx, t.Track, s.sinceStart(t.MeetingStart), s.cfg.Engine.Name(), s.cfg.Now()); err == nil {
 		s.hub.Changed(t.MeetingID)
 	}
 	s.startEgressAfter(t.Track, wait)
@@ -194,15 +214,24 @@ func (s *Server) onEgressEnded(ctx context.Context, info livekit.EgressInfo) {
 // restartWait is how long track's next egress restart waits: the backoff's
 // step for the restarts since its last healthy stretch (a stream that
 // carried audio for HealthyStream resets the count).
+//
+// The count is written first and the track read after: a track that ended
+// meanwhile (its end writes the database, then forgetTrack) leaves no count
+// behind, whichever of the two came first.
 func (s *Server) restartWait(track string) time.Duration {
 	s.tr.mu.Lock()
-	defer s.tr.mu.Unlock()
 	if at, ok := s.tr.audioAt[track]; ok && s.cfg.Now().Sub(at) >= HealthyStream {
 		s.tr.restarts[track] = 0
 	}
 	delete(s.tr.audioAt, track)
 	n := s.tr.restarts[track]
 	s.tr.restarts[track] = n + 1
+	s.tr.mu.Unlock()
+	if t, err := s.store.TrackByID(context.Background(), track, s.cfg.Now()); err != nil || t.State != store.TrackActive || !t.MeetingLive {
+		s.tr.mu.Lock()
+		delete(s.tr.restarts, track)
+		s.tr.mu.Unlock()
+	}
 	b := s.cfg.EgressBackoff
 	return b[min(n, len(b)-1)]
 }
@@ -295,7 +324,10 @@ func (s *Server) egressLoop(ctx context.Context, track string) {
 			return
 		}
 		t, err := s.store.TrackByID(ctx, track, s.cfg.Now())
-		if err != nil || t.State != store.TrackActive || !t.MeetingLive || s.streaming(track) {
+		if err != nil || t.State != store.TrackActive || !t.MeetingLive {
+			return
+		}
+		if s.streamingCurrent(ctx, track) {
 			return
 		}
 		room := store.RoomName(t.MeetingID)
@@ -319,14 +351,27 @@ func (s *Server) egressLoop(ctx context.Context, track string) {
 				}
 			}
 		}
-		if ctx.Err() != nil || s.streaming(track) {
+		if ctx.Err() != nil {
 			return
 		}
 		wait := backoff[min(attempt, len(backoff)-1)]
-		s.cfg.Log.Printf("transcript: starting a track egress failed (attempt %d: %s); retrying in %s", attempt+1, lkKind(err), wait)
 		// The track is not transcribed until a start is accepted and audio
-		// flows: a gap marker says so.
-		if err := s.store.OpenGap(ctx, track, s.sinceStart(t.MeetingStart), s.cfg.Engine.Name()); err == nil {
+		// flows: a gap marker says so; unless a current stream connected
+		// while this attempt was in flight (LiveKit timed the start out, the
+		// Egress ran), when the loop is done. Check and gap are one step
+		// against the first audio (gapMu).
+		s.tr.gapMu.Lock()
+		if s.streamingCurrent(ctx, track) {
+			s.tr.gapMu.Unlock()
+			return
+		}
+		if testHookGapCheck != nil {
+			testHookGapCheck(track)
+		}
+		s.cfg.Log.Printf("transcript: starting a track egress failed (attempt %d: %s); retrying in %s", attempt+1, lkKind(err), wait)
+		opened := s.store.OpenGap(ctx, track, s.sinceStart(t.MeetingStart), s.cfg.Engine.Name(), s.cfg.Now()) == nil
+		s.tr.gapMu.Unlock()
+		if opened {
 			s.hub.Changed(t.MeetingID)
 		}
 		select {
@@ -351,7 +396,7 @@ func (s *Server) resumeTranscription(ctx context.Context) {
 		return
 	}
 	for _, t := range ts {
-		if err := s.store.OpenGap(ctx, t.Track, s.sinceStart(t.MeetingStart), s.cfg.Engine.Name()); err == nil {
+		if err := s.store.OpenGap(ctx, t.Track, s.sinceStart(t.MeetingStart), s.cfg.Engine.Name(), s.cfg.Now()); err == nil {
 			s.hub.Changed(t.MeetingID)
 		}
 		s.startEgress(t.Track)
@@ -378,11 +423,19 @@ func (s *Server) stopTranscription(ctx context.Context, meetingID string) {
 	}
 }
 
-// streaming says track has an ingest stream connected.
-func (s *Server) streaming(track string) bool {
+// streamingCurrent says track has an ingest stream connected with its
+// CURRENT egress's nonce. 🔴 A stream of an older attempt (its Egress came
+// late, after a newer attempt drew a new nonce) is not current: it is being
+// closed (the watcher), and must not stop the retries.
+func (s *Server) streamingCurrent(ctx context.Context, track string) bool {
 	s.tr.mu.Lock()
-	defer s.tr.mu.Unlock()
-	return s.tr.conns[track] != nil
+	lc := s.tr.conns[track]
+	s.tr.mu.Unlock()
+	if lc == nil {
+		return false
+	}
+	t, err := s.store.TrackByID(ctx, track, s.cfg.Now())
+	return err == nil && t.Nonce == lc.nonce
 }
 
 func (s *Server) closeConn(track string, code int, why string) {
@@ -391,8 +444,37 @@ func (s *Server) closeConn(track string, code int, why string) {
 	delete(s.tr.conns, track)
 	s.tr.mu.Unlock()
 	if c != nil {
-		c.Close(code, why)
+		c.conn.Close(code, why)
 	}
+}
+
+// streamEnded is the end of lc's read loop, BEFORE the engine is drained (up
+// to 2 × stt.CallTimeout): lc is deregistered, and when it was the track's
+// stream, the track is still transcribed, no start loop is running and no
+// egress id is known (its start timed out at LiveKit yet the Egress ran, so
+// no egress_ended will name it), its end is the egress's death: a gap from
+// now, and a restart on the backoff.
+func (s *Server) streamEnded(t store.Track, lc *liveConn) {
+	s.tr.mu.Lock()
+	current := s.tr.conns[t.Track] == lc
+	if current {
+		delete(s.tr.conns, t.Track)
+	}
+	running := s.tr.runs[t.Track] != nil
+	s.tr.mu.Unlock()
+	if !current || running {
+		return
+	}
+	cur, err := s.store.TrackByID(context.Background(), t.Track, s.cfg.Now())
+	if err != nil || cur.State != store.TrackActive || !cur.MeetingLive || cur.EgressID != "" {
+		return
+	}
+	if err := s.store.OpenGap(context.Background(), t.Track, s.sinceStart(t.MeetingStart), s.cfg.Engine.Name(), s.cfg.Now()); err == nil {
+		s.hub.Changed(t.MeetingID)
+	}
+	wait := s.restartWait(t.Track)
+	s.cfg.Log.Printf("transcript: a stream of an unknown egress ended; starting a new egress in %s", wait)
+	s.startEgressAfter(t.Track, wait)
 }
 
 // ---- the ingest listener ----
@@ -468,6 +550,9 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.cfg.Log.Printf("ingest GET %s 101: streaming", ingest.LogPath(r.URL.Path))
+	if testHookBeforeRegister != nil {
+		testHookBeforeRegister(track)
+	}
 	s.serveIngest(conn, t)
 }
 
@@ -481,19 +566,19 @@ func (s *Server) ingestAllowed(ctx context.Context, track, nonce string) bool {
 // meeting ends, the track is no longer transcribed, or a newer egress of the
 // track replaces it.
 func (s *Server) serveIngest(conn *ingest.Conn, t store.Track) {
+	lc := &liveConn{conn: conn, nonce: t.Nonce}
 	s.tr.mu.Lock()
 	if old := s.tr.conns[t.Track]; old != nil {
-		old.Close(ingest.CloseNormal, "replaced by a newer stream")
+		old.conn.Close(ingest.CloseNormal, "replaced by a newer stream")
 	}
-	s.tr.conns[t.Track] = conn
+	s.tr.conns[t.Track] = lc
 	s.tr.meetings[t.Track] = t.MeetingID
 	s.tr.mu.Unlock()
 	ctx, cancel := context.WithCancel(s.bg)
 	defer func() {
 		cancel()
 		s.tr.mu.Lock()
-		current := s.tr.conns[t.Track] == conn
-		if current {
+		if s.tr.conns[t.Track] == lc {
 			delete(s.tr.conns, t.Track)
 		}
 		if m := s.tr.partials[t.MeetingID]; m != nil {
@@ -508,19 +593,6 @@ func (s *Server) serveIngest(conn *ingest.Conn, t store.Track) {
 		cur, err := s.store.TrackByID(context.Background(), t.Track, s.cfg.Now())
 		if err != nil || cur.State != store.TrackActive || !cur.MeetingLive {
 			s.forgetTrack(t.MeetingID, t.Track)
-		} else if current && cur.Nonce == t.Nonce && cur.EgressID == "" {
-			// A stream whose egress the plugin never learned (its start
-			// timed out at LiveKit, yet the egress ran: so the start loop
-			// stopped when this stream connected, egressLoop) has ended
-			// while the track is still transcribed. No egress_ended will name
-			// it, so its end is the egress's death: a gap, and a restart on
-			// the backoff.
-			wait := s.restartWait(t.Track)
-			s.cfg.Log.Printf("transcript: a stream of an unknown egress ended; starting a new egress in %s", wait)
-			if err := s.store.OpenGap(context.Background(), t.Track, s.sinceStart(t.MeetingStart), s.cfg.Engine.Name()); err == nil {
-				s.hub.Changed(t.MeetingID)
-			}
-			s.startEgressAfter(t.Track, wait)
 		}
 		s.hub.Changed(t.MeetingID)
 		conn.Close(ingest.CloseNormal, "")
@@ -581,12 +653,18 @@ read:
 			b := s.sinceStart(t.MeetingStart)
 			base.Store(b)
 			// Audio flows again: the gap closes, the panel's "Transcript
-			// paused" clears, and the stream's healthy stretch starts.
-			s.tr.mu.Lock()
-			delete(s.tr.paused, t.Track)
-			s.tr.audioAt[t.Track] = s.cfg.Now()
-			s.tr.mu.Unlock()
-			s.store.CloseGap(ctx, t.Track, b)
+			// paused" clears, and the stream's healthy stretch starts. Only
+			// for the CURRENT egress's stream, and as one step against
+			// egressLoop's gap (gapMu).
+			s.tr.gapMu.Lock()
+			if s.streamingCurrent(ctx, t.Track) {
+				s.tr.mu.Lock()
+				delete(s.tr.paused, t.Track)
+				s.tr.audioAt[t.Track] = s.cfg.Now()
+				s.tr.mu.Unlock()
+				s.store.CloseGap(ctx, t.Track, b)
+			}
+			s.tr.gapMu.Unlock()
 			s.hub.Changed(t.MeetingID)
 		}
 		chunks, err := dec.Push(msg.Data)
@@ -603,6 +681,7 @@ read:
 			}
 		}
 	}
+	s.streamEnded(t, lc)
 	if tail := dec.Flush(); tail != nil {
 		_ = stream.Write(tail)
 	}

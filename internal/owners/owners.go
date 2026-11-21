@@ -1,171 +1,285 @@
-// Package owners holds the plugin's muster tokens, one per owner it serves
-// (design: "The owner: the hand-off": "The plugin holds one token per owner it
-// serves (muster_plugin picks it)"), and learns from muster when one dies.
+// Package owners holds the plugin's one muster token, a server-installed
+// app's, and learns from muster when it may no longer act: for anyone (the
+// app uninstalled, or its token rotated away) or for one person (they hid the
+// app, were disabled, signed out everywhere, or their 8-hour grant ran out).
 //
-// muster never calls the plugin, so a revoked token is learned only by
-// asking: every PollInterval the registry calls GET /plugin/v1/self with each
-// live token, and a 401 deletes every owner session minted through it and
-// ends the owner's open meetings (design: "Security and privacy", "Owner
-// sessions").
+// muster never calls the plugin, so all of it is learned by asking (design:
+// "Revocation, uninstall and the alive poll"). Every PollInterval:
+//
+//   - GET /plugin/v1/self. A 401 ends everything: every owner session is
+//     deleted and every open meeting ended, and the app refuses every owner
+//     request and every /enter from then on.
+//   - POST /plugin/v1/owners/check for every subject with a live owner
+//     session or an open meeting. "expired" ends that person's sessions and
+//     keeps their meetings; 🔴 "revoked", any other state, or no answer for
+//     the subject ends their sessions and meetings. Only an answer ends
+//     anything: a 5xx or no answer at all keeps what is held.
+//
+// Boot does the same once, before the plugin serves anyone, so a revocation
+// it slept through is applied first.
 package owners
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"slices"
+	"sort"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ZacxDev/muster-meetings/internal/muster"
 	"github.com/ZacxDev/muster-meetings/internal/store"
 )
 
-// PollInterval is how often each token's /self is asked (design: 60 s).
+// PollInterval is how often /self and owners/check are asked (design: 60 s).
 const PollInterval = 60 * time.Second
 
-// Capability is the muster capability every token must hold.
+// Capability is the muster capability the token must hold.
 const Capability = "app"
 
-// Token is one live plugin token and whom it serves.
-type Token struct {
-	PluginID   int64
-	OwnerID    int64
-	OwnerLogin string
-	Client     *muster.Client
-}
+// TasksCapability decides whether Make task is drawn (phase 6).
+const TasksCapability = "tasks"
 
-// Registry is the plugin's tokens. It is safe for concurrent use.
-type Registry struct {
+// App is the plugin's one server token and what muster said of it. It is
+// safe for concurrent use.
+type App struct {
+	// PluginID is the app's id on muster: muster's frame names it in
+	// muster_plugin, and /enter refuses any other.
+	PluginID int64
+	// Name is the app's name on muster.
+	Name string
+	// FilesTasks says the admin installed it with Files tasks.
+	FilesTasks bool
+	// Client calls muster with the token.
+	Client *muster.Client
+
 	store *store.Store
 	log   *log.Logger
 	now   func() time.Time
+	dead  atomic.Bool
 
-	mu   sync.Mutex
-	live map[int64]Token // plugin id → token; a revoked token is removed
+	// The owners/check rotation: each pass resumes after the last subject
+	// the previous one judged, and none is sent before retryAt (muster's
+	// Retry-After), so past muster's 60 calls a minute no tail of the
+	// subjects is starved.
+	checkMu sync.Mutex
+	resume  string
+	retryAt time.Time
 }
 
-// Boot asks /self of every client and returns the registry of live tokens.
+// sleep waits d, or until ctx ends: Boot waits out a Retry-After with it.
+// Tests replace it.
+var sleep = func(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+// ErrRevoked is muster's 401 for the token: the app is uninstalled, or its
+// token was rotated away.
+var ErrRevoked = errors.New("muster refused MUSTER_PLUGIN_TOKEN (401): the app was uninstalled, or its token rotated; " +
+	"every owner session was deleted and every open meeting ended")
+
+// Boot asks /self, checks the token is a server app's with `app`, and
+// reconciles the database with muster before the plugin serves anyone.
 //
-// A token muster answers 401 (revoked while the plugin was down) is left
-// out and logged. Any other refusal stops the boot: a token without `app`,
-// a team's token (an app tab is a person's), two tokens for one plugin, a
-// muster that does not answer. Then the database is reconciled with what is
-// live: every owner session minted through a token that is not live is
-// deleted, and every open meeting of an owner no live token serves is ended,
-// so a revocation the plugin slept through is applied before it serves
-// anyone.
-func Boot(ctx context.Context, clients []*muster.Client, st *store.Store, logger *log.Logger, now func() time.Time) (*Registry, error) {
-	r := &Registry{store: st, log: logger, now: now, live: map[int64]Token{}}
-	for i, c := range clients {
-		s, err := c.Self(ctx)
-		if e := muster.AsError(err); e != nil && e.Kind == muster.KindAuth {
-			logger.Printf("owners: token %d of %d: muster refused it (revoked, or its owner disabled); not serving it", i+1, len(clients))
-			continue
+// A 401 ends everything the database holds and returns ErrRevoked. A token
+// that is not a server app's (a person's own token, or a team's), or lacks
+// `app`, is refused. Then every subject the database holds a session or an
+// open meeting for is sent to owners/check, and each one muster does not
+// answer live is ended.
+func Boot(ctx context.Context, c *muster.Client, st *store.Store, logger *log.Logger, now func() time.Time) (*App, error) {
+	a := &App{Client: c, store: st, log: logger, now: now}
+	s, err := c.Self(ctx)
+	if e := muster.AsError(err); e != nil && e.Kind == muster.KindAuth {
+		if _, err := st.EndAll(ctx, "boot: /self answered 401", now()); err != nil {
+			return nil, fmt.Errorf("%w (and the database could not be cleared: %v)", ErrRevoked, err)
 		}
-		if err != nil {
-			return nil, fmt.Errorf("token %d of %d: GET /plugin/v1/self: %w", i+1, len(clients), err)
-		}
-		if !slices.Contains(s.Capabilities, Capability) {
-			return nil, fmt.Errorf("token %d of %d (plugin %d) lacks the %q capability: mint it on muster's /plugins with App tab checked", i+1, len(clients), s.PluginID, Capability)
-		}
-		if s.OwnerKind != "person" {
-			return nil, fmt.Errorf("token %d of %d (plugin %d) is a %s's: an app tab is a person's", i+1, len(clients), s.PluginID, s.OwnerKind)
-		}
-		if _, dup := r.live[s.PluginID]; dup {
-			return nil, fmt.Errorf("token %d of %d: plugin %d is listed twice", i+1, len(clients), s.PluginID)
-		}
-		r.live[s.PluginID] = Token{PluginID: s.PluginID, OwnerID: s.OwnerID, OwnerLogin: s.OwnerLogin, Client: c}
-		if err := st.UpsertOwner(ctx, s.OwnerID, s.OwnerLogin, s.PluginID, now()); err != nil {
-			return nil, err
-		}
-		logger.Printf("owners: serving owner %d through plugin %d", s.OwnerID, s.PluginID)
+		return nil, ErrRevoked
 	}
-	if len(r.live) == 0 {
-		return nil, fmt.Errorf("no live plugin token: muster refused every one in MUSTER_PLUGIN_TOKEN")
+	if err != nil {
+		return nil, fmt.Errorf("GET /plugin/v1/self: %w", err)
 	}
-	plugins, owners := []int64{}, []int64{}
-	for _, t := range r.live {
-		plugins = append(plugins, t.PluginID)
-		owners = append(owners, t.OwnerID)
+	if s.Scope != muster.ScopeServer || s.OwnerKind != muster.ScopeServer {
+		return nil, fmt.Errorf("MUSTER_PLUGIN_TOKEN is a %q token (plugin %d), not a server-installed app's: an admin installs Meetings on muster's /admin/apps", s.OwnerKind, s.PluginID)
 	}
-	rec, err := st.ReconcileLive(ctx, plugins, owners, now())
+	if !slices.Contains(s.Capabilities, Capability) {
+		return nil, fmt.Errorf("the server app (plugin %d) lacks the %q capability", s.PluginID, Capability)
+	}
+	a.PluginID, a.Name, a.FilesTasks = s.PluginID, s.PluginName, slices.Contains(s.Capabilities, TasksCapability)
+	// Every held subject is judged once before the plugin serves anyone:
+	// pass after pass, waiting out muster's Retry-After between them.
+	held, err := st.HeldSubjects(ctx, now())
 	if err != nil {
 		return nil, err
 	}
-	if rec.Sessions > 0 || rec.Meetings > 0 {
-		logger.Printf("owners: boot: %d sessions of tokens no longer live deleted, %d meetings ended", rec.Sessions, rec.Meetings)
-	}
-	return r, nil
-}
-
-// Lookup returns the live token of pluginID.
-func (r *Registry) Lookup(pluginID int64) (Token, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	t, ok := r.live[pluginID]
-	return t, ok
-}
-
-// PollOnce asks /self of every live token once. A 401 revokes it (Revoke);
-// any other failure is logged and the token kept, since only muster's 401
-// says it is dead.
-func (r *Registry) PollOnce(ctx context.Context) {
-	r.mu.Lock()
-	toks := make([]Token, 0, len(r.live))
-	for _, t := range r.live {
-		toks = append(toks, t)
-	}
-	r.mu.Unlock()
-	for _, t := range toks {
-		_, err := t.Client.Self(ctx)
-		if err == nil {
-			continue
+	for covered := 0; covered < len(held); {
+		n, wait, err := a.checkOwners(ctx)
+		if errors.Is(err, ErrRevoked) {
+			return nil, err
 		}
-		if e := muster.AsError(err); e != nil && e.Kind == muster.KindAuth {
-			r.Revoke(ctx, t.PluginID)
-			continue
+		if err != nil {
+			return nil, fmt.Errorf("boot: POST /plugin/v1/owners/check: %w", err)
 		}
-		r.log.Printf("owners: plugin %d: GET /plugin/v1/self: %v (keeping the token: only a 401 ends it)", t.PluginID, err)
-	}
-}
-
-// Revoke stops serving pluginID's token: it leaves the registry, every owner
-// session minted through it is deleted, and, unless another live token still
-// serves the same owner, the owner's open meetings are ended.
-func (r *Registry) Revoke(ctx context.Context, pluginID int64) {
-	r.mu.Lock()
-	t, ok := r.live[pluginID]
-	delete(r.live, pluginID)
-	other := false
-	for _, o := range r.live {
-		if o.OwnerID == t.OwnerID {
-			other = true
+		covered += n
+		if covered < len(held) && wait > 0 {
+			logger.Printf("owners: boot: %d of %d people checked; muster asks to wait %s", covered, len(held), wait)
+			if err := sleep(ctx, wait); err != nil {
+				return nil, fmt.Errorf("boot: waiting for owners/check: %w", err)
+			}
+		} else if n == 0 {
+			break // nothing left held (each judged subject may have ended)
 		}
 	}
-	r.mu.Unlock()
-	if !ok {
-		return
-	}
-	res, err := r.store.RevokePlugin(ctx, pluginID, t.OwnerID, !other, r.now())
+	return a, nil
+}
+
+// Live says muster has not refused the token. Once false it stays false:
+// a rotated-away or uninstalled token never comes back.
+func (a *App) Live() bool { return !a.dead.Load() }
+
+// Revoke ends everything: the app refuses every request from now on, every
+// owner session is deleted and every open meeting ended.
+func (a *App) Revoke(ctx context.Context, why string) {
+	a.dead.Store(true)
+	res, err := a.store.EndAll(ctx, why, a.now())
 	if err != nil {
-		// The token is already out of the registry, so /enter refuses it; the
-		// sessions are retried at the next boot's reconcile.
-		r.log.Printf("owners: plugin %d revoked by muster, but its sessions could not be deleted: %v", pluginID, err)
+		// The app already refuses every owner request; the rows go at the
+		// next boot, which fails on the same 401.
+		a.log.Printf("owners: %s, but the sessions could not be deleted: %v", why, err)
 		return
 	}
-	r.log.Printf("owners: plugin %d revoked by muster: %d sessions deleted, %d meetings ended", pluginID, res.Sessions, res.Meetings)
+	a.log.Printf("owners: %s: %d sessions deleted, %d meetings ended", why, res.Sessions, res.Meetings)
 }
 
-// Live is the number of live tokens.
-func (r *Registry) Live() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return len(r.live)
+// checkOwners is one owners/check pass. It sends the held subjects in
+// batches of muster.MaxCheckSubjects, starting after the last subject the
+// previous pass judged (wrapping around), until every one is sent or muster
+// answers 429; then it records muster's Retry-After, and the next pass
+// resumes where this one stopped. It returns how many subjects it judged or
+// sent, and the wait muster asked for.
+//
+// Each answered state is acted on: live keeps it; expired ends the person's
+// owner sessions only, so their open meetings keep running for the guests
+// (they end by End meeting, the 24 h link lifetime or the sweep, and the
+// owner reopens the tab to see them); revoked ends their sessions and open
+// meetings. 🔴 Anything else, including a subject absent from an answered
+// batch, is revoked: fail closed. Only what existed when the batch was sent
+// is ended. A batch that fails is logged and its people kept. A 401 revokes
+// the app and returns ErrRevoked.
+func (a *App) checkOwners(ctx context.Context) (int, time.Duration, error) {
+	a.checkMu.Lock()
+	defer a.checkMu.Unlock()
+	held, err := a.store.HeldSubjects(ctx, a.now())
+	if err != nil || len(held) == 0 {
+		return 0, 0, err
+	}
+	start := sort.SearchStrings(held, a.resume)
+	if start < len(held) && held[start] == a.resume {
+		start++
+	}
+	order := append(slices.Clone(held[start:]), held[:start]...)
+	var revoked, expired, failures []string
+	var wait time.Duration
+	var first error
+	sent, done := a.now(), 0
+	for done < len(order) {
+		batch := order[done:min(done+muster.MaxCheckSubjects, len(order))]
+		states, err := a.Client.OwnersCheck(ctx, batch)
+		e := muster.AsError(err)
+		if e != nil && e.Kind == muster.KindAuth {
+			a.checkMu.Unlock()
+			a.Revoke(ctx, "owners/check answered 401")
+			a.checkMu.Lock()
+			return done, 0, ErrRevoked
+		}
+		if e != nil && e.Kind == muster.KindRateLimited {
+			wait = e.RetryAfter
+			a.retryAt = a.now().Add(wait)
+			break
+		}
+		done += len(batch)
+		if err != nil {
+			failures = append(failures, err.Error())
+			if first == nil {
+				first = err
+			}
+			continue // its people are kept until muster answers
+		}
+		for _, s := range batch {
+			switch states[s] {
+			case muster.StateLive:
+			case muster.StateExpired:
+				expired = append(expired, s)
+			default: // revoked, another state, or absent from the answer
+				revoked = append(revoked, s)
+			}
+		}
+	}
+	if done > 0 {
+		a.resume = order[done-1]
+	}
+	if len(expired) > 0 {
+		n, err := a.store.EndSessions(ctx, expired, sent, a.now())
+		if err != nil {
+			return done, wait, err
+		}
+		a.log.Printf("owners: %d of %d people's grants expired: %d sessions deleted, their meetings kept", len(expired), len(held), n)
+	}
+	if len(revoked) > 0 {
+		res, err := a.store.EndSubjects(ctx, revoked, sent, a.now())
+		if err != nil {
+			return done, wait, err
+		}
+		a.log.Printf("owners: muster revoked the app for %d of %d people: %d sessions deleted, %d meetings ended",
+			len(revoked), len(held), res.Sessions, res.Meetings)
+	}
+	if wait > 0 {
+		a.log.Printf("owners: owners/check: muster's limit reached after %d of %d people; resuming in %s", done, len(held), wait)
+	}
+	if first != nil {
+		a.log.Printf("owners: POST /plugin/v1/owners/check: %s (those people are kept: only an answer ends a person)", strings.Join(failures, "; "))
+		return done, wait, first
+	}
+	return done, wait, nil
+}
+
+// PollOnce asks /self, then owners/check. A 401 from either ends
+// everything; any other failure is logged and changes nothing, since only
+// muster's answer says what is dead.
+func (a *App) PollOnce(ctx context.Context) {
+	if !a.Live() {
+		return
+	}
+	_, err := a.Client.Self(ctx)
+	if e := muster.AsError(err); e != nil && e.Kind == muster.KindAuth {
+		a.Revoke(ctx, "/self answered 401: the app was uninstalled or its token rotated")
+		return
+	}
+	if err != nil {
+		a.log.Printf("owners: GET /plugin/v1/self: %v (keeping everything: only a 401 ends it)", err)
+		return
+	}
+	a.checkMu.Lock()
+	wait := a.now().Before(a.retryAt)
+	a.checkMu.Unlock()
+	if wait {
+		return // muster's Retry-After: not before then
+	}
+	_, _, _ = a.checkOwners(ctx) // it logs its own failures
 }
 
 // Run polls every interval until ctx ends.
-func (r *Registry) Run(ctx context.Context, interval time.Duration) {
+func (a *App) Run(ctx context.Context, interval time.Duration) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -173,7 +287,7 @@ func (r *Registry) Run(ctx context.Context, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			r.PollOnce(ctx)
+			a.PollOnce(ctx)
 		}
 	}
 }

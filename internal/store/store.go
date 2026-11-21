@@ -2,10 +2,14 @@
 // plugin's SQLite)"): owners, owner sessions, meetings, and an audit trail
 // that never holds transcript text, guest names or codes.
 //
+// An owner is a person muster's server-app redeem named, known only by the
+// pairwise subject it gave and a display name. 🔴 Nothing here holds a muster
+// user id or an email (design: fork 2); the plugin never receives either.
+//
 // 🔴 Every owner-facing read and write goes through OwnerRepo, which is built
-// only by ForOwner and carries the owner id in every statement. No handler
-// writes its own `WHERE owner_id`; a handler that holds an OwnerRepo can only
-// ever see that owner's rows.
+// only by ForSession or ForSubject and carries the subject in every
+// statement. No handler writes its own `WHERE subject`; a handler that holds
+// an OwnerRepo can only ever see that person's rows.
 //
 // Times are stored as Unix milliseconds (UTC). Tokens are stored only as
 // their SHA-256 (Hash). A meeting's join code is not stored at all: it is
@@ -16,13 +20,12 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // pure Go, no cgo
@@ -80,6 +83,67 @@ var migrations = []string{
 		event      TEXT    NOT NULL,
 		detail     TEXT    NOT NULL DEFAULT ''  -- never transcript text, item text, guest names or codes
 	) STRICT;`,
+
+	// 2: core PR 1h, the server-installed app (design: "What changes in the
+	// plugin's phase 2a"). One server token serves every person, who is known
+	// only by the pairwise subject the redeem gives: owners, sessions,
+	// meetings and audit are keyed on it, and nothing holds a muster user id
+	// or an email. 2a's tables are dropped and made again with nothing
+	// carried over: migrate refuses this step on a database that holds 2a
+	// owners or meetings (ErrNeedsSubjectMap), since those are keyed on muster
+	// user ids and need a one-time map to subjects first.
+	`DROP TABLE audit;
+	DROP TABLE meetings;
+	DROP TABLE owner_sessions;
+	DROP TABLE owners;
+	CREATE TABLE owners (
+		subject      TEXT    PRIMARY KEY CHECK (length(subject) = 22), -- the redeem's pairwise subject; never a muster user id
+		display_name TEXT    NOT NULL DEFAULT '',                       -- from the redeem; never an email
+		updated_at   INTEGER NOT NULL
+	) STRICT;
+	CREATE TABLE owner_sessions (
+		token_sha256 TEXT    PRIMARY KEY,
+		subject      TEXT    NOT NULL REFERENCES owners (subject),
+		created_at   INTEGER NOT NULL,
+		expires_at   INTEGER NOT NULL
+	) STRICT;
+	CREATE INDEX owner_sessions_subject ON owner_sessions (subject);
+	CREATE TABLE meetings (
+		id               TEXT    PRIMARY KEY,
+		subject          TEXT    NOT NULL REFERENCES owners (subject),
+		title            TEXT    NOT NULL DEFAULT '',
+		room             TEXT    NOT NULL UNIQUE,
+		join_code_sha256 TEXT    NOT NULL UNIQUE, -- the guest link's lookup; the code itself is never stored
+		state            TEXT    NOT NULL CHECK (state IN ('open', 'ended')),
+		record           INTEGER NOT NULL CHECK (record IN (0, 1)),
+		ai               INTEGER NOT NULL CHECK (ai IN (0, 1)),
+		created_at       INTEGER NOT NULL,
+		started_at       INTEGER,
+		ended_at         INTEGER
+	) STRICT;
+	CREATE INDEX meetings_subject_newest ON meetings (subject, created_at DESC, id DESC);
+	CREATE INDEX meetings_open ON meetings (state, created_at) WHERE state = 'open';
+	CREATE TABLE audit (
+		at         INTEGER NOT NULL,
+		subject    TEXT,
+		meeting_id TEXT,
+		event      TEXT    NOT NULL,
+		detail     TEXT    NOT NULL DEFAULT ''  -- never transcript text, item text, guest names, display names or codes
+	) STRICT;`,
+}
+
+// ErrNeedsSubjectMap is a phase-2a database that holds owners or meetings:
+// they are keyed on muster user ids, and this schema keys on subjects.
+var ErrNeedsSubjectMap = errors.New("this database holds phase 2a owners or meetings, keyed on muster user ids; " +
+	"the server-app schema keys on the subjects muster's redeem gives, so they need a one-time map from owner_id to subject " +
+	"before this build can open it (design: \"What changes in the plugin's phase 2a\")")
+
+// needsSubjectMap says a database at schema 1 holds rows migration 2 would
+// drop.
+func needsSubjectMap(tx *sql.Tx) (bool, error) {
+	var n int
+	err := tx.QueryRow(`SELECT (SELECT count(*) FROM owners) + (SELECT count(*) FROM meetings)`).Scan(&n)
+	return n > 0, err
 }
 
 // Store is the database.
@@ -139,6 +203,15 @@ func (s *Store) migrate() error {
 		if err != nil {
 			return err
 		}
+		if i == 1 {
+			if held, err := needsSubjectMap(tx); err != nil || held {
+				tx.Rollback()
+				if err == nil {
+					err = ErrNeedsSubjectMap
+				}
+				return err
+			}
+		}
 		if _, err := tx.Exec(migrations[i]); err != nil {
 			tx.Rollback()
 			return fmt.Errorf("migration %d: %w", i+1, err)
@@ -168,21 +241,16 @@ type execer interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
-func audit(ctx context.Context, x execer, now time.Time, ownerID int64, meetingID, event, detail string) error {
-	var mid any
+func audit(ctx context.Context, x execer, now time.Time, subject, meetingID, event, detail string) error {
+	var sub, mid any
+	if subject != "" {
+		sub = subject
+	}
 	if meetingID != "" {
 		mid = meetingID
 	}
-	_, err := x.ExecContext(ctx, `INSERT INTO audit (at, owner_id, meeting_id, event, detail) VALUES (?, ?, ?, ?, ?)`,
-		ms(now), ownerID, mid, event, detail)
-	return err
-}
-
-// UpsertOwner records the owner a token serves, as /self names them.
-func (s *Store) UpsertOwner(ctx context.Context, ownerID int64, login string, pluginID int64, now time.Time) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO owners (owner_id, owner_login, token_ref, updated_at) VALUES (?, ?, ?, ?)
-		ON CONFLICT (owner_id) DO UPDATE SET owner_login = excluded.owner_login, token_ref = excluded.token_ref, updated_at = excluded.updated_at`,
-		ownerID, login, pluginID, ms(now))
+	_, err := x.ExecContext(ctx, `INSERT INTO audit (at, subject, meeting_id, event, detail) VALUES (?, ?, ?, ?, ?)`,
+		ms(now), sub, mid, event, detail)
 	return err
 }
 
@@ -190,15 +258,22 @@ func (s *Store) UpsertOwner(ctx context.Context, ownerID int64, login string, pl
 type Session struct {
 	// TokenSHA256 is the stored form of the bearer that opened it.
 	TokenSHA256 string
-	OwnerID     int64
-	PluginID    int64
-	ExpiresAt   time.Time
+	// Subject is the person it is for: the pairwise subject muster's redeem
+	// gave.
+	Subject   string
+	ExpiresAt time.Time
 }
 
-// CreateSession mints an owner session for ownerID, through the token of
-// pluginID, valid SessionLifetime from now. It returns the token, which is
-// stored only as its hash.
-func (s *Store) CreateSession(ctx context.Context, ownerID, pluginID int64, now time.Time) (string, time.Time, error) {
+// ErrBadSubject is a subject that is not 22 base64url characters.
+var ErrBadSubject = errors.New("not a subject")
+
+// CreateSession records the person a redeem named (subject and display
+// name) and mints their owner session, valid SessionLifetime from now. It
+// returns the token, which is stored only as its hash.
+func (s *Store) CreateSession(ctx context.Context, subject, displayName string, now time.Time) (string, time.Time, error) {
+	if !ValidSubject(subject) {
+		return "", time.Time{}, ErrBadSubject
+	}
 	tok := NewSessionToken()
 	exp := now.Add(SessionLifetime)
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -206,11 +281,16 @@ func (s *Store) CreateSession(ctx context.Context, ownerID, pluginID int64, now 
 		return "", time.Time{}, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO owner_sessions (token_sha256, owner_id, plugin_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?)`,
-		Hash(tok), ownerID, pluginID, ms(now), ms(exp)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO owners (subject, display_name, updated_at) VALUES (?, ?, ?)
+		ON CONFLICT (subject) DO UPDATE SET display_name = excluded.display_name, updated_at = excluded.updated_at`,
+		subject, displayName, ms(now)); err != nil {
 		return "", time.Time{}, err
 	}
-	if err := audit(ctx, tx, now, ownerID, "", "session.created", fmt.Sprintf("plugin %d", pluginID)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO owner_sessions (token_sha256, subject, created_at, expires_at) VALUES (?, ?, ?, ?)`,
+		Hash(tok), subject, ms(now), ms(exp)); err != nil {
+		return "", time.Time{}, err
+	}
+	if err := audit(ctx, tx, now, subject, "", "session.created", ""); err != nil {
 		return "", time.Time{}, err
 	}
 	return tok, exp, tx.Commit()
@@ -224,8 +304,8 @@ func (s *Store) LookupSession(ctx context.Context, token string, now time.Time) 
 	}
 	var out Session
 	var exp int64
-	err := s.db.QueryRowContext(ctx, `SELECT owner_id, plugin_id, expires_at FROM owner_sessions WHERE token_sha256 = ? AND expires_at > ?`,
-		Hash(token), ms(now)).Scan(&out.OwnerID, &out.PluginID, &exp)
+	err := s.db.QueryRowContext(ctx, `SELECT subject, expires_at FROM owner_sessions WHERE token_sha256 = ? AND expires_at > ?`,
+		Hash(token), ms(now)).Scan(&out.Subject, &exp)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Session{}, ErrNotFound
 	}
@@ -237,77 +317,138 @@ func (s *Store) LookupSession(ctx context.Context, token string, now time.Time) 
 	return out, nil
 }
 
-// Revoked is what RevokePlugin did.
-type Revoked struct {
+// Ended is what EndAll or EndSubjects did.
+type Ended struct {
 	Sessions int64 // owner sessions deleted
 	Meetings int64 // open meetings ended
 }
 
-// RevokePlugin acts on muster's word that pluginID's token is dead (a 401 on
-// /self): every owner session minted through it is deleted and, when
-// endMeetings, every open meeting of ownerID is ended. The caller passes
-// endMeetings false only while the owner still has another live token.
-func (s *Store) RevokePlugin(ctx context.Context, pluginID, ownerID int64, endMeetings bool, now time.Time) (Revoked, error) {
-	var out Revoked
+// EndAll acts on muster's word that the server token is dead (a 401: the
+// app was uninstalled, or its token rotated away): every owner session is
+// deleted and every open meeting ended, in one transaction.
+func (s *Store) EndAll(ctx context.Context, why string, now time.Time) (Ended, error) {
+	var out Ended
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return out, err
 	}
 	defer tx.Rollback()
-	r, err := tx.ExecContext(ctx, `DELETE FROM owner_sessions WHERE plugin_id = ?`, pluginID)
+	r, err := tx.ExecContext(ctx, `DELETE FROM owner_sessions WHERE 1`)
 	if err != nil {
 		return out, err
 	}
 	out.Sessions, _ = r.RowsAffected()
-	if endMeetings {
-		r, err = tx.ExecContext(ctx, `UPDATE meetings SET state = 'ended', ended_at = ? WHERE owner_id = ? AND state = 'open'`, ms(now), ownerID)
-		if err != nil {
-			return out, err
-		}
-		out.Meetings, _ = r.RowsAffected()
-	}
-	if err := audit(ctx, tx, now, ownerID, "", "plugin.revoked",
-		fmt.Sprintf("plugin %d: %d sessions deleted, %d meetings ended", pluginID, out.Sessions, out.Meetings)); err != nil {
-		return out, err
-	}
-	return out, tx.Commit()
-}
-
-// ReconcileLive applies, at boot, what muster said about the plugin's
-// tokens: every session minted through a plugin not in livePlugins is
-// deleted, and every open meeting of an owner not in liveOwners is ended.
-func (s *Store) ReconcileLive(ctx context.Context, livePlugins, liveOwners []int64, now time.Time) (Revoked, error) {
-	var out Revoked
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return out, err
-	}
-	defer tx.Rollback()
-	r, err := tx.ExecContext(ctx, `DELETE FROM owner_sessions WHERE plugin_id NOT IN (SELECT value FROM json_each(?))`, jsonInts(livePlugins))
-	if err != nil {
-		return out, err
-	}
-	out.Sessions, _ = r.RowsAffected()
-	r, err = tx.ExecContext(ctx, `UPDATE meetings SET state = 'ended', ended_at = ? WHERE state = 'open' AND owner_id NOT IN (SELECT value FROM json_each(?))`,
-		ms(now), jsonInts(liveOwners))
+	r, err = tx.ExecContext(ctx, `UPDATE meetings SET state = 'ended', ended_at = ? WHERE state = 'open'`, ms(now))
 	if err != nil {
 		return out, err
 	}
 	out.Meetings, _ = r.RowsAffected()
-	if out.Sessions > 0 || out.Meetings > 0 {
-		if err := audit(ctx, tx, now, 0, "", "boot.reconciled", fmt.Sprintf("%d sessions deleted, %d meetings ended", out.Sessions, out.Meetings)); err != nil {
+	if err := audit(ctx, tx, now, "", "", "app.revoked",
+		fmt.Sprintf("%s: %d sessions deleted, %d meetings ended", why, out.Sessions, out.Meetings)); err != nil {
+		return out, err
+	}
+	return out, tx.Commit()
+}
+
+// EndSubjects acts on muster's word that the app may no longer act for these
+// people (owners/check answered them revoked): every session of theirs, and
+// every open meeting of theirs, created at or before asOf is ended, in one
+// transaction. asOf is when the check was sent: a session or meeting the
+// person made after it (they reopened the tab while the answer was on its
+// way) is newer than what muster answered about, and is kept. No one
+// else's row is touched.
+func (s *Store) EndSubjects(ctx context.Context, subjects []string, asOf, now time.Time) (Ended, error) {
+	var out Ended
+	if len(subjects) == 0 {
+		return out, nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return out, err
+	}
+	defer tx.Rollback()
+	list := jsonStrings(subjects)
+	r, err := tx.ExecContext(ctx, `DELETE FROM owner_sessions WHERE subject IN (SELECT value FROM json_each(?)) AND created_at <= ?`, list, ms(asOf))
+	if err != nil {
+		return out, err
+	}
+	out.Sessions, _ = r.RowsAffected()
+	rows, err := tx.QueryContext(ctx, `UPDATE meetings SET state = 'ended', ended_at = ? WHERE state = 'open' AND subject IN (SELECT value FROM json_each(?)) AND created_at <= ? RETURNING id, subject`,
+		ms(now), list, ms(asOf))
+	if err != nil {
+		return out, err
+	}
+	type ended struct{ id, subject string }
+	var all []ended
+	for rows.Next() {
+		var e ended
+		if err := rows.Scan(&e.id, &e.subject); err != nil {
+			rows.Close()
+			return out, err
+		}
+		all = append(all, e)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return out, err
+	}
+	out.Meetings = int64(len(all))
+	for _, e := range all {
+		if err := audit(ctx, tx, now, e.subject, e.id, "meeting.ended", "muster no longer lets the app act for its owner"); err != nil {
 			return out, err
 		}
 	}
 	return out, tx.Commit()
 }
 
-func jsonInts(v []int64) string {
-	parts := make([]string, len(v))
-	for i, n := range v {
-		parts[i] = strconv.FormatInt(n, 10)
+// EndSessions acts on muster's word that these people's grants expired:
+// every owner session of theirs created at or before asOf (when the check
+// was sent; see EndSubjects) is deleted, and their open meetings are left
+// running for the guests. It returns the sessions deleted.
+func (s *Store) EndSessions(ctx context.Context, subjects []string, asOf, now time.Time) (int64, error) {
+	if len(subjects) == 0 {
+		return 0, nil
 	}
-	return "[" + strings.Join(parts, ",") + "]"
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	r, err := tx.ExecContext(ctx, `DELETE FROM owner_sessions WHERE subject IN (SELECT j.value FROM json_each(?) AS j) AND created_at <= ?`, jsonStrings(subjects), ms(asOf))
+	if err != nil {
+		return 0, err
+	}
+	n, _ := r.RowsAffected()
+	if err := audit(ctx, tx, now, "", "", "grants.expired", fmt.Sprintf("%d people, %d sessions deleted", len(subjects), n)); err != nil {
+		return 0, err
+	}
+	return n, tx.Commit()
+}
+
+// HeldSubjects is every person the plugin holds something live for: an
+// unexpired owner session or an open meeting. They are the subjects the
+// owners/check poll asks muster about.
+func (s *Store) HeldSubjects(ctx context.Context, now time.Time) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT subject FROM owner_sessions WHERE expires_at > ?
+		UNION SELECT subject FROM meetings WHERE state = 'open' ORDER BY 1`, ms(now))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+func jsonStrings(v []string) string {
+	b, _ := json.Marshal(v)
+	return string(b)
 }
 
 // Sweep ends every meeting open LinkLifetime past its creation, and deletes
@@ -321,19 +462,16 @@ func (s *Store) Sweep(ctx context.Context, now time.Time) (int64, error) {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM owner_sessions WHERE expires_at <= ?`, ms(now)); err != nil {
 		return 0, err
 	}
-	rows, err := tx.QueryContext(ctx, `UPDATE meetings SET state = 'ended', ended_at = ? WHERE state = 'open' AND created_at <= ? RETURNING id, owner_id`,
+	rows, err := tx.QueryContext(ctx, `UPDATE meetings SET state = 'ended', ended_at = ? WHERE state = 'open' AND created_at <= ? RETURNING id, subject`,
 		ms(now), ms(now.Add(-LinkLifetime)))
 	if err != nil {
 		return 0, err
 	}
-	type ended struct {
-		id    string
-		owner int64
-	}
+	type ended struct{ id, subject string }
 	var all []ended
 	for rows.Next() {
 		var e ended
-		if err := rows.Scan(&e.id, &e.owner); err != nil {
+		if err := rows.Scan(&e.id, &e.subject); err != nil {
 			rows.Close()
 			return 0, err
 		}
@@ -344,7 +482,7 @@ func (s *Store) Sweep(ctx context.Context, now time.Time) (int64, error) {
 		return 0, err
 	}
 	for _, e := range all {
-		if err := audit(ctx, tx, now, e.owner, e.id, "meeting.ended", "the 24 h cap"); err != nil {
+		if err := audit(ctx, tx, now, e.subject, e.id, "meeting.ended", "the 24 h cap"); err != nil {
 			return 0, err
 		}
 	}

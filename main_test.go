@@ -10,9 +10,9 @@ import (
 // not by LoadConfig (which refuses a path), so the line's own redaction is
 // what is tested.
 func TestTheStartupLineNamesTheHostOnly(t *testing.T) {
-	got := startupLine(Config{URL: "https://muster.example.test:8443/mpl_s3cretT0ken?t=mpl_s3cretT0ken", Tokens: []string{"mpl_s3cretT0ken"},
-		PublicURL: "https://meet.example.test", MusterOrigin: "https://example.test", Listen: ":8080", InternalListen: ":8081"}, 1)
-	want := "muster-meetings: talking to https://muster.example.test:8443 for 1 owner token(s); serving https://meet.example.test on :8080 (internal :8081), framed by https://example.test"
+	got := startupLine(Config{URL: "https://muster.example.test:8443/mpl_s3cretT0ken?t=mpl_s3cretT0ken", Token: "mpl_s3cretT0ken",
+		PublicURL: "https://meet.example.test", MusterOrigin: "https://example.test", Listen: ":8080", InternalListen: ":8081"}, "meet-srv", 12, true)
+	want := `muster-meetings: talking to https://muster.example.test:8443 as server app "meet-srv" (plugin 12, with Files tasks); serving https://meet.example.test on :8080 (internal :8081), framed by https://example.test`
 	if got != want {
 		t.Fatalf("startup line = %q, want %q", got, want)
 	}
@@ -34,29 +34,34 @@ func base() map[string]string {
 
 func TestLoadConfig(t *testing.T) {
 	c, err := LoadConfig(env(base()))
-	if err != nil || c.URL != "http://localhost:8105" || len(c.Tokens) != 1 || c.Tokens[0] != "mpl_x" ||
+	if err != nil || c.URL != "http://localhost:8105" || c.Token != "mpl_x" ||
 		c.MusterOrigin != "https://example.test" || c.PublicURL != "https://meet.example.test" ||
 		c.Listen != ":8080" || c.InternalListen != ":8081" || c.StateDir != "./state" || string(c.LinkKey) != string(fixtureKey) {
 		t.Fatalf("defaults = %+v, %v", c, err)
 	}
 	m := base()
-	m["MUSTER_PLUGIN_TOKEN"] = " mpl_a , mpl_b,"
+	m["MUSTER_PLUGIN_TOKEN"] = " mpl_a \n"
 	m["MEETINGS_LISTEN"], m["MEETINGS_INTERNAL_LISTEN"], m["STATE_DIR"] = "127.0.0.1:9000", "127.0.0.1:9001", "/tmp/s"
 	c, err = LoadConfig(env(m))
-	if err != nil || len(c.Tokens) != 2 || c.Tokens[0] != "mpl_a" || c.Tokens[1] != "mpl_b" || c.Listen != "127.0.0.1:9000" ||
+	if err != nil || c.Token != "mpl_a" || c.Listen != "127.0.0.1:9000" ||
 		c.InternalListen != "127.0.0.1:9001" || c.StateDir != "/tmp/s" {
 		t.Fatalf("set = %+v, %v", c, err)
 	}
 	for name, mut := range map[string]func(map[string]string){
 		"no MUSTER_URL":           func(m map[string]string) { delete(m, "MUSTER_URL") },
 		"http MUSTER_URL":         func(m map[string]string) { m["MUSTER_URL"] = "http://muster.example.test" },
-		"no token":                func(m map[string]string) { m["MUSTER_PLUGIN_TOKEN"] = " , " },
-		"a token of another kind": func(m map[string]string) { m["MUSTER_PLUGIN_TOKEN"] = "mpl_a,mst_s3cretT0ken" },
-		"no MUSTER_ORIGIN":        func(m map[string]string) { delete(m, "MUSTER_ORIGIN") },
-		"no public URL":           func(m map[string]string) { delete(m, "MEETINGS_PUBLIC_URL") },
-		"http public URL":         func(m map[string]string) { m["MEETINGS_PUBLIC_URL"] = "http://meet.example.test" },
-		"public URL with a path":  func(m map[string]string) { m["MEETINGS_PUBLIC_URL"] = "https://meet.example.test/app" },
-		"origin with a query":     func(m map[string]string) { m["MUSTER_ORIGIN"] = "https://example.test/?x=1" },
+		"no token":                func(m map[string]string) { m["MUSTER_PLUGIN_TOKEN"] = "  " },
+		"a token of another kind": func(m map[string]string) { m["MUSTER_PLUGIN_TOKEN"] = "mst_s3cretT0ken" },
+		// fork 8: exactly one server token; 2a's comma list refuses to boot,
+		// in every shape, never served in part.
+		"two tokens":             func(m map[string]string) { m["MUSTER_PLUGIN_TOKEN"] = "mpl_s3cretT0ken,mpl_s3cretT0ken2" },
+		"a token and a comma":    func(m map[string]string) { m["MUSTER_PLUGIN_TOKEN"] = "mpl_s3cretT0ken," },
+		"a comma and a token":    func(m map[string]string) { m["MUSTER_PLUGIN_TOKEN"] = " ,mpl_s3cretT0ken" },
+		"no MUSTER_ORIGIN":       func(m map[string]string) { delete(m, "MUSTER_ORIGIN") },
+		"no public URL":          func(m map[string]string) { delete(m, "MEETINGS_PUBLIC_URL") },
+		"http public URL":        func(m map[string]string) { m["MEETINGS_PUBLIC_URL"] = "http://meet.example.test" },
+		"public URL with a path": func(m map[string]string) { m["MEETINGS_PUBLIC_URL"] = "https://meet.example.test/app" },
+		"origin with a query":    func(m map[string]string) { m["MUSTER_ORIGIN"] = "https://example.test/?x=1" },
 		// The plugin served from muster's own origin would be muster, framed
 		// with allow-same-origin.
 		"public URL is muster's origin": func(m map[string]string) { m["MEETINGS_PUBLIC_URL"] = "https://EXAMPLE.test" },

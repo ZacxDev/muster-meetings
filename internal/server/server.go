@@ -6,11 +6,15 @@
 //	POST /api/meetings          New meeting: answers {"id", "join_url", "meeting"}
 //	GET  /api/meetings/{id}     one meeting, and its link while it is open
 //
+// The plugin runs as one server-installed app (core PR 1h): one token serves
+// every person on the muster, each known by the pairwise subject muster's
+// redeem gives.
+//
 // Owner routes take `Authorization: Bearer mmo_…` and nothing else: no
 // cookie is ever set or read (muster's frame is a third-party context, where
 // Safari blocks cookies and Chrome partitions them; plugins.md, "Do not
 // depend on a cookie in the frame"). A missing, unknown or expired session
-// is 401, and another owner's meeting is the same 404 as one that does not
+// is 401, and another person's meeting is the same 404 as one that does not
 // exist.
 package server
 
@@ -61,16 +65,16 @@ type Config struct {
 type Server struct {
 	cfg   Config
 	store *store.Store
-	reg   *owners.Registry
+	app   *owners.App
 	mux   *http.ServeMux
 }
 
 // New builds the handler.
-func New(cfg Config, st *store.Store, reg *owners.Registry) *Server {
+func New(cfg Config, st *store.Store, app *owners.App) *Server {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	s := &Server{cfg: cfg, store: st, reg: reg, mux: http.NewServeMux()}
+	s := &Server{cfg: cfg, store: st, app: app, mux: http.NewServeMux()}
 	static, err := fs.Sub(webFS, "web/static")
 	if err != nil {
 		panic(err)
@@ -180,14 +184,22 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 // Anything else is refused before it is sent to muster.
 var handoffCodeRE = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
 
-// The /enter refusals. Each is a whole sentence the owner reads in muster's
-// frame; none names a code or what muster said.
+// The /enter refusals. Each is a whole sentence the person reads (in muster's
+// frame, or in a tab of their own when /enter was not framed); none names a
+// code or what muster said.
 const (
-	EnterAgain     = "Open Meetings from muster again."
-	EnterNotSetUp  = "This Meetings server does not serve that muster tab. Ask the person who runs it to check the plugin token."
-	EnterRefused   = "That link to Meetings has expired or was already used."
-	EnterNoMuster  = "Meetings could not reach muster. Try again in a moment."
-	EnterWrongKind = "That link was not made for the Meetings tab."
+	EnterAgain = "Open Meetings from muster again."
+	// EnterNotFramed is /enter loaded anywhere but in a frame: a top-level
+	// tab, a fetch, a link preview (design: "/enter refuses unless
+	// Sec-Fetch-Dest: iframe").
+	EnterNotFramed = "Open Meetings from muster."
+	// EnterOldBrowser is /enter from a browser that sends no Sec-Fetch-*
+	// headers at all (Safari and iOS before 16.4): a dead end, not a hole.
+	EnterOldBrowser = "This browser is too old for Meetings. Update it, or open muster in a current browser."
+	EnterNotSetUp   = "This Meetings server does not serve that muster tab. Ask the person who runs it to check the plugin token."
+	EnterRefused    = "That link to Meetings has expired or was already used."
+	EnterNoMuster   = "Meetings could not reach muster. Try again in a moment."
+	EnterWrongKind  = "That link was not made for the Meetings tab."
 )
 
 type enterPage struct {
@@ -214,11 +226,39 @@ func (s *Server) refuseEnter(w http.ResponseWriter, code int, msg, why string) {
 	s.renderEnter(w, code, enterPage{Message: msg, Again: msg != EnterNotSetUp})
 }
 
+// framed says the browser is loading /enter into a frame: exactly one
+// Sec-Fetch-Dest header, and it says iframe. When it is not, why is the
+// sentence to show: EnterOldBrowser when the request carries no Sec-Fetch-*
+// header at all, EnterNotFramed otherwise.
+func framed(r *http.Request) (ok bool, why string) {
+	if d := r.Header.Values("Sec-Fetch-Dest"); len(d) == 1 && d[0] == "iframe" {
+		return true, ""
+	}
+	for k := range r.Header {
+		if strings.HasPrefix(k, "Sec-Fetch-") {
+			return false, EnterNotFramed
+		}
+	}
+	return false, EnterOldBrowser
+}
+
 // handleEnter is GET /enter?muster_code=…&muster_plugin=…, framed by muster's
-// /apps/{id} page. It redeems the code with the token of the plugin
-// muster_plugin names and admits the answer only when it is an app code for
-// that token's own owner.
+// /apps/{id} page. It redeems the code with the server token and admits the
+// answer only when it is an app code of this server app that names a person
+// by subject.
+//
+// 🔴 It refuses unless the browser says it is loading a frame
+// (Sec-Fetch-Dest: iframe), before anything is redeemed. With one server
+// token, a link to /enter carrying someone else's unspent code would sign
+// whoever opens it in as that someone (sign-in CSRF, any person to any
+// person). Refused unframed, the code is not spent and stays usable by the
+// frame it was minted for; framed by anyone but muster, frame-ancestors
+// stops the browser rendering what /enter answers.
 func (s *Server) handleEnter(w http.ResponseWriter, r *http.Request) {
+	if ok, why := framed(r); !ok {
+		s.refuseEnter(w, http.StatusForbidden, why, "not loaded in a frame (Sec-Fetch-Dest)")
+		return
+	}
 	q := r.URL.Query()
 	code, pid := q.Get("muster_code"), q.Get("muster_plugin")
 	if code == "" && pid == "" {
@@ -232,27 +272,28 @@ func (s *Server) handleEnter(w http.ResponseWriter, r *http.Request) {
 		s.refuseEnter(w, http.StatusBadRequest, EnterAgain, "a malformed code or plugin id")
 		return
 	}
-	tok, ok := s.reg.Lookup(pluginID)
-	if !ok {
-		s.refuseEnter(w, http.StatusForbidden, EnterNotSetUp, "plugin "+pid+" is not a live token here")
+	// muster_plugin no longer picks a token: there is one, and the frame
+	// must be this app's.
+	if pluginID != s.app.PluginID || !s.app.Live() {
+		s.refuseEnter(w, http.StatusForbidden, EnterNotSetUp, "plugin "+pid+" is not this server app, or its token is dead")
 		return
 	}
-	red, err := tok.Client.Redeem(r.Context(), code)
+	red, err := s.app.Client.Redeem(r.Context(), code)
 	if err != nil {
 		e := muster.AsError(err)
 		switch {
 		case e != nil && e.Kind == muster.KindOff:
-			s.refuseEnter(w, http.StatusForbidden, EnterRefused, "muster: no such code for plugin "+pid)
+			s.refuseEnter(w, http.StatusForbidden, EnterRefused, "muster: no such code")
 			return
 		case e != nil && e.Kind == muster.KindAuth:
 			// The revocation must finish even if the browser goes away.
 			ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
-			s.reg.Revoke(ctx, pluginID)
+			s.app.Revoke(ctx, "the redeem answered 401: the app was uninstalled or its token rotated")
 			cancel()
-			s.refuseEnter(w, http.StatusForbidden, EnterNotSetUp, "muster: plugin "+pid+"'s token is revoked")
+			s.refuseEnter(w, http.StatusForbidden, EnterNotSetUp, "muster: the token is revoked")
 			return
 		case e != nil && e.Kind == muster.KindCapability:
-			s.refuseEnter(w, http.StatusForbidden, EnterNotSetUp, "muster: plugin "+pid+"'s token may not redeem")
+			s.refuseEnter(w, http.StatusForbidden, EnterNotSetUp, "muster: the token may not redeem")
 			return
 		default:
 			// Fail closed: muster down, a 5xx, an answer this client cannot
@@ -261,8 +302,9 @@ func (s *Server) handleEnter(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// 🔴 The three checks that make the code this tab's: muster answers a
-	// viewer code to the same route just as readily.
+	// 🔴 The checks that make the code this tab's: muster answers a viewer
+	// code to the same route just as readily, and only a server app's answer
+	// names a person by subject.
 	if red.Purpose != "app" {
 		s.refuseEnter(w, http.StatusForbidden, EnterWrongKind, "redeemed purpose is not app")
 		return
@@ -271,21 +313,26 @@ func (s *Server) handleEnter(w http.ResponseWriter, r *http.Request) {
 		s.refuseEnter(w, http.StatusForbidden, EnterWrongKind, "redeemed target is not {\"app\": {}}")
 		return
 	}
-	if red.OwnerID != tok.OwnerID {
-		s.refuseEnter(w, http.StatusForbidden, EnterWrongKind, "redeemed owner is not the token's owner")
+	if red.Scope != muster.ScopeServer {
+		s.refuseEnter(w, http.StatusForbidden, EnterWrongKind, "redeemed scope is not server")
 		return
 	}
+	if !store.ValidSubject(red.Owner.Subject) {
+		s.refuseEnter(w, http.StatusForbidden, EnterWrongKind, "redeemed owner has no subject")
+		return
+	}
+	subject := red.Owner.Subject
 	now := s.cfg.Now()
-	session, _, err := s.store.CreateSession(r.Context(), tok.OwnerID, tok.PluginID, now)
+	session, _, err := s.store.CreateSession(r.Context(), subject, red.Owner.DisplayName, now)
 	if err != nil {
 		s.refuseEnter(w, http.StatusInternalServerError, EnterNoMuster, "session: "+err.Error())
 		return
 	}
 	// ref is a hint (a knock notification's meeting): passed on only when it
-	// names one of this owner's own meetings.
+	// names one of this person's own meetings.
 	ref := ""
 	if red.Target.App != nil && red.Target.App.Ref != "" {
-		if _, err := s.store.ForOwner(tok.OwnerID).Meeting(r.Context(), red.Target.App.Ref); err == nil {
+		if _, err := s.store.ForSubject(subject).Meeting(r.Context(), red.Target.App.Ref); err == nil {
 			ref = red.Target.App.Ref
 		}
 	}
@@ -306,9 +353,9 @@ func kindOf(err error) string {
 type ownerHandler func(w http.ResponseWriter, r *http.Request, repo *store.OwnerRepo)
 
 // owner admits a request carrying a live owner session's bearer and hands
-// the handler that owner's repository, and only it. The session must be
-// unexpired, and the token it was minted through still live: a revocation
-// is enforced here at once, even before its sessions are deleted.
+// the handler that person's repository, and only it. The session must be
+// unexpired, and the app's token still live: an uninstall is enforced here
+// at once, even before its sessions are deleted.
 func (s *Server) owner(next ownerHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		refuse := func() {
@@ -329,7 +376,7 @@ func (s *Server) owner(next ownerHandler) http.HandlerFunc {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "the session could not be read"})
 			return
 		}
-		if t, live := s.reg.Lookup(sess.PluginID); !live || t.OwnerID != sess.OwnerID {
+		if !s.app.Live() {
 			refuse()
 			return
 		}
@@ -437,12 +484,12 @@ func (s *Server) handleGetMeeting(w http.ResponseWriter, r *http.Request, repo *
 }
 
 // Internal is the internal port's handler: GET /healthz.
-func Internal(st *store.Store, reg *owners.Registry) http.Handler {
+func Internal(st *store.Store, app *owners.App) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
-		if err := st.Ping(ctx); err != nil || reg.Live() == 0 {
+		if err := st.Ping(ctx); err != nil || !app.Live() {
 			http.Error(w, "unhealthy", http.StatusServiceUnavailable)
 			return
 		}

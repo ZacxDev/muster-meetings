@@ -9,30 +9,30 @@ import (
 	"time"
 )
 
-// OwnerRepo is one owner's view of the database. 🔴 Every statement in it is
-// filtered by the owner it was built for; that filter is the ownership gate
-// (design: "Every owner-facing query is filtered by the session's owner_id in
-// one repository layer").
+// OwnerRepo is one person's view of the database. 🔴 Every statement in it
+// is filtered by the subject it was built for; that filter is the ownership
+// gate (design: "one repository layer filters every owner-facing query by
+// the session's subject").
 type OwnerRepo struct {
 	s       *Store
-	ownerID int64
+	subject string
 	// session is the stored hash of the bearer this repository was built
-	// from (ForSession), "" for ForOwner. A write needs it: see CreateMeeting.
+	// from (ForSession), "" for ForSubject. A write needs it: see CreateMeeting.
 	session string
 }
 
 // ForSession is the repository of a live owner session: what the server
 // builds for an owner request, never from anything the request names.
 func (s *Store) ForSession(sess Session) *OwnerRepo {
-	return &OwnerRepo{s: s, ownerID: sess.OwnerID, session: sess.TokenSHA256}
+	return &OwnerRepo{s: s, subject: sess.Subject, session: sess.TokenSHA256}
 }
 
-// ForOwner is ownerID's read-only repository: it can read the owner's
+// ForSubject is the person's read-only repository: it can read their
 // meetings but not make one (it holds no session).
-func (s *Store) ForOwner(ownerID int64) *OwnerRepo { return &OwnerRepo{s: s, ownerID: ownerID} }
+func (s *Store) ForSubject(subject string) *OwnerRepo { return &OwnerRepo{s: s, subject: subject} }
 
-// OwnerID is the owner this repository serves.
-func (r *OwnerRepo) OwnerID() int64 { return r.ownerID }
+// Subject is the person this repository serves.
+func (r *OwnerRepo) Subject() string { return r.subject }
 
 // Meeting is one meeting as its owner sees it. It carries no code: the owner
 // gets the link from Link, and only while the meeting is open.
@@ -96,20 +96,20 @@ func (r *OwnerRepo) CreateMeeting(ctx context.Context, now time.Time) (Created, 
 		return Created{}, err
 	}
 	defer tx.Rollback()
-	res, err := tx.ExecContext(ctx, `INSERT INTO meetings (id, owner_id, room, join_code_sha256, state, record, ai, created_at)
+	res, err := tx.ExecContext(ctx, `INSERT INTO meetings (id, subject, room, join_code_sha256, state, record, ai, created_at)
 		SELECT ?, ?, ?, ?, 'open', 1, 1, ?
-		WHERE EXISTS (SELECT 1 FROM owner_sessions WHERE token_sha256 = ? AND owner_id = ? AND expires_at > ?)`,
-		id, r.ownerID, "meeting-"+id, Hash(code), ms(now), r.session, r.ownerID, ms(now))
+		WHERE EXISTS (SELECT 1 FROM owner_sessions WHERE token_sha256 = ? AND subject = ? AND expires_at > ?)`,
+		id, r.subject, "meeting-"+id, Hash(code), ms(now), r.session, r.subject, ms(now))
 	if err != nil {
 		return Created{}, err
 	}
 	if n, _ := res.RowsAffected(); n != 1 {
 		return Created{}, ErrNoSession
 	}
-	if err := audit(ctx, tx, now, r.ownerID, id, "meeting.created", ""); err != nil {
+	if err := audit(ctx, tx, now, r.subject, id, "meeting.created", ""); err != nil {
 		return Created{}, err
 	}
-	m, err := scanMeeting(tx.QueryRowContext(ctx, `SELECT `+meetingCols+` FROM meetings WHERE id = ? AND owner_id = ?`, id, r.ownerID))
+	m, err := scanMeeting(tx.QueryRowContext(ctx, `SELECT `+meetingCols+` FROM meetings WHERE id = ? AND subject = ?`, id, r.subject))
 	if err != nil {
 		return Created{}, err
 	}
@@ -146,8 +146,8 @@ func ParseCursor(s string) (Cursor, bool) {
 // after the cursor (nil: from the newest), and the cursor of the next page
 // (nil when there is none).
 func (r *OwnerRepo) ListMeetings(ctx context.Context, after *Cursor, limit int) ([]Meeting, *Cursor, error) {
-	q := `SELECT ` + meetingCols + ` FROM meetings WHERE owner_id = ?`
-	args := []any{r.ownerID}
+	q := `SELECT ` + meetingCols + ` FROM meetings WHERE subject = ?`
+	args := []any{r.subject}
 	if after != nil {
 		q += ` AND (created_at < ? OR (created_at = ? AND id < ?))`
 		args = append(args, after.CreatedAt, after.CreatedAt, after.ID)
@@ -178,13 +178,13 @@ func (r *OwnerRepo) ListMeetings(ctx context.Context, after *Cursor, limit int) 
 	return out, &Cursor{CreatedAt: ms(last.CreatedAt), ID: last.ID}, nil
 }
 
-// Meeting returns one of the owner's meetings. Another owner's meeting is
+// Meeting returns one of the person's meetings. Another person's meeting is
 // ErrNotFound, exactly as a meeting that does not exist.
 func (r *OwnerRepo) Meeting(ctx context.Context, id string) (Meeting, error) {
 	if !ValidMeetingID(id) {
 		return Meeting{}, ErrNotFound
 	}
-	m, err := scanMeeting(r.s.db.QueryRowContext(ctx, `SELECT `+meetingCols+` FROM meetings WHERE id = ? AND owner_id = ?`, id, r.ownerID))
+	m, err := scanMeeting(r.s.db.QueryRowContext(ctx, `SELECT `+meetingCols+` FROM meetings WHERE id = ? AND subject = ?`, id, r.subject))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Meeting{}, ErrNotFound
 	}

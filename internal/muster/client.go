@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -24,9 +25,9 @@ const TokenPrefix = "mpl_"
 type Kind string
 
 const (
-	KindAuth        Kind = "auth"         // 401: not a live plugin token (revoked, unknown, owner disabled)
+	KindAuth        Kind = "auth"         // 401: not a live plugin token (uninstalled, rotated away, unknown)
 	KindCapability  Kind = "capability"   // 403: the token lacks the capability the route needs
-	KindOff         Kind = "not_found"    // 404: plugins are off on this server, or (on a redeem) no such code
+	KindOff         Kind = "not_found"    // 404: plugins are off; on a redeem no such code; on notify and tasks no such person for this app
 	KindBadRequest  Kind = "bad_request"  // 400 (and other 4xx)
 	KindConflict    Kind = "conflict"     // 409
 	KindRateLimited Kind = "rate_limited" // 429: see RetryAfter
@@ -89,7 +90,7 @@ func AsError(err error) *Error {
 
 // CheckBaseURL validates muster's address: https, except plain http to a
 // loopback host; no user, path, query or fragment (a trailing "/" is fine). A
-// plugin token acts as its owner, so it never crosses a network in clear text,
+// plugin token can act for people, so it never crosses a network in clear text,
 // and a token pasted into the URL is refused rather than sent on every call.
 func CheckBaseURL(raw string) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
@@ -138,15 +139,23 @@ func New(base, token string) (*Client, error) {
 	return &Client{base: base, token: token, HTTP: &http.Client{Timeout: 30 * time.Second}}, nil
 }
 
-// SelfInfo is GET /plugin/v1/self's answer.
+// ScopeServer is the scope of a server-installed app: an admin installed it
+// once for the whole server on muster's /admin/apps, and its one token acts
+// as nobody until a person's own hand-off names them (design: "Core seam:
+// server-installed app plugins").
+const ScopeServer = "server"
+
+// SelfInfo is GET /plugin/v1/self's answer. For a server token it names no
+// person: owner_id and owner_login are null, so this struct does not even
+// have fields for them, and nothing the plugin decodes from /self can carry
+// a muster user id or an email into its database.
 type SelfInfo struct {
 	PluginID     int64    `json:"plugin_id"`
 	PluginName   string   `json:"plugin_name"`
-	OwnerID      int64    `json:"owner_id"`
-	OwnerLogin   string   `json:"owner_login"`
-	OwnerKind    string   `json:"owner_kind"`
+	Scope        string   `json:"scope"`      // "server" for a server-installed app
+	OwnerKind    string   `json:"owner_kind"` // "server" for a server-installed app
 	Capabilities []string `json:"capabilities"`
-	DeliverTo    *string  `json:"deliver_to"`
+	ActForHours  int      `json:"act_for_hours"`
 }
 
 // AppTarget is an app tab's hand-off target: {"app": {}}, or {"app": {"ref":
@@ -163,33 +172,223 @@ type HandoffTarget struct {
 	Mirror json.RawMessage `json:"mirror,omitempty"`
 }
 
-// Redeemed is POST /plugin/v1/handoffs/redeem's answer.
+// RedeemedOwner is the person a server app's hand-off names: a pairwise
+// subject (random, 128 bits, different under every server app, stable for
+// the install) and the account's display name ("" when it has none). Never
+// a muster user id and never an email (design: fork 2).
+type RedeemedOwner struct {
+	Subject     string `json:"subject"`
+	DisplayName string `json:"display_name"`
+}
+
+// Redeemed is POST /plugin/v1/handoffs/redeem's answer to a server token.
+// It has no field for a user id or an email: an answer that carried one
+// anyway would be dropped by the decoder, never stored.
 type Redeemed struct {
-	OwnerID   int64         `json:"owner_id"`
+	Owner     RedeemedOwner `json:"owner"`
+	Scope     string        `json:"scope"`
 	Target    HandoffTarget `json:"target"`
 	Purpose   string        `json:"purpose"`
 	SteppedUp bool          `json:"stepped_up"`
 	MintedAt  time.Time     `json:"minted_at"`
+	ActUntil  time.Time     `json:"act_until"`
 }
 
 // Redeem is POST /plugin/v1/handoffs/redeem: it spends a hand-off code once.
 // muster answers one 404 (KindOff) for a code that is unknown, spent,
-// expired, or minted for another plugin. The caller must still check the
-// purpose and target: muster answers a viewer code just as readily.
+// expired, another app's, or whose person was hidden, disabled or signed out
+// everywhere since the mint. The caller must still check the purpose, the
+// target and the scope.
 func (c *Client) Redeem(ctx context.Context, code string) (Redeemed, error) {
 	var out Redeemed
-	_, err := c.do(ctx, http.MethodPost, "/plugin/v1/handoffs/redeem", map[string]string{"code": code}, &out)
+	_, err := c.do(ctx, http.MethodPost, "/plugin/v1/handoffs/redeem", nil, map[string]string{"code": code}, &out)
 	return out, err
 }
 
 // Self is GET /plugin/v1/self.
 func (c *Client) Self(ctx context.Context) (SelfInfo, error) {
 	var out SelfInfo
-	_, err := c.do(ctx, http.MethodGet, "/plugin/v1/self", nil, &out)
+	_, err := c.do(ctx, http.MethodGet, "/plugin/v1/self", nil, nil, &out)
 	return out, err
 }
 
-func (c *Client) do(ctx context.Context, method, path string, in, out any) (int, error) {
+// MaxCheckSubjects is the most subjects one POST /plugin/v1/owners/check
+// takes; OwnersCheck sends more in batches of this size.
+const MaxCheckSubjects = 200
+
+var (
+	subjectRE = regexp.MustCompile(`^[A-Za-z0-9_-]{22}$`)
+	refRE     = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+)
+
+// ValidSubject is a subject's shape: 22 base64url characters, 128 bits.
+func ValidSubject(s string) bool { return subjectRE.MatchString(s) }
+
+// ErrBadSubject is a call for a person whose subject is not a subject's
+// shape (empty, say). It is refused before anything is sent, so a request
+// never goes out without its Muster-Act-For header.
+var ErrBadSubject = errors.New("muster: not a subject (22 base64url characters)")
+
+// The states owners/check answers a subject with.
+const (
+	// StateLive: the app may act for the person.
+	StateLive = "live"
+	// StateExpired: the person's 8 hours since they last opened the tab ran
+	// out, and nothing else ended it. Their owner sessions end; their open
+	// meetings keep running for the guests.
+	StateExpired = "expired"
+	// StateRevoked: the person hid the app, was disabled, or signed out
+	// everywhere. Their sessions and open meetings end.
+	StateRevoked = "revoked"
+)
+
+// OwnersCheck is POST /plugin/v1/owners/check: the state of each subject's
+// grant, {"states": {"<subject>": "live"|"expired"|"revoked"}}, sent in
+// batches of MaxCheckSubjects.
+//
+// 🔴 Within an answered batch it fails closed: a subject asked about but
+// absent from "states", or answered with any other state, is StateRevoked,
+// and a subject the answer names but that was not asked is dropped.
+//
+// A batch that is not answered is left out of the map entirely, and so
+// decides nothing: a refusal, a 5xx, no answer, or a 2xx with no "states"
+// object (the old {"live": [...]} shape, an empty body, {} or {"states":
+// null}), which is KindProtocol and never "everyone revoked". The batches
+// that were answered are still returned, with an error naming each failed
+// one. A 401 stops at once and returns it.
+func (c *Client) OwnersCheck(ctx context.Context, subjects []string) (map[string]string, error) {
+	for _, s := range subjects {
+		if !ValidSubject(s) {
+			return nil, ErrBadSubject
+		}
+	}
+	states := make(map[string]string, len(subjects))
+	var first *Error
+	var failed []string
+	n := (len(subjects) + MaxCheckSubjects - 1) / MaxCheckSubjects
+	for i, b := 0, 1; i < len(subjects); i, b = i+MaxCheckSubjects, b+1 {
+		batch := subjects[i:min(i+MaxCheckSubjects, len(subjects))]
+		var out struct {
+			States *map[string]string `json:"states"`
+		}
+		st, err := c.do(ctx, http.MethodPost, "/plugin/v1/owners/check", nil, map[string]any{"subjects": batch}, &out)
+		if err == nil && out.States == nil {
+			err = &Error{Kind: KindProtocol, Status: st, Message: `owners/check answered no "states" object`}
+		}
+		if e := AsError(err); e != nil && e.Kind == KindAuth {
+			return states, err
+		}
+		if err != nil {
+			e := AsError(err)
+			if e == nil {
+				e = &Error{Kind: KindProtocol, Message: err.Error()}
+			}
+			if first == nil {
+				first = e
+			}
+			failed = append(failed, fmt.Sprintf("batch %d of %d (%d subjects): %v", b, n, len(batch), e))
+			continue
+		}
+		for _, s := range batch {
+			st := (*out.States)[s]
+			switch st {
+			case StateLive, StateExpired:
+			default:
+				st = StateRevoked
+			}
+			states[s] = st
+		}
+	}
+	if first != nil {
+		e := *first
+		e.Message = strings.Join(failed, "; ")
+		return states, &e
+	}
+	return states, nil
+}
+
+// ActForHeader names the person a server token acts for on notify and
+// tasks. The value is a subject, never a user id.
+const ActForHeader = "Muster-Act-For"
+
+func actFor(subject string) (http.Header, error) {
+	if !ValidSubject(subject) {
+		return nil, ErrBadSubject
+	}
+	return http.Header{ActForHeader: {subject}}, nil
+}
+
+// Notify is POST /plugin/v1/notify for the person subject names: a knock
+// ("someone is waiting to join your meeting"; muster writes the text). It
+// answers true for 202 (queued) and false for 204 (the person turned the
+// toggle off or has no device: not an error). A 404 (KindOff) means muster
+// cannot reach this person now (the grant ended); keep the lobby row.
+func (c *Client) Notify(ctx context.Context, subject, ref string, count int) (bool, error) {
+	h, err := actFor(subject)
+	if err != nil {
+		return false, err
+	}
+	if !refRE.MatchString(ref) || count < 1 || count > 99 {
+		return false, errors.New("muster: a knock needs a ref of 1 to 64 base64url characters and a count of 1 to 99")
+	}
+	st, err := c.do(ctx, http.MethodPost, "/plugin/v1/notify", h, map[string]any{"kind": "knock", "ref": ref, "count": count}, nil)
+	return st == http.StatusAccepted, err
+}
+
+// Withdraw is DELETE /plugin/v1/notify/{ref} for the person subject names.
+// It answers true for 202 (a knock that was out is withdrawn) and false for
+// 204 (none was out).
+func (c *Client) Withdraw(ctx context.Context, subject, ref string) (bool, error) {
+	h, err := actFor(subject)
+	if err != nil {
+		return false, err
+	}
+	if !refRE.MatchString(ref) {
+		return false, errors.New("muster: a ref is 1 to 64 base64url characters")
+	}
+	st, err := c.do(ctx, http.MethodDelete, "/plugin/v1/notify/"+ref, h, nil, nil)
+	return st == http.StatusAccepted, err
+}
+
+// TaskCreate is the task POST /plugin/v1/tasks files when the app has no
+// open task under the key for this person.
+type TaskCreate struct {
+	Title string `json:"title"`
+	Body  string `json:"body"`
+}
+
+// TaskRequest is POST /plugin/v1/tasks's body for a server app: a key,
+// and a create, a comment or both. A server app may not send route_to_chief
+// or reference, so there are no fields for them.
+type TaskRequest struct {
+	Key     string      `json:"key"`
+	Create  *TaskCreate `json:"create,omitempty"`
+	Comment string      `json:"comment,omitempty"`
+}
+
+// TaskResult is POST /plugin/v1/tasks's answer. ID is nil when no task was
+// found or filed.
+type TaskResult struct {
+	ID        *int64 `json:"id"`
+	Created   bool   `json:"created"`
+	Commented bool   `json:"commented"`
+}
+
+// FileTask is POST /plugin/v1/tasks for the person subject names (Make
+// task). muster matches the key only among tasks this app filed for this
+// person. A 404 (KindOff) means muster cannot reach this person now: the
+// page asks them to open Meetings from muster again.
+func (c *Client) FileTask(ctx context.Context, subject string, req TaskRequest) (TaskResult, error) {
+	var out TaskResult
+	h, err := actFor(subject)
+	if err != nil {
+		return out, err
+	}
+	_, err = c.do(ctx, http.MethodPost, "/plugin/v1/tasks", h, req, &out)
+	return out, err
+}
+
+func (c *Client) do(ctx context.Context, method, path string, hdr http.Header, in, out any) (int, error) {
 	var body io.Reader
 	if in != nil {
 		b, err := json.Marshal(in)
@@ -201,6 +400,9 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) (int,
 	req, err := http.NewRequestWithContext(ctx, method, c.base+path, body)
 	if err != nil {
 		return 0, err
+	}
+	for k, v := range hdr {
+		req.Header[k] = v
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	if in != nil {

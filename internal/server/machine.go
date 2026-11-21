@@ -11,6 +11,8 @@ import (
 // knock notifier, and the reconcile loop every ReconcileEvery.
 func (s *Server) Run(ctx context.Context) {
 	go s.knocker.Run(ctx)
+	// Once at start: a restart may have missed webhooks.
+	s.Reconcile(ctx)
 	t := time.NewTicker(s.cfg.ReconcileEvery)
 	defer t.Stop()
 	for {

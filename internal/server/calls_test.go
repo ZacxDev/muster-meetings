@@ -992,6 +992,31 @@ func TestTheOwnersStreamShowsTheLobbyLive(t *testing.T) {
 	}
 }
 
+// 🔴 An owner's event stream ends with the session: once the person's grant
+// expires (their sessions deleted, their meeting kept for the guests), a
+// stream opened before stops sending the lobby, which holds guests' names.
+func TestTheOwnersStreamEndsWithTheSession(t *testing.T) {
+	e := newEnv(t)
+	c := e.meeting(ada)
+	s := e.open("GET", "/api/meetings/"+c.ID+"/events", c.Sess, nil)
+	s.want("meeting")
+	if _, err := e.store.EndSessions(context.Background(), []string{c.Subject}, e.clock.Now(), e.clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	e.knock(c.Code, grace)
+	select {
+	case <-s.done:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("the stream outlived its session; it sent: %q", s.raw.String())
+	}
+	if strings.Contains(s.text(), grace) {
+		t.Fatalf("the stream sent a guest's name after its session ended: %q", s.text())
+	}
+	if e.meetingState(c.Subject, c.ID) != "open" {
+		t.Fatal("the fixture: the meeting should still be open")
+	}
+}
+
 // The vendored LiveKit client is the pinned release, byte for byte
 // (scripts/vendor-livekit-client.sh), and is served from this origin.
 func TestTheVendoredLiveKitClientIsThePinnedOne(t *testing.T) {

@@ -22,5 +22,14 @@ secretGroup = 1
 keywords = ["mpl_"]
 
 [[allowlists]]
-description = "test fixture, not a credential"
-regexes = ['''^mpl_s3cretT0ken$''']
+description = "test fixtures, not credentials: a token pasted in the wrong place, and the LiveKit secrets the tests sign with (each matched exactly)"
+regexes = [
+  '''^mpl_s3cretT0ken$''',
+  '''^an-integration-secret-of-32-chars-plus$''',
+  '''^another-secret-entirely-0000000000$''',
+  '''^a-secret-of-the-fixture-31f9c0de42$''',
+  '''^fake-livekit-secret-for-tests-9f1c2e$''',
+  # an environment flag the integration test passes to LiveKit's CLI, on the
+  # line after LIVEKIT_API_SECRET, which generic-api-key reads as a value
+  '''^LK_NO_SKILLS_PROMPT=1$''',
+]

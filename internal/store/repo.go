@@ -226,6 +226,20 @@ func (r *OwnerRepo) Link(ctx context.Context, id string, now time.Time) (string,
 	return r.s.JoinCode(m.ID), nil
 }
 
+// SessionLive says the session this repository was built from still exists
+// and is unexpired at now (a ForSubject repository has none: false). A
+// long-lived owner stream asks it before every send, so a session that a
+// revocation or an expired grant deleted stops being served at once.
+func (r *OwnerRepo) SessionLive(ctx context.Context, now time.Time) (bool, error) {
+	if r.session == "" {
+		return false, nil
+	}
+	var n int
+	err := r.s.db.QueryRowContext(ctx, `SELECT count(*) FROM owner_sessions WHERE token_sha256 = ? AND subject = ? AND expires_at > ?`,
+		r.session, r.subject, ms(now)).Scan(&n)
+	return n > 0, err
+}
+
 // DisplayName is the owner's display name, from muster's redeem ("" when
 // the account has none).
 func (r *OwnerRepo) DisplayName(ctx context.Context) (string, error) {

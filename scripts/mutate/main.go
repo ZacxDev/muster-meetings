@@ -503,6 +503,9 @@ var mutants = []mutant{
 	{name: "ownership: End without the owner filter", file: parts, from: "WHERE id = ? AND subject = ? AND state = 'open' RETURNING room`", to: "WHERE id = ? AND ? IS NOT NULL AND state = 'open' RETURNING room`",
 		pkg: "./internal/server", test: "TestAnotherPersonCannotDriveTheCall", want: "Bea's calls changed Ada's meeting: {ID:"},
 
+	{name: "owner stream: the session is checked only when it opens", file: calls, from: "if ok, err := repo.SessionLive(r.Context(), s.cfg.Now()); err != nil || !ok || !s.app.Live() {", to: "if ok, err := repo.SessionLive(r.Context(), s.cfg.Now()); err != nil || (!ok && false) || !s.app.Live() {",
+		pkg: "./internal/server", test: "TestTheOwnersStreamEndsWithTheSession", want: "the stream outlived its session"},
+
 	// ---- 🔴 no ticket in a URL; the pages' policies ----
 	{name: "ticket in query: accepted", file: guest, from: "if r.URL.RawQuery != \"\" || r.URL.ForceQuery {", to: "if false {",
 		pkg: "./internal/server", test: "TestNoTicketCodeOrNameInAURLOrALog", want: "/wait with ?ticket= = 200"},

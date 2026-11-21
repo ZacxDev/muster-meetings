@@ -294,6 +294,14 @@ func (s *Server) handleOwnerEvents(w http.ResponseWriter, r *http.Request, repo 
 	}
 	var last []byte
 	s.stream(r.Context(), w, f, id, true, func() (bool, error) {
+		// 🔴 The session is checked again before every send, not only when
+		// the stream opened: an expired grant deletes the owner's sessions
+		// and keeps the meeting running, and a stream opened before that must
+		// stop showing its lobby (the guests' names) then. The page's next
+		// request is 401: "Open Meetings from muster again".
+		if ok, err := repo.SessionLive(r.Context(), s.cfg.Now()); err != nil || !ok || !s.app.Live() {
+			return true, err
+		}
 		m, err := repo.Meeting(r.Context(), id)
 		if err != nil {
 			return true, err

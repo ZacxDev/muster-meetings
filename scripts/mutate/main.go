@@ -550,7 +550,7 @@ var mutants = []mutant{
 		pkg: "./internal/muster", test: "TestCheckBaseURLAllowsHTTPOnlyInsideTheCluster", want: `in-cluster: CheckBaseURL("http://muster-web.tenant-b.svc:8105")`},
 	{name: "in-cluster http: .svc anywhere in the name", file: client, from: "case strings.HasSuffix(h, \".svc\"):", to: "case strings.Contains(h, \".svc\"):",
 		pkg: "./internal/muster", test: "TestCheckBaseURLAllowsHTTPOnlyInsideTheCluster", want: `not in-cluster: CheckBaseURL("http://muster.svc.example.test")`},
-	{name: "in-cluster http: the labels are not checked", file: client, from: "if !clusterLabel.MatchString(l) {", to: "if false {",
+	{name: "in-cluster http: the labels are not checked", file: client, from: "if !clusterLabel.MatchString(l) {", to: "if !clusterLabel.MatchString(l) && false {",
 		pkg: "./internal/muster", test: "TestCheckBaseURLAllowsHTTPOnlyInsideTheCluster", want: `not in-cluster: CheckBaseURL("http://muster..svc")`},
 
 	// ---- 🔴 phase 2c: MEETINGS_CLIENT_IP_HEADER ----

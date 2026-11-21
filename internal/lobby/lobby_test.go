@@ -134,8 +134,46 @@ func TestClientAddr(t *testing.T) {
 		if c.xff != "" {
 			r.Header.Set("X-Forwarded-For", c.xff)
 		}
-		if got := lobby.ClientAddr(r, c.trusted); got.String() != c.want {
+		if got := lobby.ClientAddr(r, c.trusted, ""); got.String() != c.want {
 			t.Errorf("peer %s, XFF %q: %s, want %s", c.peer, c.xff, got, c.want)
+		}
+	}
+}
+
+// 🔴 MEETINGS_CLIENT_IP_HEADER: the header's one address, read only from a
+// trusted peer; X-Forwarded-For is then not read. A header from an
+// untrusted peer is ignored; a missing, repeated, listed or unparseable one
+// leaves the peer.
+func TestClientAddrWithAClientIPHeader(t *testing.T) {
+	trusted := []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}
+	const hdr = "CF-Connecting-IP"
+	for _, c := range []struct {
+		why, peer string
+		values    []string
+		xff       string
+		trusted   []netip.Prefix
+		want      string
+	}{
+		{"untrusted peer spoofs the header", "198.51.100.7:4000", []string{"203.0.113.9"}, "", trusted, "198.51.100.7"},
+		{"no trusted proxies at all", "198.51.100.8:4000", []string{"203.0.113.9"}, "", nil, "198.51.100.8"},
+		{"trusted peer: the header, not X-Forwarded-For", "10.1.2.3:4000", []string{"203.0.113.9"}, "192.0.2.44", trusted, "203.0.113.9"},
+		{"trusted peer: no header leaves the peer, X-Forwarded-For unread", "10.1.2.4:4000", nil, "192.0.2.45", trusted, "10.1.2.4"},
+		{"trusted peer: a list leaves the peer", "10.1.2.5:4000", []string{"203.0.113.10, 192.0.2.46"}, "", trusted, "10.1.2.5"},
+		{"trusted peer: a repeated header leaves the peer", "10.1.2.6:4000", []string{"203.0.113.50", "203.0.113.51"}, "", trusted, "10.1.2.6"},
+		{"trusted peer: not an address leaves the peer", "10.1.2.7:4000", []string{"unknown"}, "", trusted, "10.1.2.7"},
+		{"trusted peer: IPv6 cut to its /64", "10.1.2.8:4000", []string{"2001:db8:7:8:1:2:3:4"}, "", trusted, "2001:db8:7:8::"},
+		{"trusted peer: a mapped IPv4", "10.1.2.9:4000", []string{" ::ffff:203.0.113.77 "}, "", trusted, "203.0.113.77"},
+	} {
+		r := httptest.NewRequest("POST", "/j/x/knock", nil)
+		r.RemoteAddr = c.peer
+		for _, v := range c.values {
+			r.Header.Add("cf-connecting-ip", v) // the configured name is matched case-insensitively
+		}
+		if c.xff != "" {
+			r.Header.Set("X-Forwarded-For", c.xff)
+		}
+		if got := lobby.ClientAddr(r, c.trusted, hdr); got.String() != c.want {
+			t.Errorf("%s: peer %s, %s %q: %s, want %s", c.why, c.peer, hdr, c.values, got, c.want)
 		}
 	}
 }

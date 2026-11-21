@@ -1,0 +1,50 @@
+# muster-meetings, phase 2c: the plugin and LiveKit (TURN over TLS only),
+# for muster's own namespace. A BASE: it carries no real hostname, address,
+# NodePort or namespace. A tenant overlay sets them (see deploy/example-overlay and
+# the README's "Deploying" section):
+#
+#   - hostnames, muster's address, trusted proxies, the client-IP header:
+#     the `muster-meetings-params` ConfigMap (configMapGenerator, behavior: merge)
+#   - the namespace: `namespace:`
+#   - the image: `images:` (pin a digest)
+#   - the NodePorts, the PVC's StorageClass, Secret names, and the
+#     NetworkPolicies' selectors for muster and the ingress controller: patches
+#
+# Not here (phase 2c): Egress, Redis, the STT services, Ingress/IngressRoute
+# objects (the cluster's ingress is the tenant's), and the public 443 SNI
+# passthrough for TURN (an operator step; see the README).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: muster-meetings
+    includeSelectors: false
+
+resources:
+  - muster-meetings.yaml
+  - livekit.yaml
+  - networkpolicy.yaml
+
+configMapGenerator:
+  - name: muster-meetings-params
+    literals:
+      # Where the plugin calls muster: its Service, FULLY QUALIFIED with the
+      # trailing dot (<svc>.<ns>.svc.<cluster-domain>.). Plain http is allowed
+      # only in that form: without the dot, ndots:5 sends the name through
+      # the node's search domains first.
+      - muster-url=http://muster.muster-tenant.svc.cluster.local.:8105
+      # The cluster's DNS domain that rule checks.
+      - cluster-domain=cluster.local
+      # muster's origin as browsers see it (the only page that may frame the app).
+      - muster-origin=https://muster.example.test
+      # The three ONE-LABEL hosts (a free edge certificate covers one level):
+      # meet-<x>.<domain>, never <x>.meet.<domain>.
+      - public-url=https://meet-muster.example.test
+      - livekit-url=wss://meet-rtc-muster.example.test
+      - turn-domain=meet-turn-muster.example.test
+      # The ingress in front of the plugin (comma-separated CIDRs) and, behind
+      # a CDN, the one header carrying the client's address. Both empty: the
+      # peer address is counted (no proxy declared).
+      - trusted-proxies=
+      - client-ip-header=

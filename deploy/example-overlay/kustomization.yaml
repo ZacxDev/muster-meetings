@@ -1,0 +1,65 @@
+# An EXAMPLE tenant overlay: every value a tenant sets, with example.test
+# names and documentation addresses (RFC 5737). Copy it into your own
+# deployment repository and change the values; do not deploy it as is.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# muster's namespace: the plugin and LiveKit run in the muster tenant.
+namespace: muster-tenant
+
+resources:
+  - ../kubernetes
+
+images:
+  - name: ghcr.io/zacxdev/muster-meetings
+    # Pin a digest: newTag: main@sha256:<digest>, or a released version.
+    newTag: "0.1.0"
+
+configMapGenerator:
+  - name: muster-meetings-params
+    behavior: merge
+    literals:
+      - muster-url=http://muster.muster-tenant.svc.cluster.local.:8105
+      - cluster-domain=cluster.local
+      - muster-origin=https://muster.example.test
+      - public-url=https://meet-muster.example.test
+      - livekit-url=wss://meet-rtc-muster.example.test
+      - turn-domain=meet-turn-muster.example.test
+      # Behind a CDN: the ingress's pod CIDR, and the CDN's client header.
+      - trusted-proxies=192.0.2.0/24
+      - client-ip-header=CF-Connecting-IP
+
+patches:
+  # The NodePorts the outside route targets.
+  - target: {kind: Service, name: livekit-nodeport}
+    patch: |-
+      - op: add
+        path: /spec/ports/0/nodePort
+        value: 30880
+      - op: add
+        path: /spec/ports/1/nodePort
+        value: 30549
+  # The PVC's StorageClass.
+  - target: {kind: PersistentVolumeClaim, name: muster-meetings-state}
+    patch: |-
+      - op: add
+        path: /spec/storageClassName
+        value: example-local
+  # The ingress controller's namespace, and muster's pods and port.
+  - target: {kind: NetworkPolicy, name: muster-meetings}
+    patch: |-
+      - op: replace
+        path: /spec/ingress/0/from/0/namespaceSelector/matchLabels
+        value: {kubernetes.io/metadata.name: example-ingress}
+      - op: replace
+        path: /spec/egress/0/to/0/podSelector/matchLabels
+        value: {app: muster}
+      - op: replace
+        path: /spec/egress/0/ports/0/port
+        value: 8105
+  # A Secret under another name (here, the TURN certificate's).
+  - target: {kind: Deployment, name: livekit}
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/volumes/0/secret/secretName
+        value: example-turn-certificate

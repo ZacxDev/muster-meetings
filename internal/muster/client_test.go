@@ -36,7 +36,7 @@ func TestCheckBaseURL(t *testing.T) {
 		"  https://muster.example.com  ": "https://muster.example.com",
 	}
 	for in, want := range ok {
-		got, err := muster.CheckBaseURL(in)
+		got, err := muster.CheckBaseURL(in, muster.HTTPAllow{ClusterDomain: "cluster.local"})
 		if err != nil || got != want {
 			t.Errorf("CheckBaseURL(%q) = %q, %v; want %q", in, got, err, want)
 		}
@@ -46,7 +46,7 @@ func TestCheckBaseURL(t *testing.T) {
 		"https://user:pw@muster.example.com", "https://muster.example.com/?x=1",
 		"https://muster.example.com/#frag", "http://localhost.example.com",
 	} {
-		if got, err := muster.CheckBaseURL(bad); err == nil {
+		if got, err := muster.CheckBaseURL(bad, muster.HTTPAllow{ClusterDomain: "cluster.local"}); err == nil {
 			t.Errorf("CheckBaseURL(%q) = %q, want a refusal", bad, got)
 		}
 	}
@@ -62,7 +62,7 @@ func TestCheckBaseURLNeverEchoesTheValue(t *testing.T) {
 		"https://muster.example.com/?token=" + secret, "https://" + secret + "@muster.example.com",
 		"https://muster.example.com/#" + secret, "%zz" + secret,
 	} {
-		_, err := muster.CheckBaseURL(bad)
+		_, err := muster.CheckBaseURL(bad, muster.HTTPAllow{ClusterDomain: "cluster.local"})
 		if err == nil {
 			t.Errorf("CheckBaseURL(%q) accepted it", bad)
 			continue
@@ -82,7 +82,7 @@ func TestCheckBaseURLRefusesAPath(t *testing.T) {
 		"https://example.com/muster", "https://example.com/muster/", "https://muster.example.com//",
 		"https://muster.example.com/%2F",
 	} {
-		got, err := muster.CheckBaseURL(bad)
+		got, err := muster.CheckBaseURL(bad, muster.HTTPAllow{ClusterDomain: "cluster.local"})
 		if err == nil {
 			t.Errorf("CheckBaseURL(%q) = %q: a URL with a path was accepted", bad, got)
 			continue
@@ -442,5 +442,82 @@ func TestKindForStatus(t *testing.T) {
 		if got := muster.KindForStatus(s); got != k {
 			t.Errorf("KindForStatus(%d) = %s, want %s", s, got, k)
 		}
+	}
+}
+
+// 🔴 Plain http to muster is allowed only to a loopback host or to a
+// FULLY-QUALIFIED Service name, `<svc>.<ns>.svc.<cluster domain>.` with its
+// trailing dot: without the dot, a resolver with ndots:5 tries the node's
+// search domains first, and a wildcard there would receive the token in
+// clear text. Every short or dotless form, every other domain and every
+// other host is refused; https is accepted everywhere. The cluster domain
+// here differs from the default, so a hardcoded "cluster.local" is caught.
+func TestCheckBaseURLAllowsHTTPOnlyInsideTheCluster(t *testing.T) {
+	allow := muster.HTTPAllow{ClusterDomain: "corp-k8s.internal"}
+	for in, want := range map[string]string{
+		"http://muster-web.tenant-b.svc.corp-k8s.internal.:8105": "http://muster-web.tenant-b.svc.corp-k8s.internal.:8105",
+		"http://Muster-Web.Tenant-B.SVC.Corp-K8s.Internal.":      "http://Muster-Web.Tenant-B.SVC.Corp-K8s.Internal.",
+		"https://muster-web.tenant-b.svc":                        "https://muster-web.tenant-b.svc",
+		"https://muster.example.test":                            "https://muster.example.test",
+	} {
+		got, err := muster.CheckBaseURL(in, allow)
+		if err != nil || got != want {
+			t.Errorf("in-cluster: CheckBaseURL(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{
+		"http://muster-web.tenant-b.svc.corp-k8s.internal:8105", // no trailing dot: the search domains first
+		"http://muster-web.tenant-b.svc:8105",                   // the short form
+		"http://muster-web.tenant-b.svc.:8105",                  // short, with a dot
+		"http://muster-web.svc.corp-k8s.internal.",              // no namespace
+		"http://a.muster-web.tenant-b.svc.corp-k8s.internal.",   // a label too many
+		"http://muster-web.tenant-b.svc.cluster.local.",         // another cluster domain
+		"http://muster-web.tenant-b.svc.corp-k8s.internal.evil.test.",
+		"http://muster.example.test",                        // plain http over a network
+		"http://muster.example.test.",                       // an absolute public name
+		"http://.tenant-b.svc.corp-k8s.internal.",           // an empty label
+		"http://muster_web.tenant-b.svc.corp-k8s.internal.", // not a DNS label
+		"http://192.0.2.10",                                 // an address that is not loopback
+		"ws://muster-web.tenant-b.svc.corp-k8s.internal.",   // the wrong scheme
+	} {
+		if got, err := muster.CheckBaseURL(bad, allow); err == nil {
+			t.Errorf("not in-cluster: CheckBaseURL(%q) = %q, want a refusal", bad, got)
+		} else if !strings.Contains(err.Error(), "must be https://") {
+			t.Errorf("not in-cluster: CheckBaseURL(%q) refused for another reason: %v", bad, err)
+		}
+	}
+	// No cluster domain: no cluster name at all.
+	if got, err := muster.CheckBaseURL("http://muster-web.tenant-b.svc.corp-k8s.internal.", muster.HTTPAllow{}); err == nil {
+		t.Errorf("no cluster domain: CheckBaseURL accepted %q", got)
+	}
+}
+
+// 🔴 MEETINGS_MUSTER_HTTP_HOST: plain http to exactly that one host (case
+// aside). Another host, a host that merely starts or ends with it, or one
+// under it is still refused; empty allows none.
+func TestCheckBaseURLAllowsHTTPToTheNamedHostOnly(t *testing.T) {
+	allow := muster.HTTPAllow{Host: "muster-app"}
+	for in, want := range map[string]string{
+		"http://muster-app:8105": "http://muster-app:8105",
+		"http://MUSTER-APP:8105": "http://MUSTER-APP:8105",
+	} {
+		if got, err := muster.CheckBaseURL(in, allow); err != nil || got != want {
+			t.Errorf("named host: CheckBaseURL(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{
+		"http://muster:8105",             // another host
+		"http://muster-app.example.test", // the name as a prefix
+		"http://evil-muster-app:8105",    // the name as a suffix
+		"http://x.muster-app",            // under it
+		"http://muster-app.:8105",        // the absolute form: a different lookup
+		"http://muster-app.attacker.test.",
+	} {
+		if got, err := muster.CheckBaseURL(bad, allow); err == nil {
+			t.Errorf("not the named host: CheckBaseURL(%q) = %q, want a refusal", bad, got)
+		}
+	}
+	if got, err := muster.CheckBaseURL("http://muster-app:8105", muster.HTTPAllow{}); err == nil {
+		t.Errorf("no named host: CheckBaseURL accepted %q", got)
 	}
 }

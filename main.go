@@ -10,7 +10,9 @@
 //
 // Configuration is read from the environment only (see .env.example):
 //
-//	MUSTER_URL                where the plugin calls muster (https, or http to localhost)
+//	MUSTER_URL                where the plugin calls muster (https; http only to loopback, <svc>.<ns>.svc.<cluster domain>. or MEETINGS_MUSTER_HTTP_HOST)
+//	MEETINGS_CLUSTER_DOMAIN   the cluster's DNS domain for that http rule (default cluster.local)
+//	MEETINGS_MUSTER_HTTP_HOST one host, matched exactly, to which MUSTER_URL may be plain http (e.g. muster in Compose)
 //	MUSTER_PLUGIN_TOKEN       the ONE mpl_… token an admin's install on muster's /admin/apps showed
 //	MUSTER_ORIGIN             muster's origin as browsers see it: the only page that may frame the app
 //	MEETINGS_PUBLIC_URL       this plugin's own origin, e.g. https://meet.example.test
@@ -24,6 +26,7 @@
 //	LIVEKIT_API_SECRET        the LiveKit API secret: signs tokens, verifies webhooks; never sent to a browser
 //	MEETINGS_LIVEKIT_ICE      relay (default: TURN over TLS is the only media path) or all (a local LiveKit)
 //	MEETINGS_TRUSTED_PROXIES  comma-separated CIDRs of the ingress in front of the plugin (for the per-address knock limit)
+//	MEETINGS_CLIENT_IP_HEADER one header holding the client's address (e.g. CF-Connecting-IP), believed only from a trusted proxy
 package main
 
 import (
@@ -38,6 +41,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -72,11 +76,16 @@ type Config struct {
 	LiveKitKeys    livekit.Keys
 	ICE            string
 	TrustedProxies []netip.Prefix
+	ClientIPHeader string
 }
 
 // LoadConfig reads and checks the environment through getenv.
 func LoadConfig(getenv func(string) string) (Config, error) {
-	base, err := muster.CheckBaseURL(getenv("MUSTER_URL"))
+	allow, err := httpAllow(getenv("MEETINGS_CLUSTER_DOMAIN"), getenv("MEETINGS_MUSTER_HTTP_HOST"))
+	if err != nil {
+		return Config{}, err
+	}
+	base, err := muster.CheckBaseURL(getenv("MUSTER_URL"), allow)
 	if err != nil {
 		return Config{}, err
 	}
@@ -154,7 +163,54 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		}
 		c.TrustedProxies = append(c.TrustedProxies, p.Masked())
 	}
+	if c.ClientIPHeader, err = checkClientIPHeader(getenv("MEETINGS_CLIENT_IP_HEADER"), len(c.TrustedProxies) > 0); err != nil {
+		return Config{}, err
+	}
 	return c, nil
+}
+
+// httpAllow reads where plain http to muster is allowed besides loopback:
+// a fully-qualified Service name in the cluster domain (default
+// cluster.local), and the one host MEETINGS_MUSTER_HTTP_HOST names, matched
+// exactly. A wildcard or anything but DNS labels is refused, never widened.
+func httpAllow(domain, host string) (muster.HTTPAllow, error) {
+	a := muster.HTTPAllow{ClusterDomain: strings.TrimSuffix(strings.TrimSpace(domain), "."), Host: strings.TrimSpace(host)}
+	if a.ClusterDomain == "" {
+		a.ClusterDomain = "cluster.local"
+	}
+	if !muster.DNSName(a.ClusterDomain) {
+		return muster.HTTPAllow{}, errors.New("MEETINGS_CLUSTER_DOMAIN is not a DNS name such as cluster.local")
+	}
+	if a.Host != "" && !muster.DNSName(a.Host) {
+		return muster.HTTPAllow{}, errors.New("MEETINGS_MUSTER_HTTP_HOST names ONE host, exactly (e.g. muster): no wildcard, port, scheme or trailing dot")
+	}
+	return a, nil
+}
+
+// headerName is an HTTP header name a proxy might use for the client's address.
+var headerName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*$`)
+
+// checkClientIPHeader validates MEETINGS_CLIENT_IP_HEADER: unset is today's
+// X-Forwarded-For walk. Set, it is the one header (e.g. CF-Connecting-IP)
+// believed for the client's address, and only from a trusted proxy, so it
+// is refused without MEETINGS_TRUSTED_PROXIES: there would be no peer it
+// could ever be believed from, and an operator who set it expects it to bind.
+func checkClientIPHeader(raw string, haveTrusted bool) (string, error) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return "", nil
+	}
+	if !headerName.MatchString(v) {
+		return "", errors.New("MEETINGS_CLIENT_IP_HEADER is not a header name such as CF-Connecting-IP")
+	}
+	v = http.CanonicalHeaderKey(v)
+	if v == "X-Forwarded-For" {
+		return "", errors.New("MEETINGS_CLIENT_IP_HEADER: leave it unset to use X-Forwarded-For (it names a header holding ONE address, such as CF-Connecting-IP)")
+	}
+	if !haveTrusted {
+		return "", errors.New("MEETINGS_CLIENT_IP_HEADER is set but MEETINGS_TRUSTED_PROXIES is not: the header is believed only from a trusted proxy, so set the proxy's CIDRs too")
+	}
+	return v, nil
 }
 
 // CheckURL validates a URL variable whose scheme is secure, or insecure only
@@ -217,8 +273,7 @@ func run(logger *log.Logger) error {
 	if err != nil {
 		return err
 	}
-	srv := server.New(server.Config{PublicURL: cfg.PublicURL, MusterOrigin: cfg.MusterOrigin, Log: logger,
-		LiveKit: lk, LiveKitURL: cfg.LiveKitURL, ICE: cfg.ICE, TrustedProxies: cfg.TrustedProxies}, st, app)
+	srv := server.New(cfg.serverConfig(logger, lk), st, app)
 
 	go app.Run(ctx, owners.PollInterval)
 	go sweep(ctx, st, logger)
@@ -244,6 +299,13 @@ func run(logger *log.Logger) error {
 	defer cancel()
 	_ = internal.Shutdown(shut)
 	return pub.Shutdown(shut)
+}
+
+// serverConfig is the server's part of cfg.
+func (cfg Config) serverConfig(logger *log.Logger, lk *livekit.Client) server.Config {
+	return server.Config{PublicURL: cfg.PublicURL, MusterOrigin: cfg.MusterOrigin, Log: logger,
+		LiveKit: lk, LiveKitURL: cfg.LiveKitURL, ICE: cfg.ICE, TrustedProxies: cfg.TrustedProxies,
+		ClientIPHeader: cfg.ClientIPHeader}
 }
 
 // sweep ends meetings past the 24 h cap and drops expired sessions, every

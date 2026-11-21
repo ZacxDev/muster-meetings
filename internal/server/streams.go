@@ -102,7 +102,7 @@ func (s *Server) clientAddr(r *http.Request) netip.Addr {
 	if len(s.cfg.TrustedProxies) == 0 && len(r.Header.Values("X-Forwarded-For")) > 0 && s.xffUntrusted.CompareAndSwap(false, true) {
 		s.cfg.Log.Printf("WARNING: %s", XFFWarning)
 	}
-	return lobby.ClientAddr(r, s.cfg.TrustedProxies)
+	return lobby.ClientAddr(r, s.cfg.TrustedProxies, s.cfg.ClientIPHeader)
 }
 
 // XFFWarning is what the log and /healthz say when X-Forwarded-For arrives

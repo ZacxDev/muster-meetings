@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -656,6 +657,53 @@ func TestXForwardedForWithoutTrustedProxiesIsWarnedOnce(t *testing.T) {
 	}
 	if resp, _ := e.knockFrom(c.Code, "Spread 11", bothOn, "203.0.113.200"); resp.StatusCode != 429 {
 		t.Fatalf("with no trusted proxy, a forged X-Forwarded-For got past the per-address limit: %d", resp.StatusCode)
+	}
+}
+
+// ---- 🔴 MEETINGS_CLIENT_IP_HEADER ----
+
+// knockVia knocks on code as name with the header pairs hdr.
+func (e *env) knockVia(code, name string, hdr ...string) int {
+	e.t.Helper()
+	resp, _ := e.do("POST", "/j/"+code+"/knock", "", map[string]any{"name": name, "notice": bothOn}, hdr...)
+	return resp.StatusCode
+}
+
+// The client-address header (e.g. CF-Connecting-IP) is the knock limit's
+// address only when the peer is a trusted proxy; then X-Forwarded-For is
+// not read. From any other peer a spoofed header is ignored, and every
+// knock counts against the peer.
+func TestTheClientIPHeaderIsBelievedOnlyFromATrustedPeer(t *testing.T) {
+	e := newEnv(t) // the test server's peer, loopback, is a trusted proxy
+	e.server.SetClientIPHeaderForTest("CF-Connecting-IP")
+
+	// One header address behind many X-Forwarded-For addresses: the limit binds.
+	one := e.meeting(ada)
+	for i := 1; i <= 10; i++ {
+		if st := e.knockVia(one.Code, fmt.Sprintf("Header %d", i), "CF-Connecting-IP", "203.0.113.9", "X-Forwarded-For", fmt.Sprintf("192.0.2.%d", i)); st != 201 {
+			t.Fatalf("knock %d from one CF-Connecting-IP = %d", i, st)
+		}
+	}
+	if st := e.knockVia(one.Code, "Header 11", "CF-Connecting-IP", "203.0.113.9", "X-Forwarded-For", "192.0.2.111"); st != 429 {
+		t.Fatalf("trusted peer: the 11th knock from one CF-Connecting-IP = %d, want 429 (X-Forwarded-For was read)", st)
+	}
+
+	// Many header addresses behind one X-Forwarded-For address: none binds.
+	many := e.meeting(bea)
+	for i := 1; i <= 11; i++ {
+		if st := e.knockVia(many.Code, fmt.Sprintf("Spread %d", i), "CF-Connecting-IP", fmt.Sprintf("198.51.100.%d", 20+i), "X-Forwarded-For", "192.0.2.200"); st != 201 {
+			t.Fatalf("trusted peer: knock %d with its own CF-Connecting-IP and a shared X-Forwarded-For = %d, want 201", i, st)
+		}
+	}
+
+	// An untrusted peer: the header is a spoof, ignored; the peer is counted.
+	e.server.SetTrustedProxiesForTest([]netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")})
+	spoof := e.meeting(ada)
+	for i := 1; i <= 10; i++ {
+		e.knockVia(spoof.Code, fmt.Sprintf("Spoof %d", i), "CF-Connecting-IP", fmt.Sprintf("203.0.113.%d", 100+i))
+	}
+	if st := e.knockVia(spoof.Code, "Spoof 11", "CF-Connecting-IP", "203.0.113.211"); st != 429 {
+		t.Fatalf("an untrusted peer's CF-Connecting-IP was believed: the 11th knock from one peer = %d, want 429", st)
 	}
 }
 

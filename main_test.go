@@ -119,3 +119,86 @@ func TestLoadConfig(t *testing.T) {
 		}
 	}
 }
+
+// 🔴 MEETINGS_CLIENT_IP_HEADER: unset changes nothing; set, it needs
+// MEETINGS_TRUSTED_PROXIES (it is believed only from a trusted proxy, so
+// without one it could never bind) and must name one header that is not
+// X-Forwarded-For.
+func TestLoadConfigClientIPHeader(t *testing.T) {
+	c, err := LoadConfig(env(base()))
+	if err != nil || c.ClientIPHeader != "" {
+		t.Fatalf("unset: ClientIPHeader = %q, %v; want empty", c.ClientIPHeader, err)
+	}
+	m := base()
+	m["MEETINGS_CLIENT_IP_HEADER"], m["MEETINGS_TRUSTED_PROXIES"] = " cf-connecting-ip ", "10.20.0.0/16"
+	if c, err = LoadConfig(env(m)); err != nil || c.ClientIPHeader != "Cf-Connecting-Ip" {
+		t.Fatalf("with trusted proxies: ClientIPHeader = %q, %v; want Cf-Connecting-Ip", c.ClientIPHeader, err)
+	}
+	m = base()
+	m["MEETINGS_CLIENT_IP_HEADER"] = "True-Client-IP"
+	if _, err = LoadConfig(env(m)); err == nil || !strings.Contains(err.Error(), "MEETINGS_TRUSTED_PROXIES is not") {
+		t.Fatalf("set without trusted proxies: LoadConfig = %v, want the refusal", err)
+	}
+	for _, bad := range []string{"X-Forwarded-For", "x-forwarded-for", "CF-Connecting-IP, X-Real-IP", "CF Connecting IP", "-X"} {
+		m = base()
+		m["MEETINGS_CLIENT_IP_HEADER"], m["MEETINGS_TRUSTED_PROXIES"] = bad, "10.20.0.0/16"
+		if c, err = LoadConfig(env(m)); err == nil {
+			t.Errorf("MEETINGS_CLIENT_IP_HEADER=%q: LoadConfig accepted it as %q", bad, c.ClientIPHeader)
+		}
+	}
+}
+
+// MUSTER_URL may be plain http to muster's fully-qualified Service name in
+// the cluster domain (default cluster.local, or MEETINGS_CLUSTER_DOMAIN), or
+// to exactly the host MEETINGS_MUSTER_HTTP_HOST names; never the short or
+// dotless form, and never a wildcard.
+func TestLoadConfigMusterHTTP(t *testing.T) {
+	for name, c := range map[string]struct {
+		url, domain, host string
+		ok                bool
+	}{
+		"fqdn, default domain":      {"http://muster-web.tenant-b.svc.cluster.local.:8105", "", "", true},
+		"fqdn, its own domain":      {"http://muster-web.tenant-b.svc.corp-k8s.internal.:8105", "corp-k8s.internal", "", true},
+		"fqdn, the default refused": {"http://muster-web.tenant-b.svc.cluster.local.:8105", "corp-k8s.internal", "", false},
+		"dotless full form":         {"http://muster-web.tenant-b.svc.cluster.local:8105", "", "", false},
+		"short form":                {"http://muster-web.tenant-b.svc:8105", "", "", false},
+		"the named host":            {"http://muster-app:8105", "", "muster-app", true},
+		"another host":              {"http://muster:8105", "", "muster-app", false},
+		"a wildcard host":           {"http://muster-app:8105", "", "*", false},
+		"a wildcard-ish host":       {"http://x.svc:8105", "", "*.svc", false},
+		"a host with a port":        {"http://muster-app:8105", "", "muster-app:8105", false},
+		"a cluster domain wildcard": {"http://muster-web.tenant-b.svc.cluster.local.:8105", "*", "", false},
+	} {
+		m := base()
+		m["MUSTER_URL"], m["MEETINGS_CLUSTER_DOMAIN"], m["MEETINGS_MUSTER_HTTP_HOST"] = c.url, c.domain, c.host
+		got, err := LoadConfig(env(m))
+		if (err == nil) != c.ok {
+			t.Errorf("%s: LoadConfig = %q, %v; want ok=%v", name, got.URL, err, c.ok)
+		}
+		// A malformed setting is refused as itself, not only because the
+		// URL then happens not to match it.
+		if strings.Contains(c.host, "*") || strings.Contains(c.host, ":") {
+			if err == nil || !strings.Contains(err.Error(), "MEETINGS_MUSTER_HTTP_HOST names ONE host") {
+				t.Errorf("%s: LoadConfig = %v, want MEETINGS_MUSTER_HTTP_HOST refused", name, err)
+			}
+		}
+		if c.domain == "*" && (err == nil || !strings.Contains(err.Error(), "MEETINGS_CLUSTER_DOMAIN")) {
+			t.Errorf("%s: LoadConfig = %v, want MEETINGS_CLUSTER_DOMAIN refused", name, err)
+		}
+	}
+}
+
+// The proxy settings reach the server: a header read by LoadConfig but
+// dropped on the way would leave the knock limit counting the proxy.
+func TestTheProxySettingsReachTheServer(t *testing.T) {
+	m := base()
+	m["MEETINGS_CLIENT_IP_HEADER"], m["MEETINGS_TRUSTED_PROXIES"] = "True-Client-IP", "10.30.0.0/16"
+	c, err := LoadConfig(env(m))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := c.serverConfig(nil, nil)
+	if sc.ClientIPHeader != "True-Client-Ip" || !slices.Equal(sc.TrustedProxies, []netip.Prefix{netip.MustParsePrefix("10.30.0.0/16")}) {
+		t.Fatalf("server config: header %q, proxies %v; want True-Client-Ip and 10.30.0.0/16", sc.ClientIPHeader, sc.TrustedProxies)
+	}
+}

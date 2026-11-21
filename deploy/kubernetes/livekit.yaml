@@ -1,0 +1,170 @@
+# LiveKit server, one node, on the POD network (not hostNetwork), reached
+# through Services:
+#   livekit           ClusterIP 7880: the server API (the plugin) and signalling
+#                     (the ingress for meet-rtc-<x>.<domain>)
+#   livekit-nodeport  NodePort: signalling (7880) and TURN/TLS (5349), for a
+#                     route from outside the cluster. Its nodePorts are set by
+#                     the overlay (a patch); unset, Kubernetes picks them.
+# LiveKit's direct media listeners (7881/tcp, the UDP ICE range) are on no
+# Service: every client connects through TURN over TLS (the plugin's ICE
+# policy is relay), which reaches the SFU inside this pod.
+#
+# Secrets it reads (names are patch targets):
+#   livekit-keys        LIVEKIT_API_KEY, LIVEKIT_API_SECRET
+#   meetings-turn-tls   tls.crt, tls.key: a PUBLICLY TRUSTED certificate for
+#                       the TURN host (meet-turn-<x>.<domain>); browsers refuse
+#                       TURN/TLS with a self-signed one
+#
+# The config is LIVEKIT_CONFIG, built by the kubelet from the env entries
+# before it ($(NAME) expansion), so the tenant's TURN host and the pod's own
+# address are configuration, never written here:
+#   - rtc.node_ip is LIVEKIT_NODE_IP: by default the POD's address
+#     (status.podIP). TURN relay allocations are made at node_ip, and the SFU's candidates are advertised at it; both
+#     live in this pod, so the relayed media never leaves it. That address is
+#     private, so it is the one entry in turn.allow_restricted_peer_cidrs.
+#     (The design's derivation, still UNVERIFIED until the real-network run.)
+#   - rtc.port_range and turn.relay_range are pinned outside the NodePort
+#     range (30000-32767) and outside each other.
+#   - room.auto_create is false: only the plugin's CreateRoom makes a room, so
+#     a token for a room the plugin did not create joins nothing.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: livekit
+  labels:
+    app.kubernetes.io/name: livekit
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: livekit
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: livekit
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: livekit
+          # v1.13.11, pinned by the multi-arch index digest.
+          image: docker.io/livekit/livekit-server:v1.13.11@sha256:25cd902de7cacbd5f1f779f6a6ac1eae20ba8f56b0935934ce6b0ab80d1e3d20
+          ports:
+            - name: http
+              containerPort: 7880
+            - name: turn-tls
+              containerPort: 5349
+          env:
+            - name: LIVEKIT_API_KEY
+              valueFrom: {secretKeyRef: {name: livekit-keys, key: LIVEKIT_API_KEY}}
+            - name: LIVEKIT_API_SECRET
+              valueFrom: {secretKeyRef: {name: livekit-keys, key: LIVEKIT_API_SECRET}}
+            - name: TURN_DOMAIN
+              valueFrom: {configMapKeyRef: {name: muster-meetings-params, key: turn-domain}}
+            # rtc.node_ip. The pod's own address by default (see above); an
+            # overlay may patch this entry to a fixed address from its config.
+            - name: LIVEKIT_NODE_IP
+              valueFrom: {fieldRef: {fieldPath: status.podIP}}
+            # livekit-server reads LIVEKIT_KEYS ("key: secret").
+            - name: LIVEKIT_KEYS
+              value: "$(LIVEKIT_API_KEY): $(LIVEKIT_API_SECRET)"
+            - name: LIVEKIT_CONFIG
+              value: |
+                port: 7880
+                rtc:
+                  tcp_port: 7881
+                  port_range_start: 50000
+                  port_range_end: 50199
+                  use_external_ip: false
+                  node_ip: $(LIVEKIT_NODE_IP)
+                  interfaces:
+                    includes: [eth0]
+                turn:
+                  enabled: true
+                  domain: $(TURN_DOMAIN)
+                  tls_port: 5349
+                  cert_file: /etc/livekit/turn-tls/tls.crt
+                  key_file: /etc/livekit/turn-tls/tls.key
+                  relay_range_start: 40000
+                  relay_range_end: 40199
+                  allow_restricted_peer_cidrs: [$(LIVEKIT_NODE_IP)/32]
+                room:
+                  auto_create: false
+                  empty_timeout: 600
+                  departure_timeout: 600
+                  max_participants: 8
+                webhook:
+                  api_key: $(LIVEKIT_API_KEY)
+                  urls: [http://muster-meetings:8081/livekit/webhook]
+                logging:
+                  level: info
+          volumeMounts:
+            - name: turn-tls
+              mountPath: /etc/livekit/turn-tls
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+          readinessProbe:
+            httpGet: {path: /, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /, port: http}
+            periodSeconds: 20
+            failureThreshold: 6
+      volumes:
+        - name: turn-tls
+          secret:
+            secretName: meetings-turn-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: livekit
+  labels:
+    app.kubernetes.io/name: livekit
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: livekit
+  ports:
+    - name: http
+      port: 7880
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: livekit-nodeport
+  labels:
+    app.kubernetes.io/name: livekit
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: livekit
+  ports:
+    # nodePort: set by the overlay (a patch).
+    - name: signal
+      port: 7880
+      targetPort: http
+    # The SNI-passthrough route for meet-turn-<x>.<domain> on public 443
+    # ends here; TLS is terminated by LiveKit itself.
+    - name: turn-tls
+      port: 5349
+      targetPort: turn-tls

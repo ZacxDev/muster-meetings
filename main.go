@@ -4,7 +4,9 @@
 // hand-off and owner sessions, the /self poll, the database, the meetings
 // list and New meeting with its link, as one server-installed app (core PR
 // 1h): an admin installs it once, and every person on the muster gets the
-// tab. Calls (LiveKit), the guest page and the lobby come next.
+// tab. Phase 2b adds the call: LiveKit rooms and tokens, the guest page and
+// lobby (admit, deny, remove), End meeting, LiveKit's webhook and a reconcile
+// loop, screen share, the consent notice, and the knock notification.
 //
 // Configuration is read from the environment only (see .env.example):
 //
@@ -16,6 +18,12 @@
 //	MEETINGS_LISTEN           the public listener (default :8080)
 //	MEETINGS_INTERNAL_LISTEN  the internal listener, /healthz (default :8081)
 //	STATE_DIR                 where the SQLite database lives (default ./state)
+//	MEETINGS_LIVEKIT_URL      where browsers connect for the call, e.g. wss://meet-rtc.example.test
+//	MEETINGS_LIVEKIT_API_URL  LiveKit's server API as the plugin reaches it, e.g. http://livekit:7880
+//	LIVEKIT_API_KEY           the LiveKit API key
+//	LIVEKIT_API_SECRET        the LiveKit API secret: signs tokens, verifies webhooks; never sent to a browser
+//	MEETINGS_LIVEKIT_ICE      relay (default: TURN over TLS is the only media path) or all (a local LiveKit)
+//	MEETINGS_TRUSTED_PROXIES  comma-separated CIDRs of the ingress in front of the plugin (for the per-address knock limit)
 package main
 
 import (
@@ -25,6 +33,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/signal"
@@ -33,6 +42,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ZacxDev/muster-meetings/internal/livekit"
 	"github.com/ZacxDev/muster-meetings/internal/muster"
 	"github.com/ZacxDev/muster-meetings/internal/owners"
 	"github.com/ZacxDev/muster-meetings/internal/server"
@@ -57,6 +67,11 @@ type Config struct {
 	Listen         string
 	InternalListen string
 	StateDir       string
+	LiveKitURL     string
+	LiveKitAPI     string
+	LiveKitKeys    livekit.Keys
+	ICE            string
+	TrustedProxies []netip.Prefix
 }
 
 // LoadConfig reads and checks the environment through getenv.
@@ -103,27 +118,74 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	if v := getenv("STATE_DIR"); v != "" {
 		c.StateDir = v
 	}
+	if c.LiveKitURL, err = CheckURL("MEETINGS_LIVEKIT_URL", getenv("MEETINGS_LIVEKIT_URL"), "wss", "ws"); err != nil {
+		return Config{}, err
+	}
+	// LiveKit's server API is reached inside the cluster, where it listens on
+	// plain http (as the design's webhook URL to the plugin does): http is
+	// allowed to any host. Its bearer is a one-minute token the plugin signs
+	// per call, never the secret.
+	if c.LiveKitAPI, err = checkURL("MEETINGS_LIVEKIT_API_URL", getenv("MEETINGS_LIVEKIT_API_URL"), "https", "http", true); err != nil {
+		return Config{}, err
+	}
+	c.LiveKitKeys = livekit.Keys{Key: strings.TrimSpace(getenv("LIVEKIT_API_KEY")), Secret: strings.TrimSpace(getenv("LIVEKIT_API_SECRET"))}
+	if !c.LiveKitKeys.Valid() {
+		return Config{}, livekit.ErrKeys
+	}
+	switch c.ICE = strings.TrimSpace(getenv("MEETINGS_LIVEKIT_ICE")); c.ICE {
+	case "":
+		c.ICE = "relay"
+	case "relay", "all":
+	default:
+		return Config{}, errors.New("MEETINGS_LIVEKIT_ICE is relay (the default: media only through TURN over TLS) or all")
+	}
+	for _, v := range strings.Split(getenv("MEETINGS_TRUSTED_PROXIES"), ",") {
+		if v = strings.TrimSpace(v); v == "" {
+			continue
+		}
+		p, err := netip.ParsePrefix(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("MEETINGS_TRUSTED_PROXIES: %q is not a CIDR such as 10.0.0.0/8", v)
+		}
+		// Trusting every address would let any client name itself in
+		// X-Forwarded-For and walk past the knock and stream limits.
+		if p.Bits() == 0 {
+			return Config{}, fmt.Errorf("MEETINGS_TRUSTED_PROXIES: %q trusts every address; list only the ingress's own CIDRs", v)
+		}
+		c.TrustedProxies = append(c.TrustedProxies, p.Masked())
+	}
 	return c, nil
+}
+
+// CheckURL validates a URL variable whose scheme is secure, or insecure only
+// to a loopback host: no user, query or fragment, no path. It returns
+// scheme://host.
+func CheckURL(name, raw, secure, insecure string) (string, error) {
+	return checkURL(name, raw, secure, insecure, false)
+}
+
+// checkURL is CheckURL; insecureAnyHost allows the insecure scheme to any
+// host, not only a loopback one.
+func checkURL(name, raw, secure, insecure string, insecureAnyHost bool) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" {
+		return "", fmt.Errorf("%s is not set to an absolute %s:// URL", name, secure)
+	}
+	h := u.Hostname()
+	loopback := h == "localhost" || h == "127.0.0.1" || h == "::1"
+	if u.Scheme != secure && !(u.Scheme == insecure && (loopback || insecureAnyHost)) {
+		return "", fmt.Errorf("%s must be %s:// (%s:// only for localhost, 127.0.0.1 or [::1])", name, secure, insecure)
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery || (u.Path != "" && u.Path != "/") {
+		return "", fmt.Errorf("%s must be a scheme and host alone: no user, path, query or fragment", name)
+	}
+	return u.Scheme + "://" + strings.ToLower(u.Host), nil
 }
 
 // CheckOrigin validates an origin variable: https, or http to a loopback
 // host; no user, path, query or fragment. It returns scheme://host, with the
 // host lower-cased.
-func CheckOrigin(name, raw string) (string, error) {
-	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || u.Host == "" {
-		return "", fmt.Errorf("%s is not an absolute URL such as https://meet.example.test", name)
-	}
-	h := u.Hostname()
-	loopback := h == "localhost" || h == "127.0.0.1" || h == "::1"
-	if u.Scheme != "https" && !(u.Scheme == "http" && loopback) {
-		return "", fmt.Errorf("%s must be https:// (http:// only for localhost, 127.0.0.1 or [::1])", name)
-	}
-	if u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery || (u.Path != "" && u.Path != "/") {
-		return "", fmt.Errorf("%s must be an origin alone: no user, path, query or fragment", name)
-	}
-	return u.Scheme + "://" + strings.ToLower(u.Host), nil
-}
+func CheckOrigin(name, raw string) (string, error) { return CheckURL(name, raw, "https", "http") }
 
 func run(logger *log.Logger) error {
 	cfg, err := LoadConfig(os.Getenv)
@@ -151,13 +213,22 @@ func run(logger *log.Logger) error {
 	}
 	logger.Print(startupLine(cfg, app.Name, app.PluginID, app.FilesTasks))
 
+	lk, err := livekit.NewClient(cfg.LiveKitAPI, cfg.LiveKitKeys)
+	if err != nil {
+		return err
+	}
+	srv := server.New(server.Config{PublicURL: cfg.PublicURL, MusterOrigin: cfg.MusterOrigin, Log: logger,
+		LiveKit: lk, LiveKitURL: cfg.LiveKitURL, ICE: cfg.ICE, TrustedProxies: cfg.TrustedProxies}, st, app)
+
 	go app.Run(ctx, owners.PollInterval)
 	go sweep(ctx, st, logger)
+	go srv.Run(ctx)
 
-	pub := &http.Server{Addr: cfg.Listen, Handler: server.New(server.Config{PublicURL: cfg.PublicURL, MusterOrigin: cfg.MusterOrigin, Log: logger}, st, app),
+	pub := &http.Server{Addr: cfg.Listen, Handler: srv,
 		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 32 << 10,
 		BaseContext: func(net.Listener) context.Context { return ctx }}
-	internal := &http.Server{Addr: cfg.InternalListen, Handler: server.Internal(st, app), ReadHeaderTimeout: 5 * time.Second}
+	internal := &http.Server{Addr: cfg.InternalListen, Handler: srv.Internal(), ReadHeaderTimeout: 5 * time.Second,
+		BaseContext: func(net.Listener) context.Context { return ctx }}
 	errc := make(chan error, 2)
 	go func() { errc <- pub.ListenAndServe() }()
 	go func() { errc <- internal.ListenAndServe() }()
@@ -201,6 +272,7 @@ func startupLine(cfg Config, name string, pluginID int64, tasks bool) string {
 	if tasks {
 		files = "with"
 	}
-	return fmt.Sprintf("muster-meetings: talking to %s as server app %q (plugin %d, %s Files tasks); serving %s on %s (internal %s), framed by %s",
-		muster.Redact(cfg.URL), name, pluginID, files, cfg.PublicURL, cfg.Listen, cfg.InternalListen, cfg.MusterOrigin)
+	return fmt.Sprintf("muster-meetings: talking to %s as server app %q (plugin %d, %s Files tasks); serving %s on %s (internal %s), framed by %s; LiveKit %s (API %s, ICE %s)",
+		muster.Redact(cfg.URL), name, pluginID, files, cfg.PublicURL, cfg.Listen, cfg.InternalListen, cfg.MusterOrigin,
+		muster.Redact(cfg.LiveKitURL), muster.Redact(cfg.LiveKitAPI), cfg.ICE)
 }

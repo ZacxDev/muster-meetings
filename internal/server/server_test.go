@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -22,6 +23,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ZacxDev/muster-meetings/internal/livekit"
+	"github.com/ZacxDev/muster-meetings/internal/livekittest"
 	"github.com/ZacxDev/muster-meetings/internal/muster"
 	"github.com/ZacxDev/muster-meetings/internal/mustertest"
 	"github.com/ZacxDev/muster-meetings/internal/owners"
@@ -51,9 +54,19 @@ var (
 type clock struct {
 	mu sync.Mutex
 	t  time.Time
+	// real: the wall clock (the integration test, against a real LiveKit
+	// that checks token times against its own).
+	real bool
 }
 
-func (c *clock) Now() time.Time { c.mu.Lock(); defer c.mu.Unlock(); return c.t }
+func (c *clock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.real {
+		return time.Now()
+	}
+	return c.t
+}
 func (c *clock) Add(d time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -61,14 +74,17 @@ func (c *clock) Add(d time.Duration) {
 }
 
 type env struct {
-	t      *testing.T
-	fake   *mustertest.Fake
-	store  *store.Store
-	dbPath string
-	app    *owners.App
-	srv    *httptest.Server
-	clock  *clock
-	log    *syncBuf
+	t        *testing.T
+	fake     *mustertest.Fake
+	lk       *livekittest.Fake
+	store    *store.Store
+	dbPath   string
+	app      *owners.App
+	server   *server.Server
+	srv      *httptest.Server
+	internal *httptest.Server
+	clock    *clock
+	log      *syncBuf
 }
 
 type syncBuf struct {
@@ -79,9 +95,18 @@ type syncBuf struct {
 func (s *syncBuf) Write(p []byte) (int, error) { s.mu.Lock(); defer s.mu.Unlock(); return s.b.Write(p) }
 func (s *syncBuf) String() string              { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }
 
-func newEnv(t *testing.T) *env {
+// liveKitAt points an env at a real LiveKit instead of the fake.
+type liveKitAt struct {
+	API, WS   string
+	Keys      livekit.Keys
+	RealClock bool
+}
+
+func newEnv(t *testing.T) *env { return newEnvWith(t, nil) }
+
+func newEnvWith(t *testing.T, real *liveKitAt) *env {
 	t.Helper()
-	e := &env{t: t, fake: mustertest.New(), clock: &clock{t: t0}, log: &syncBuf{}}
+	e := &env{t: t, fake: mustertest.New(), clock: &clock{t: t0, real: real != nil && real.RealClock}, log: &syncBuf{}}
 	t.Cleanup(e.fake.Close)
 	e.fake.Now = e.clock.Now
 	e.fake.Install(app)
@@ -103,9 +128,35 @@ func newEnv(t *testing.T) *env {
 	if e.app, err = owners.Boot(context.Background(), c, st, lg, e.clock.Now); err != nil {
 		t.Fatal(err)
 	}
-	h := server.New(server.Config{PublicURL: publicURL, MusterOrigin: musterOrigin, Now: e.clock.Now, Log: lg}, st, e.app)
-	e.srv = httptest.NewServer(h)
+	lkAPI, lkWS, lkKeys := "", "", livekittest.Keys
+	if real == nil {
+		e.lk = livekittest.New()
+		t.Cleanup(e.lk.Close)
+		e.lk.Now = e.clock.Now
+		lkAPI, lkWS = e.lk.URL, e.lk.WSURL()
+	} else {
+		lkAPI, lkWS, lkKeys = real.API, real.WS, real.Keys
+	}
+	lkc, err := livekit.NewClient(lkAPI, lkKeys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lkc.Now = e.clock.Now
+	e.server = server.New(server.Config{PublicURL: publicURL, MusterOrigin: musterOrigin, Now: e.clock.Now, Log: lg,
+		LiveKit: lkc, LiveKitURL: lkWS, ICE: "relay",
+		// The test client is the "ingress": a knock's address comes from
+		// X-Forwarded-For, so a test can knock from many addresses.
+		TrustedProxies: []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128")},
+		// The streams re-read the database often and send no heartbeat a
+		// test waits on; the reconcile loop runs only when a test calls it.
+		StreamRecheck: 50 * time.Millisecond, ReconcileEvery: time.Hour, Heartbeat: time.Hour}, st, e.app)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go e.server.Run(ctx)
+	e.srv = httptest.NewServer(e.server)
 	t.Cleanup(e.srv.Close)
+	e.internal = httptest.NewServer(e.server.Internal())
+	t.Cleanup(e.internal.Close)
 	return e
 }
 
@@ -139,6 +190,12 @@ func (e *env) do(method, path, bearer string, body any, hdr ...string) (*http.Re
 		e.t.Fatal(err)
 	}
 	defer resp.Body.Close()
+	if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+		// An event stream does not end: its status is the answer. (A mutant
+		// that opens a stream where a refusal belongs must fail its test,
+		// not hang it.)
+		return resp, []byte("<an event stream>")
+	}
 	raw, _ := io.ReadAll(resp.Body)
 	return resp, raw
 }
@@ -1276,29 +1333,42 @@ func TestTheAppPageCarriesNoInlineScript(t *testing.T) {
 	if !sessionAttr.Match(body) {
 		t.Fatalf("not the app page: %s", body)
 	}
-	for _, m := range regexp.MustCompile(`<script[^>]*>`).FindAll(body, -1) {
-		if !bytes.Contains(m, []byte(`src="/static/app.js"`)) {
-			t.Errorf("inline script %s: the CSP would block it", m)
-		}
+	c := e.meeting(bea)
+	_, guest := e.do("GET", "/j/"+c.Code, "", nil)
+	if !bytes.Contains(guest, []byte(`id="knock-form"`)) {
+		t.Fatalf("not the guest page: %s", guest)
 	}
-	if regexp.MustCompile(`\son[a-z]+=`).Match(body) {
-		t.Error("an inline event handler: the CSP would block it")
+	for name, page := range map[string][]byte{"app": body, "guest": guest} {
+		scripts := regexp.MustCompile(`<script[^>]*>([^<]*)</script>`).FindAllSubmatch(page, -1)
+		if len(scripts) != 3 {
+			t.Errorf("%s page: %d scripts, want the LiveKit client, call.js and its own", name, len(scripts))
+		}
+		for _, m := range scripts {
+			if !regexp.MustCompile(`^<script src="/static/[a-z0-9./-]+\.js">$`).Match(m[0][:len(m[0])-len(m[1])-len("</script>")]) || len(bytes.TrimSpace(m[1])) != 0 {
+				t.Errorf("%s page: script %s is not a file on this origin with no inline body: the CSP would block it", name, m[0])
+			}
+		}
+		if regexp.MustCompile(`\son[a-z]+=`).Match(page) {
+			t.Errorf("%s page: an inline event handler: the CSP would block it", name)
+		}
 	}
 	resp, js := e.do("GET", "/static/app.js", "", nil)
 	if resp.StatusCode != 200 || !bytes.Contains(js, []byte("removeAttribute('data-session')")) || !bytes.Contains(js, []byte("history.replaceState")) {
 		t.Fatalf("app.js = %d", resp.StatusCode)
 	}
-	for _, bad := range []string{"localStorage", "sessionStorage", "document.cookie", "innerHTML"} {
-		if bytes.Contains(js, []byte(bad)) {
-			t.Errorf("app.js uses %s", bad)
+	for _, f := range []string{"/static/app.js", "/static/guest.js", "/static/call.js"} {
+		_, js := e.do("GET", f, "", nil)
+		for _, bad := range []string{"localStorage", "sessionStorage", "document.cookie", "innerHTML"} {
+			if bytes.Contains(js, []byte(bad)) {
+				t.Errorf("%s uses %s", f, bad)
+			}
 		}
 	}
 }
 
 func TestHealthz(t *testing.T) {
 	e := newEnv(t)
-	srv := httptest.NewServer(server.Internal(e.store, e.app))
-	defer srv.Close()
+	srv := e.internal
 	get := func() int {
 		resp, err := http.Get(srv.URL + "/healthz")
 		if err != nil {

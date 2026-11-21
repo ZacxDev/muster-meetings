@@ -2,7 +2,7 @@
   "name": "muster-meetings-e2e",
   "version": "0.0.0",
   "private": true,
-  "description": "Browser test for the /enter frame gate (Playwright, Chromium), against the fake muster.",
+  "description": "Browser tests (Playwright, Chromium) against the fake muster and the fake LiveKit: the /enter frame gate, and the lobby at 390x844.",
   "scripts": {
     "test": "playwright test"
   },

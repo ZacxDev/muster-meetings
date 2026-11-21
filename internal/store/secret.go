@@ -56,6 +56,11 @@ func ValidJoinCode(s string) bool     { return joinCodeRE.MatchString(s) }
 func ValidSessionToken(s string) bool { return sessionTokenRE.MatchString(s) }
 func ValidMeetingID(s string) bool    { return meetingIDRE.MatchString(s) }
 
+// ValidTicket is a knock's ticket shape (TicketBytes, 22 base64url
+// characters), and ValidParticipantID a lobby row id's.
+func ValidTicket(s string) bool        { return joinCodeRE.MatchString(s) }
+func ValidParticipantID(s string) bool { return meetingIDRE.MatchString(s) }
+
 // ValidSubject is the shape of the subject muster's server-app redeem gives:
 // 128 random bits, 22 base64url characters (design: "Data model and
 // migration 0171"). A decimal user id, an email or "" is not one.

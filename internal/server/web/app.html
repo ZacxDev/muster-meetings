@@ -10,28 +10,63 @@
 <body>
 {{- if .Session}}
 <main id="app" data-session="{{.Session}}"{{if .Ref}} data-ref="{{.Ref}}"{{end}}>
-  <header class="bar">
-    <h1>Meetings</h1>
-    <button id="new-meeting" type="button" class="primary">New meeting</button>
-  </header>
-  <p id="status" class="status" role="status" aria-live="polite"></p>
-  <section id="link-panel" class="link-panel" hidden aria-labelledby="link-title">
-    <h2 id="link-title">Meeting link</h2>
-    <p>Send this link to the people you want to meet. They ask to join, and you let them in.</p>
-    <div class="link-row">
-      <input id="join-url" type="text" readonly aria-label="Meeting link">
-      <button id="copy-link" type="button" class="primary">Copy link</button>
-      <button id="share-link" type="button" hidden>Share</button>
-    </div>
+  <section id="list-view">
+    <header class="bar">
+      <h1>Meetings</h1>
+      <button id="new-meeting" type="button" class="primary">New meeting</button>
+    </header>
+    <p id="status" class="status" role="status" aria-live="polite"></p>
+    <section id="link-panel" class="link-panel" hidden aria-labelledby="link-title">
+      <h2 id="link-title">Meeting link</h2>
+      <p>Send this link to the people you want to meet. They ask to join, and you let them in.</p>
+      <div class="link-row">
+        <input id="join-url" type="text" readonly aria-label="Meeting link">
+        <button id="copy-link" type="button" class="primary">Copy link</button>
+        <button id="share-link" type="button" hidden>Share</button>
+      </div>
+    </section>
+    <section aria-labelledby="list-title">
+      <h2 id="list-title">Meetings</h2>
+      <p id="empty" class="muted" hidden>No meetings yet. Press <strong>New meeting</strong> to start one.</p>
+      <ul id="meetings" class="meetings"></ul>
+      <button id="more" type="button" hidden>Show older meetings</button>
+    </section>
   </section>
-  <section aria-labelledby="list-title">
-    <h2 id="list-title">Meetings</h2>
-    <p id="empty" class="muted" hidden>No meetings yet. Press <strong>New meeting</strong> to start one.</p>
-    <ul id="meetings" class="meetings"></ul>
-    <button id="more" type="button" hidden>Show older meetings</button>
+
+  <section id="call-view" class="call" hidden aria-label="Meeting" data-conn="none">
+    <div class="call-top">
+      <div id="lobby" class="lobby" aria-live="polite"></div>
+      <div class="call-link">
+        <input id="call-url" type="text" readonly aria-label="Meeting link">
+        <button id="call-copy" type="button" class="primary">Copy link</button>
+      </div>
+      <p id="badge" class="badge" role="status"></p>
+      <div class="switches">
+        <label class="switch"><input id="sw-record" type="checkbox"> Record</label>
+        <label class="switch"><input id="sw-ai" type="checkbox"> AI action items <span class="muted">(sends the transcript text, never audio, to an AI service)</span></label>
+      </div>
+      <p id="call-status" class="status" role="status" aria-live="polite"></p>
+      <button id="btn-use-here" type="button" class="primary" hidden>Use here</button>
+    </div>
+    <div class="stage-wrap">
+      <div id="stage" class="stage"></div>
+      <div id="strip" class="strip"></div>
+    </div>
+    <!-- The transcript and action items arrive here in later phases. -->
+    <aside id="panels" class="panels" hidden></aside>
+    <div id="audio" hidden></div>
+    <nav class="controls" aria-label="Call controls">
+      <button id="btn-mic" type="button" aria-pressed="true">Mute</button>
+      <button id="btn-cam" type="button" aria-pressed="true">Camera off</button>
+      <button id="btn-share" type="button" aria-pressed="false">Share screen</button>
+      <button id="btn-back" type="button">Back</button>
+      <button id="btn-end" type="button" class="danger">End meeting</button>
+    </nav>
   </section>
   <noscript><p>Meetings needs JavaScript.</p></noscript>
 </main>
+<script src="/static/vendor/livekit-client-2.25.0.umd.js"></script>
+<script src="/static/call.js"></script>
 <script src="/static/app.js"></script>
 {{- else}}
 <main class="notice">

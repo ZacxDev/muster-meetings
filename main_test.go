@@ -2,8 +2,12 @@ package main
 
 import (
 	"encoding/base64"
+	"net/netip"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/ZacxDev/muster-meetings/internal/livekit"
 )
 
 // The startup line names muster by scheme and host only. cfg is built here,
@@ -11,12 +15,14 @@ import (
 // what is tested.
 func TestTheStartupLineNamesTheHostOnly(t *testing.T) {
 	got := startupLine(Config{URL: "https://muster.example.test:8443/mpl_s3cretT0ken?t=mpl_s3cretT0ken", Token: "mpl_s3cretT0ken",
-		PublicURL: "https://meet.example.test", MusterOrigin: "https://example.test", Listen: ":8080", InternalListen: ":8081"}, "meet-srv", 12, true)
-	want := `muster-meetings: talking to https://muster.example.test:8443 as server app "meet-srv" (plugin 12, with Files tasks); serving https://meet.example.test on :8080 (internal :8081), framed by https://example.test`
+		PublicURL: "https://meet.example.test", MusterOrigin: "https://example.test", Listen: ":8080", InternalListen: ":8081",
+		LiveKitURL: "wss://meet-rtc.example.test", LiveKitAPI: "http://livekit:7880", ICE: "relay",
+		LiveKitKeys: livekit.Keys{Key: "APIk3yS3cret", Secret: "lks3cretT0kenValue"}}, "meet-srv", 12, true)
+	want := `muster-meetings: talking to https://muster.example.test:8443 as server app "meet-srv" (plugin 12, with Files tasks); serving https://meet.example.test on :8080 (internal :8081), framed by https://example.test; LiveKit wss://meet-rtc.example.test (API http://livekit:7880, ICE relay)`
 	if got != want {
 		t.Fatalf("startup line = %q, want %q", got, want)
 	}
-	if strings.Contains(got, "s3cretT0ken") {
+	if strings.Contains(got, "s3cretT0ken") || strings.Contains(got, "lks3cret") || strings.Contains(got, "APIk3y") {
 		t.Fatalf("startup line names the token: %q", got)
 	}
 }
@@ -29,15 +35,27 @@ func env(m map[string]string) func(string) string { return func(k string) string
 func base() map[string]string {
 	return map[string]string{"MUSTER_URL": "http://localhost:8105/", "MUSTER_PLUGIN_TOKEN": "mpl_x",
 		"MUSTER_ORIGIN": "https://example.test", "MEETINGS_PUBLIC_URL": "https://Meet.Example.Test/",
-		"MEETINGS_LINK_KEY": base64.StdEncoding.EncodeToString(fixtureKey)}
+		"MEETINGS_LINK_KEY":    base64.StdEncoding.EncodeToString(fixtureKey),
+		"MEETINGS_LIVEKIT_URL": "wss://Meet-RTC.example.test/", "MEETINGS_LIVEKIT_API_URL": "http://livekit:7880",
+		"LIVEKIT_API_KEY": "APIfixture", "LIVEKIT_API_SECRET": "s3cretT0ken-livekit-secret"}
 }
 
 func TestLoadConfig(t *testing.T) {
 	c, err := LoadConfig(env(base()))
 	if err != nil || c.URL != "http://localhost:8105" || c.Token != "mpl_x" ||
 		c.MusterOrigin != "https://example.test" || c.PublicURL != "https://meet.example.test" ||
-		c.Listen != ":8080" || c.InternalListen != ":8081" || c.StateDir != "./state" || string(c.LinkKey) != string(fixtureKey) {
+		c.Listen != ":8080" || c.InternalListen != ":8081" || c.StateDir != "./state" || string(c.LinkKey) != string(fixtureKey) ||
+		c.LiveKitURL != "wss://meet-rtc.example.test" || c.LiveKitAPI != "http://livekit:7880" || c.ICE != "relay" ||
+		c.LiveKitKeys != (livekit.Keys{Key: "APIfixture", Secret: "s3cretT0ken-livekit-secret"}) || c.TrustedProxies != nil {
 		t.Fatalf("defaults = %+v, %v", c, err)
+	}
+	m0 := base()
+	m0["MEETINGS_LIVEKIT_ICE"], m0["MEETINGS_TRUSTED_PROXIES"] = "all", " 10.1.2.3/8, fd00::/8 "
+	m0["MEETINGS_LIVEKIT_URL"] = "ws://127.0.0.1:7880"
+	c, err = LoadConfig(env(m0))
+	if err != nil || c.ICE != "all" || c.LiveKitURL != "ws://127.0.0.1:7880" ||
+		!slices.Equal(c.TrustedProxies, []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8"), netip.MustParsePrefix("fd00::/8")}) {
+		t.Fatalf("LiveKit set = %+v, %v", c, err)
 	}
 	m := base()
 	m["MUSTER_PLUGIN_TOKEN"] = " mpl_a \n"
@@ -74,6 +92,20 @@ func TestLoadConfig(t *testing.T) {
 			m["MEETINGS_LINK_KEY"] = base64.StdEncoding.EncodeToString([]byte("s3cretT0ken thirty-three bytes!!!"))
 		},
 		"malformed link key": func(m map[string]string) { m["MEETINGS_LINK_KEY"] = "s3cretT0ken-not-base64!!" },
+		// LiveKit: the browser URL wss (ws only to loopback), the API http(s),
+		// both keys, a known ICE policy, real CIDRs.
+		"no LiveKit URL":             func(m map[string]string) { delete(m, "MEETINGS_LIVEKIT_URL") },
+		"ws LiveKit URL off-host":    func(m map[string]string) { m["MEETINGS_LIVEKIT_URL"] = "ws://meet-rtc.example.test" },
+		"https LiveKit URL":          func(m map[string]string) { m["MEETINGS_LIVEKIT_URL"] = "https://meet-rtc.example.test" },
+		"LiveKit URL with a path":    func(m map[string]string) { m["MEETINGS_LIVEKIT_URL"] = "wss://meet-rtc.example.test/rtc" },
+		"no LiveKit API URL":         func(m map[string]string) { delete(m, "MEETINGS_LIVEKIT_API_URL") },
+		"LiveKit API URL with user":  func(m map[string]string) { m["MEETINGS_LIVEKIT_API_URL"] = "http://k:s3cretT0ken@livekit:7880" },
+		"no LiveKit key":             func(m map[string]string) { delete(m, "LIVEKIT_API_KEY") },
+		"no LiveKit secret":          func(m map[string]string) { m["LIVEKIT_API_SECRET"] = " " },
+		"unknown ICE policy":         func(m map[string]string) { m["MEETINGS_LIVEKIT_ICE"] = "udp" },
+		"a proxy that is no CIDR":    func(m map[string]string) { m["MEETINGS_TRUSTED_PROXIES"] = "ingress.example.test" },
+		"every IPv4 address trusted": func(m map[string]string) { m["MEETINGS_TRUSTED_PROXIES"] = "10.0.0.0/8, 0.0.0.0/0" },
+		"every IPv6 address trusted": func(m map[string]string) { m["MEETINGS_TRUSTED_PROXIES"] = "::/0" },
 	} {
 		m := base()
 		mut(m)

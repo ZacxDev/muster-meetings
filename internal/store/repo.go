@@ -86,10 +86,26 @@ var ErrNoSession = errors.New("the owner session is gone")
 // committed first (and the revocation ends its meeting) or finds its session
 // gone (ErrNoSession): never an open meeting for a revoked owner.
 func (r *OwnerRepo) CreateMeeting(ctx context.Context, now time.Time) (Created, error) {
+	return r.CreateMeetingWith(ctx, now, nil)
+}
+
+// RoomName is a meeting's LiveKit room.
+func RoomName(meetingID string) string { return "meeting-" + meetingID }
+
+// CreateMeetingWith is CreateMeeting with a step that must succeed first:
+// before(room) runs with the new meeting's room name before anything is
+// stored (New meeting creates the LiveKit room there), and its error is
+// returned with no meeting made.
+func (r *OwnerRepo) CreateMeetingWith(ctx context.Context, now time.Time, before func(room string) error) (Created, error) {
 	if r.session == "" {
 		return Created{}, ErrNoSession
 	}
 	id := NewMeetingID()
+	if before != nil {
+		if err := before(RoomName(id)); err != nil {
+			return Created{}, err
+		}
+	}
 	code := r.s.JoinCode(id)
 	tx, err := r.s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -99,7 +115,7 @@ func (r *OwnerRepo) CreateMeeting(ctx context.Context, now time.Time) (Created, 
 	res, err := tx.ExecContext(ctx, `INSERT INTO meetings (id, subject, room, join_code_sha256, state, record, ai, created_at)
 		SELECT ?, ?, ?, ?, 'open', 1, 1, ?
 		WHERE EXISTS (SELECT 1 FROM owner_sessions WHERE token_sha256 = ? AND subject = ? AND expires_at > ?)`,
-		id, r.subject, "meeting-"+id, Hash(code), ms(now), r.session, r.subject, ms(now))
+		id, r.subject, RoomName(id), Hash(code), ms(now), r.session, r.subject, ms(now))
 	if err != nil {
 		return Created{}, err
 	}
@@ -208,4 +224,29 @@ func (r *OwnerRepo) Link(ctx context.Context, id string, now time.Time) (string,
 		return "", ErrNoLink
 	}
 	return r.s.JoinCode(m.ID), nil
+}
+
+// SessionLive says the session this repository was built from still exists
+// and is unexpired at now (a ForSubject repository has none: false). A
+// long-lived owner stream asks it before every send, so a session that a
+// revocation or an expired grant deleted stops being served at once.
+func (r *OwnerRepo) SessionLive(ctx context.Context, now time.Time) (bool, error) {
+	if r.session == "" {
+		return false, nil
+	}
+	var n int
+	err := r.s.db.QueryRowContext(ctx, `SELECT count(*) FROM owner_sessions WHERE token_sha256 = ? AND subject = ? AND expires_at > ?`,
+		r.session, r.subject, ms(now)).Scan(&n)
+	return n > 0, err
+}
+
+// DisplayName is the owner's display name, from muster's redeem ("" when
+// the account has none).
+func (r *OwnerRepo) DisplayName(ctx context.Context) (string, error) {
+	var n string
+	err := r.s.db.QueryRowContext(ctx, `SELECT display_name FROM owners WHERE subject = ?`, r.subject).Scan(&n)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return n, err
 }

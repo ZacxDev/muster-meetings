@@ -27,6 +27,27 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
+      # A real livekit-server and LiveKit's CLI for the integration test
+      # (internal/server/livekit_integration_test.go) and its mutant: pinned
+      # releases, checked by SHA-256. MEETINGS_REQUIRE_LIVEKIT=1 makes the
+      # test fail, not skip, if they are missing.
+      - name: livekit-server and lk (pinned)
+        env:
+          LIVEKIT_VERSION: 1.13.11
+          LIVEKIT_SHA256: 1e9ee90ca301e1842b2887fc77cb122759756a9c8aeb4334ee91de3325ec43fb
+          LK_VERSION: 2.19.4
+          LK_SHA256: cb0f769201faa13956a3999bee078ec63fd5f22b855a79c09d648283e50debae
+        run: |
+          mkdir -p /tmp/lk
+          curl -sSfL -o /tmp/lks.tgz "https://github.com/livekit/livekit/releases/download/v${LIVEKIT_VERSION}/livekit_${LIVEKIT_VERSION}_linux_amd64.tar.gz"
+          echo "${LIVEKIT_SHA256}  /tmp/lks.tgz" | sha256sum -c -
+          curl -sSfL -o /tmp/lkcli.tgz "https://github.com/livekit/livekit-cli/releases/download/v${LK_VERSION}/lk_${LK_VERSION}_linux_amd64.tar.gz"
+          echo "${LK_SHA256}  /tmp/lkcli.tgz" | sha256sum -c -
+          tar -xzf /tmp/lks.tgz -C /tmp/lk livekit-server
+          tar -xzf /tmp/lkcli.tgz -C /tmp/lk lk
+          echo "MEETINGS_LIVEKIT_SERVER=/tmp/lk/livekit-server" >> "$GITHUB_ENV"
+          echo "MEETINGS_LK_CLI=/tmp/lk/lk" >> "$GITHUB_ENV"
+          echo "MEETINGS_REQUIRE_LIVEKIT=1" >> "$GITHUB_ENV"
       - run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
       - run: go vet ./...
       - run: go test -race ./...
@@ -44,18 +65,34 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
+      # A real livekit-server for owner-two-devices.spec.ts (pinned, SHA-256);
+      # MEETINGS_REQUIRE_LIVEKIT=1 makes that spec fail, not skip, without it.
+      - name: livekit-server (pinned)
+        env:
+          LIVEKIT_VERSION: 1.13.11
+          LIVEKIT_SHA256: 1e9ee90ca301e1842b2887fc77cb122759756a9c8aeb4334ee91de3325ec43fb
+        run: |
+          mkdir -p /tmp/lk
+          curl -sSfL -o /tmp/lks.tgz "https://github.com/livekit/livekit/releases/download/v${LIVEKIT_VERSION}/livekit_${LIVEKIT_VERSION}_linux_amd64.tar.gz"
+          echo "${LIVEKIT_SHA256}  /tmp/lks.tgz" | sha256sum -c -
+          tar -xzf /tmp/lks.tgz -C /tmp/lk livekit-server
+          echo "MEETINGS_LIVEKIT_SERVER=/tmp/lk/livekit-server" >> "$GITHUB_ENV"
+          echo "MEETINGS_REQUIRE_LIVEKIT=1" >> "$GITHUB_ENV"
       - name: npm ci
         working-directory: e2e
         run: npm ci
       - name: install chromium
         working-directory: e2e
         run: npx playwright install --with-deps chromium
-      # The /enter frame gate in a real browser: a top-level load is refused
-      # with no redeem; the same code framed by a muster-like parent works.
+      # The /enter frame gate in a real browser (a top-level load is refused
+      # with no redeem; the same code framed by a muster-like parent works),
+      # the lobby at 390x844 (a guest knocks, the owner admits, the guest
+      # connects to the fake LiveKit with a guest token, and Retry reconnects
+      # without a knock), and a second owner device against a real LiveKit.
       # Count the passes: `playwright test` exits 0 when everything skipped.
       - name: playwright test
         working-directory: e2e
         run: |
           set -o pipefail
           npx playwright test 2>&1 | tee /tmp/e2e.log
-          grep -qE '^\s+1 passed \(' /tmp/e2e.log
+          grep -qE '^\s+3 passed \(' /tmp/e2e.log

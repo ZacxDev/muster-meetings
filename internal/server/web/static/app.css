@@ -22,3 +22,57 @@ button:disabled { opacity: .6; cursor: default; }
 .meeting .meta, .muted { color: var(--muted); font-size: .9rem; }
 .notice { text-align: center; padding-top: 3rem; }
 @media (min-width: 40rem) { .meeting { flex-direction: row; justify-content: space-between; align-items: center; gap: 1rem; } .meeting .actions { margin-top: 0; } }
+
+/* ---- the call (owner and guest). Mobile first: one column, the stage on top,
+   the other tiles in a horizontal strip, the controls in a bottom bar of 44 px
+   targets; from sm (40rem) up the stage and the strip sit side by side. The
+   lobby rows and the badge stay at the top, over a shared screen. ---- */
+button.danger { background: #c62828; color: #fff; border-color: #c62828; }
+.call { position: fixed; inset: 0; display: flex; flex-direction: column; background: var(--bg); max-width: none; padding: 0;
+  padding-top: env(safe-area-inset-top); }
+.call[hidden] { display: none; }
+.call-top { position: sticky; top: 0; z-index: 2; padding: .5rem max(.75rem, env(safe-area-inset-left)); background: var(--bg); border-bottom: 1px solid var(--line); }
+.call-top .status { margin: .25rem 0 0; min-height: 0; }
+.lobby:empty { display: none; }
+.lobby { display: flex; flex-direction: column; gap: .4rem; margin-bottom: .5rem; }
+.lobby-row { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; padding: .4rem .6rem; border: 1px solid var(--line); border-radius: 10px; }
+.lobby-row.waiting { border-color: var(--accent); }
+.lobby-row .who { font-weight: 600; overflow-wrap: anywhere; }
+.lobby-row .what { flex: 1 1 auto; color: var(--muted); }
+.call-link { display: flex; gap: .5rem; }
+.call-link input { flex: 1 1 auto; min-width: 0; min-height: 44px; padding: 0 .75rem; font: inherit; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: inherit; }
+.badge { margin: .4rem 0 0; font-size: .85rem; font-weight: 600; color: #c62828; }
+.badge:empty { display: none; }
+.switches { display: flex; flex-wrap: wrap; gap: .25rem 1rem; margin-top: .25rem; font-size: .9rem; }
+.switch { display: inline-flex; align-items: center; gap: .4rem; min-height: 44px; }
+.switch input { width: 22px; height: 22px; }
+.stage-wrap { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: .4rem; padding: .4rem; }
+.stage { flex: 1 1 auto; min-height: 0; display: flex; }
+.stage .tile { flex: 1 1 auto; }
+.strip { flex: 0 0 auto; display: flex; gap: .4rem; overflow-x: auto; }
+.strip .tile { flex: 0 0 8.5rem; height: 6rem; }
+.tile { position: relative; margin: 0; background: #111; border-radius: 10px; overflow: hidden; display: flex; align-items: center; justify-content: center; }
+.tile video { width: 100%; height: 100%; object-fit: cover; }
+.tile.screen video { object-fit: contain; }
+.tile video.mirror { transform: scaleX(-1); }
+.tile figcaption { position: absolute; left: .4rem; bottom: .3rem; max-width: calc(100% - .8rem); padding: .1rem .4rem; border-radius: 6px;
+  background: rgba(0,0,0,.6); color: #fff; font-size: .8rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.controls { display: flex; gap: .4rem; justify-content: center; flex-wrap: wrap; padding: .5rem max(.5rem, env(safe-area-inset-left)) max(.5rem, env(safe-area-inset-bottom));
+  border-top: 1px solid var(--line); background: var(--bg); }
+.controls button { min-width: 44px; min-height: 44px; padding: 0 .7rem; }
+.panels { display: none; }
+@media (min-width: 40rem) {
+  .stage-wrap { flex-direction: row; }
+  .strip { flex-direction: column; overflow-x: hidden; overflow-y: auto; width: 12rem; }
+  .strip .tile { flex: 0 0 auto; width: 100%; height: 7rem; }
+}
+
+/* ---- the guest's join page ---- */
+.join { max-width: 32rem; margin: 0 auto; }
+.join h1 { margin: .5rem 0 1rem; overflow-wrap: anywhere; }
+.notice-box { padding: .75rem 1rem; border: 1px solid var(--line); border-left: 4px solid #c62828; border-radius: 10px; }
+.notice-box p { margin: .25rem 0; }
+.preview { display: flex; flex-direction: column; gap: .5rem; margin: 1rem 0; }
+.preview video { width: 100%; max-height: 16rem; background: #111; border-radius: 10px; transform: scaleX(-1); }
+.knock { display: flex; flex-direction: column; gap: .5rem; }
+.knock input { min-height: 44px; padding: 0 .75rem; font: inherit; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: inherit; }

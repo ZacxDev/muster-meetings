@@ -807,7 +807,7 @@ var mutants = []mutant{
 		pkg: "./internal/stt", test: "TestA503SendsTheParticipantToUtteranceAndRetriesAfterMax30sRetryAfter", want: "Retry-After 10: Nemotron was tried again at 29s"},
 	{name: "nemotron drop: reconnects without the waits", file: nemGo, from: "s.nextAt = s.e.now().Add(s.reconnects[0])", to: "s.nextAt = s.e.now()",
 		pkg: "./internal/stt", test: "TestAMidStreamDropReconnectsThreeTimesThenFallsBackWithAGap", want: "at +0s: 1 reconnects tried, want 0"},
-	{name: "nemotron drop: falls back after one failed reconnect", file: nemGo, from: "if errors.As(err, &ref) || s.attempts >= len(s.reconnects) {", to: "if true {",
+	{name: "nemotron drop: falls back after one failed reconnect", file: nemGo, from: "if errors.As(err, &ref) || s.attempts >= len(s.reconnects) {", to: "if errors.As(err, &ref) || true {",
 		pkg: "./internal/stt", test: "TestAMidStreamDropReconnectsThreeTimesThenFallsBackWithAGap", want: "at +3s: 1 reconnects tried, want 2"},
 	{name: "nemotron drop: never falls back", file: nemGo, from: "\t\ts.closeGap()\n\t\ts.toFallback(err)\n\t\treturn\n\t}\n\ts.nextAt", to: "\t\ts.closeGap()\n\t\ts.nextAt = s.e.now().Add(s.reconnects[0])\n\t\treturn\n\t}\n\ts.nextAt",
 		pkg: "./internal/stt", test: "TestAMidStreamDropReconnectsThreeTimesThenFallsBackWithAGap", want: "no the fallback within"},

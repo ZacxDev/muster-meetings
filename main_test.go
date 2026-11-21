@@ -302,10 +302,6 @@ func TestLoadConfigNemotronNeedsAllFour(t *testing.T) {
 	if line := startupLine(c, "meet", 1, false); strings.Contains(line, "s3cretT0ken") || !strings.Contains(line, "nemotron engine via ws://stt-nemotron:8000") {
 		t.Fatalf("the startup line: %s", line)
 	}
-	// The path may be left off (it is added); wss to any host.
-	if c, err := LoadConfig(env(all(map[string]string{"MEETINGS_STREAM_STT_URL": "wss://stt.example.test"}))); err != nil || c.StreamURL != "wss://stt.example.test/v1/stream" {
-		t.Fatalf("no path: %q, %v", c.StreamURL, err)
-	}
 	for name, c := range map[string]struct {
 		extra map[string]string
 		want  string
@@ -330,5 +326,9 @@ func TestLoadConfigNemotronNeedsAllFour(t *testing.T) {
 		if strings.Contains(err.Error(), "s3cretT0ken") {
 			t.Errorf("%s: the refusal echoes a secret: %v", name, err)
 		}
+	}
+	// The path may be left off (it is added); wss to any host.
+	if c, err := LoadConfig(env(all(map[string]string{"MEETINGS_STREAM_STT_URL": "wss://stt.example.test"}))); err != nil || c.StreamURL != "wss://stt.example.test/v1/stream" {
+		t.Fatalf("no path: %q, %v", c.StreamURL, err)
 	}
 }

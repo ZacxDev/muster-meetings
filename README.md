@@ -30,7 +30,7 @@ a token of their own, and adding a person is nothing at all: they open the
 tab. muster never calls the plugin; the plugin calls muster.
 
 1. muster's `/apps/<plugin id>` page frames
-   `https://meet.<muster host>/enter?muster_code=…&muster_plugin=…`, with a
+   `https://meet-<x>.<domain>/enter?muster_code=…&muster_plugin=…`, with a
    one-time hand-off code that the person's own browser just minted
    (muster's [App tab](https://github.com/ZacxDev/muster/blob/main/docs/plugins.md#app-tab)).
 2. 🔴 `/enter` refuses unless the browser says it is loading a frame
@@ -87,24 +87,23 @@ tab. muster never calls the plugin; the plugin calls muster.
 ## Set it up
 
 You need a muster with plugins on and **server-installed apps** (muster core
-PR 1h), served over HTTPS on its own host, a subdomain of that host for
-this plugin (one wildcard certificate covers both), and a **LiveKit** server
-(signalling on `meet-rtc.<muster host>`, TURN over TLS on
-`meet-turn.<muster host>:443` as the only media path: design, "Media:
-LiveKit, TURN, Egress"). Deployment manifests and the LiveKit config come in
-phase 2c; until then run the binary yourself behind your HTTPS proxy, and
-point LiveKit's webhook at the plugin's **internal** listener,
-`http://<plugin>:8081/livekit/webhook`, signed with the same API key.
+PR 1h), served over HTTPS, three hosts of your own for Meetings (the plugin,
+LiveKit signalling, and TURN over TLS, the only media path: design, "Media:
+LiveKit, TURN, Egress"), and a **LiveKit** server. [Deploying](#deploying)
+has the Kubernetes base, the Compose fragment and the image; to run the
+binary yourself, put it behind your HTTPS proxy and point LiveKit's webhook
+at the plugin's **internal** listener, `http://<plugin>:8081/livekit/webhook`,
+signed with the same API key.
 
 On **muster**, as an admin:
 
-1. Add exactly `https://meet.<muster host>` to `MUSTER_PLUGIN_ORIGINS`
+1. Add exactly the plugin's origin, `https://meet-<x>.<domain>`, to `MUSTER_PLUGIN_ORIGINS`
    ([configuration.md](https://github.com/ZacxDev/muster/blob/main/docs/configuration.md#muster-server-optional-features)).
    muster then refuses any request whose `Host` is that name, so the plugin
    can never be served as muster.
 2. On `/admin/apps`, install the app: a name, a tab label (say `Meetings`)
-   and an icon, origin `https://meet.<muster host>` and entry URL
-   `https://meet.<muster host>/enter`. Check **Files tasks** if you want
+   and an icon, origin `https://meet-<x>.<domain>` and entry URL
+   `https://meet-<x>.<domain>/enter`. Check **Files tasks** if you want
    **Make task** (phase 6), and then also do step 3. Install asks you to sign in again. Copy the
    `mpl_…` token: it is shown once. From a pipeline,
    `muster-server app install` does the same and prints the token.
@@ -137,7 +136,7 @@ reachable. **Uninstall** is final: a later reinstall gives everyone new
 subjects, and their earlier meetings are no longer reachable from muster.
 
 > **Before going live** on a muster other people use: muster's design gates
-> the `meet.` subdomain on two core releases, the central origin check for
+> the Meetings host on two core releases, the central origin check for
 > cookie-authenticated writes and `__Host-` cookie names (design: "Order and
 > gates"). Run it only against a muster that carries both.
 
@@ -147,18 +146,19 @@ Read from the environment only; `.env.example` lists them.
 
 | variable | required | meaning |
 |---|---|---|
-| `MUSTER_URL` | yes | where the plugin calls muster. `https://`, or `http://` to `localhost`, `127.0.0.1` or `[::1]` only; the address alone |
+| `MUSTER_URL` | yes | where the plugin calls muster. `https://`, or `http://` only to `localhost`, `127.0.0.1`, `[::1]` or a Kubernetes Service name (`<svc>.<ns>.svc`, `<svc>.<ns>.svc.cluster.local`), which stays on the cluster network; `http://` to any other host is refused. The address alone |
 | `MUSTER_PLUGIN_TOKEN` | yes | **exactly one** `mpl_…` token: the one the install on `/admin/apps` showed. A comma (the old per-person list) refuses to start. Never logged |
 | `MUSTER_ORIGIN` | yes | muster's origin as browsers see it, e.g. `https://muster.example.test`. The only page allowed to frame the Meetings app |
-| `MEETINGS_PUBLIC_URL` | yes | this plugin's own origin, e.g. `https://meet.muster.example.test`. Guest links are built on it. Refused if it equals `MUSTER_ORIGIN` |
+| `MEETINGS_PUBLIC_URL` | yes | this plugin's own origin, e.g. `https://meet-muster.example.test`. Guest links are built on it. Refused if it equals `MUSTER_ORIGIN` |
 | `MEETINGS_LINK_KEY` | yes | 32 random bytes, base64 (`openssl rand -base64 32`), from the plugin's own Secret. Every meeting's link code is derived from it (below), which is what lets you copy an open meeting's link again. The plugin refuses to start when it is missing or not exactly 32 bytes. **Changing it changes every open meeting's link.** Never logged |
 | `MEETINGS_LISTEN` | no | the public listener; default `:8080` |
 | `MEETINGS_INTERNAL_LISTEN` | no | the internal listener (`GET /healthz`, and LiveKit's webhook `POST /livekit/webhook`); default `:8081`. Do not expose it. `/healthz` answers `503` once muster has refused the token |
-| `MEETINGS_LIVEKIT_URL` | yes | where browsers connect for the call, e.g. `wss://meet-rtc.muster.example.test` (`ws://` to a loopback host only). The pages' CSP allows exactly this origin and its `https` twin |
+| `MEETINGS_LIVEKIT_URL` | yes | where browsers connect for the call, e.g. `wss://meet-rtc-muster.example.test` (`ws://` to a loopback host only). The pages' CSP allows exactly this origin and its `https` twin |
 | `MEETINGS_LIVEKIT_API_URL` | yes | LiveKit's server API as the plugin reaches it, e.g. `http://livekit:7880` (inside the cluster; plain http allowed) |
 | `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | yes | LiveKit's API key and secret. The secret signs every participant token and the plugin's own API calls, and verifies the webhook; it never reaches a browser and is never logged |
 | `MEETINGS_LIVEKIT_ICE` | no | `relay` (default): the browser uses only TURN relay candidates, since TURN over TLS on 443 is the deployment's only media path. `all` for a local LiveKit with no TURN |
 | `MEETINGS_TRUSTED_PROXIES` | no | comma-separated CIDRs of the ingress in front of the plugin. A knock or stream from one of them is counted against the `X-Forwarded-For` client it names (the right-most hop that is not itself trusted); without it every one counts against the ingress's own address, and a request carrying the header is warned about once (log and `/healthz`). `0.0.0.0/0` or `::/0` refuses to start |
+| `MEETINGS_CLIENT_IP_HEADER` | no | behind a CDN, the one header that carries the client's address, e.g. `CF-Connecting-IP`. Read **only** when the request's peer is inside `MEETINGS_TRUSTED_PROXIES`, and then in place of `X-Forwarded-For`; from any other peer it is ignored, so a client cannot name itself. A header that is missing, repeated, a list or not an address counts the request against the proxy (it can only refuse knocks, never admit more). Set without `MEETINGS_TRUSTED_PROXIES`, or set to `X-Forwarded-For`, it refuses to start. Unset: the `X-Forwarded-For` behaviour above |
 | `STATE_DIR` | no | where `meetings.db` (SQLite) lives; default `./state`. Keep it across restarts |
 
 The plugin refuses to start when muster answers the token `401`
@@ -168,6 +168,167 @@ person's own token from `/plugins` is refused), when it lacks `app`, or when
 it cannot reconcile with `owners/check`. It also refuses a phase-2a database
 that holds owners or meetings: those are keyed on muster user ids and need a
 one-time map to subjects first.
+
+## Deploying
+
+Everything runs in the muster tenant: muster's Kubernetes namespace, or
+muster's Compose project.
+
+### The three hosts
+
+Each is **one label** under your domain, because an edge provider's free
+certificate covers one level (`meet-rtc-muster.example.test`, never
+`rtc.meet.example.test`). They are configuration, never built in:
+
+| host (example) | serves | how it is reached |
+|---|---|---|
+| `meet-muster.example.test` | the plugin's `:8080`: the owner app, the guest page | your HTTPS ingress or proxy (a CDN may sit in front) |
+| `meet-rtc-muster.example.test` | LiveKit signalling (`wss`), `:7880` | your HTTPS ingress or proxy (WebSockets on) |
+| `meet-turn-muster.example.test` | LiveKit's TURN over TLS, `:5349` | an **SNI passthrough** on public TCP 443; LiveKit terminates TLS with its own certificate |
+
+No UDP port is public, and LiveKit's direct media listeners (`7881/tcp`, the
+UDP ICE range) are on no Service and no published port: every client, LAN
+clients included, connects through TURN over TLS.
+
+### The image
+
+`ghcr.io/zacxdev/muster-meetings`: `:<version>` for a tag `v<version>`,
+`:main` and `:sha-<short sha>` for `main` (`.github/workflows/image.yml`,
+`linux/amd64` and `linux/arm64`). A static binary on distroless, uid 65532,
+with the pages and LiveKit's browser client inside it. The root filesystem
+may be read-only: it writes only `/state` (SQLite; a volume) and `/tmp`
+(SQLite's temporary files; a tmpfs or `emptyDir`). Build it yourself with
+`docker build -t muster-meetings .`.
+
+### The Secrets
+
+| Secret (Kubernetes name) | keys | where the value comes from |
+|---|---|---|
+| `muster-meetings` | `MUSTER_PLUGIN_TOKEN` | the `mpl_…` token `muster-server app install` (or `/admin/apps`) prints once |
+| | `MEETINGS_LINK_KEY` | `openssl rand -base64 32` |
+| `livekit-keys` | `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | your choice (`livekit-server generate-keys`); the plugin and LiveKit read the same Secret |
+| `meetings-turn-tls` | `tls.crt`, `tls.key` (type `kubernetes.io/tls`) | a **publicly trusted** certificate for the TURN host; browsers refuse TURN/TLS with a self-signed one. Nothing serves port 80 for that name, so issue it with a DNS-01 challenge, and renew it (LiveKit reads it at start: restart LiveKit after a renewal) |
+
+```sh
+kubectl -n <muster namespace> create secret generic muster-meetings \
+  --from-literal=MUSTER_PLUGIN_TOKEN=mpl_… --from-literal=MEETINGS_LINK_KEY="$(openssl rand -base64 32)"
+kubectl -n <muster namespace> create secret generic livekit-keys \
+  --from-literal=LIVEKIT_API_KEY=API… --from-literal=LIVEKIT_API_SECRET=…
+kubectl -n <muster namespace> create secret tls meetings-turn-tls --cert=tls.crt --key=tls.key
+```
+
+### Kubernetes
+
+`deploy/kubernetes` is a kustomize **base** with no real name in it; a
+tenant overlay sets every value. `deploy/example-overlay` sets each one with
+`example.test` values; copy it. What the base holds:
+
+- `muster-meetings`: a Deployment (1 replica, `Recreate`: one SQLite
+  writer; nonroot, read-only root filesystem; startup, readiness and
+  liveness probes on `:8081/healthz`, the startup one allowing the 15
+  minutes the boot check may take), a 1 Gi PVC on `/state`, and a Service
+  with `http` `:8080` (route the plugin's host here) and `internal` `:8081`
+  (never route it).
+- `livekit`: a Deployment of `livekit-server` 1.13.11 **pinned by digest**,
+  on the pod network (not `hostNetwork`), nonroot, read-only root
+  filesystem. Its config is the `LIVEKIT_CONFIG` env entry: `turn.enabled`,
+  `turn.domain` from the params, `turn.tls_port: 5349` with the certificate
+  from `meetings-turn-tls`, no TURN/UDP; `rtc.node_ip` the pod's own
+  address, also the one entry in `turn.allow_restricted_peer_cidrs`;
+  `rtc.port_range` 50000–50199 and `turn.relay_range` 40000–40199, both
+  outside the NodePort range; `rtc.interfaces` pinned to `eth0`;
+  `room.auto_create: false` (only the plugin creates rooms), `empty_timeout`
+  and `departure_timeout` 600; the webhook to
+  `http://muster-meetings:8081/livekit/webhook`, keys from `livekit-keys`.
+- Services: `livekit` (ClusterIP `7880`: the API for the plugin, signalling
+  for your ingress) and `livekit-nodeport` (NodePort `signal` 7880 and
+  `turn-tls` 5349, for a route from outside the cluster).
+- NetworkPolicies: both pods deny by default. The plugin admits `:8080` from
+  the ingress controller's namespace and `:8081` from LiveKit alone, and
+  reaches muster's pods, LiveKit's `:7880` and DNS. LiveKit admits `:7880`
+  and `:5349` from anywhere (both come through the NodePort, and both
+  authenticate every client) and reaches only the plugin's `:8081` and DNS.
+  muster's own NetworkPolicy, if any, must admit the plugin's pods.
+
+What an overlay sets:
+
+| knob | how |
+|---|---|
+| hostnames, muster's address and origin, trusted proxies, the client-IP header | `configMapGenerator` `muster-meetings-params`, `behavior: merge`: `muster-url` (`http://<muster svc>.<ns>.svc.cluster.local:<port>`), `muster-origin`, `public-url`, `livekit-url`, `turn-domain`, `trusted-proxies`, `client-ip-header` |
+| namespace | `namespace:` |
+| the plugin's image | `images:` (pin a digest) |
+| NodePorts | a patch on `livekit-nodeport` (`/spec/ports/0/nodePort` signalling, `/spec/ports/1/nodePort` TURN) |
+| the PVC's StorageClass | a patch on `muster-meetings-state` |
+| a Secret's name | a patch on the Deployment's `secretKeyRef` or volume |
+| the ingress controller's namespace, muster's pod labels and port | a patch on the `muster-meetings` NetworkPolicy |
+| `rtc.node_ip`, if not the pod's address | a patch on `livekit`'s `LIVEKIT_NODE_IP` env entry |
+
+```sh
+kubectl kustomize deploy/example-overlay   # what it renders
+```
+
+The base has no Ingress objects: add the plugin's and signalling's routes in
+your ingress, with the plugin's host to `muster-meetings:8080` and the
+signalling host to `livekit:7880`.
+
+### Docker Compose
+
+`compose.meetings.yml` joins muster's own Compose file (muster's file is
+unchanged):
+
+```sh
+docker compose -f docker-compose.yml -f compose.meetings.yml --profile meetings up -d
+```
+
+It adds `muster-meetings` and `livekit` under the `meetings` profile, with
+the same LiveKit config as Kubernetes (a test holds the two equal). Its
+variables (in muster's `.env`) are listed at the top of the file. The plugin
+reaches muster at muster's public `https://` URL there (`MEETINGS_MUSTER_URL`):
+plain http is allowed only to loopback or a Kubernetes Service name. It
+publishes, on `127.0.0.1` only, the plugin (`8106`), signalling (`8107`) and
+TURN/TLS (`8108`) for your reverse proxy: HTTPS for the first two, an SNI
+passthrough on 443 for the third.
+
+### muster's side
+
+- `MUSTER_PLUGIN_ORIGINS` gets exactly the plugin's origin,
+  `https://meet-<x>.<domain>`.
+- `MUSTER_PLUGIN_TASK_NAMESPACES` gets `meetings` (for **Make task**).
+- Web push on, for knock notifications.
+- `muster-server app install` (or `/admin/apps`): origin
+  `https://meet-<x>.<domain>`, entry URL `https://meet-<x>.<domain>/enter`;
+  its token goes into the `muster-meetings` Secret.
+
+### Behind a CDN
+
+The plugin counts knocks per client address. Behind a CDN that names the
+client in its own header, set `MEETINGS_TRUSTED_PROXIES` to the CIDRs your
+ingress connects to the plugin **from**, and `MEETINGS_CLIENT_IP_HEADER` to
+the CDN's header (for Cloudflare, `CF-Connecting-IP`). The header is believed
+only from those addresses; make sure the ingress is reachable only through
+the CDN, or a client that bypasses it can set the header itself.
+
+### The TURN route (operator steps, in order)
+
+Each step touches shared or outward-facing infrastructure; do them in this
+order (design: "Phase-2 deploy item: the `meet-turn` route").
+
+1. **Certificate:** a publicly trusted certificate for the TURN host (DNS-01),
+   in the `meetings-turn-tls` Secret, with its renewal set up.
+2. **LiveKit:** apply the overlay; check its log says `Starting TURN server`
+   with `turn.portTLS: 5349`. Nothing public changes yet.
+3. **The 443 route:** on the public address that will serve TCP 443 for the
+   TURN host, add **one SNI passthrough** route: SNI = the TURN host →
+   `livekit-nodeport`'s `turn-tls` NodePort on a cluster node. TLS is **not**
+   terminated on the way; every other SNI on that 443 is unchanged.
+4. **DNS:** an A record for the TURN host to the address serving that 443,
+   **not proxied** by a CDN (a CDN carries neither TURN nor TLS passthrough).
+   The plugin's and signalling's hosts may be proxied.
+5. **Firewall:** confirm nothing else was opened: no UDP, no relay port range,
+   no `7881`/`7882`. Record any new listener in your firewall's ledger.
+6. **Verify:** a phone on a mobile network (Wi-Fi off) and a laptop with UDP
+   blocked join one meeting; each browser's `getStats()` shows a selected
+   candidate pair of type `relay` over `tls`.
 
 ## The HTTP API
 
@@ -195,7 +356,7 @@ that does not exist.
 | `POST /livekit/webhook` | internal listener only: LiveKit's signed webhook |
 | `GET /healthz` | internal listener only |
 
-**The link** is `https://meet.<muster host>/j/<code>`. The code is
+**The link** is `https://meet-<x>.<domain>/j/<code>`. The code is
 HMAC-SHA256 under `MEETINGS_LINK_KEY` of the meeting's id, cut to 128 bits
 (22 base64url characters). It is **never stored**: the plugin keeps only its
 SHA-256, which a guest's `/j/<code>` is looked up by, and derives the code
@@ -393,7 +554,11 @@ owner watches, the reconcile loop, …), runs the one test named to catch it, an
 test to fail **with its expected message**; a mutant that fails to build or
 trips another assertion is reported, not counted. Each sweep also runs a
 known-caught mutant and a no-op edit that must survive. CI runs gitleaks,
-`gofmt`, `go vet`, `go test -race` and the sweep on every push.
+`gofmt`, `go vet`, `go test -race` and the sweep on every push, and renders
+`deploy/kubernetes` and `deploy/example-overlay` through `kubeconform`.
+`deploy/deploy_test.go` reads what `kubectl kustomize` renders and the LiveKit
+config as LiveKit parses it; without `kubectl` it skips, unless
+`MEETINGS_REQUIRE_KUBECTL=1` (CI and the sweep set it).
 
 **Tested against:** the fake muster only, built to the design of muster's
 core PR 1h (docs/design/meetings.md at muster commit `9bf834178`), before
@@ -415,6 +580,10 @@ phase 2d's click path, with TURN, after 2c deploys it.
 | `internal/owners` | the one server token, the boot check and reconcile, and the `/self` and `owners/check` poll |
 | `internal/store` | SQLite: schema, sessions, the owner-scoped repository, the lobby and its state machine, random codes |
 | `internal/server` | the HTTP routes, headers, the webhook and reconcile loop, and the pages (`web/`; LiveKit's browser client vendored in `web/static/vendor/`, by `scripts/vendor-livekit-client.sh`) |
+| `Dockerfile`, `.github/workflows/image.yml` | the image and its GHCR publish |
+| `deploy/kubernetes`, `deploy/example-overlay` | the kustomize base (the plugin, LiveKit, Services, NetworkPolicies) and an example tenant overlay |
+| `compose.meetings.yml` | the fragment for muster's Compose stack |
+| `deploy/deploy_test.go` | the rendered objects and both LiveKit configs, pinned |
 | `scripts/mutate` | the security-gate mutation sweep |
 | `scripts/e2e-harness`, `e2e/` | the browser tests: the `/enter` frame gate, and the lobby at 390×844 |
 

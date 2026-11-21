@@ -118,6 +118,17 @@ const (
 	kNetPol  = "deploy/kubernetes/networkpolicy.yaml"
 	kBase    = "deploy/kubernetes/kustomization.yaml"
 	composeF = "compose.meetings.yml"
+	// phase 3a
+	pcm     = "internal/ingest/pcm.go"
+	ingTok  = "internal/ingest/token.go"
+	ws      = "internal/ingest/ws.go"
+	trans   = "internal/server/transcribe.go"
+	tscript = "internal/server/transcript.go"
+	segs    = "internal/store/segments.go"
+	vad     = "internal/stt/vad.go"
+	utt     = "internal/stt/utterance.go"
+	callJS  = "internal/server/web/static/call.js"
+	kEgress = "deploy/kubernetes/egress.yaml"
 )
 
 var mutants = []mutant{
@@ -462,8 +473,8 @@ var mutants = []mutant{
 		pkg: "./internal/store", test: "TestASwitchGoesBackOnOnlyBeforeAnyGuestKnocked", want: "want ErrSwitchLocked"},
 	{name: "consent: Record defaults off", file: repo, from: "SELECT ?, ?, ?, ?, 'open', 1, 1, ?", to: "SELECT ?, ?, ?, ?, 'open', 0, 1, ?",
 		pkg: "./internal/store", test: "TestASwitchGoesBackOnOnlyBeforeAnyGuestKnocked", want: "a new meeting: record false, ai true; want both on"},
-	{name: "notice is current: the guest stream keeps the notice it opened with", file: guest, from: `snap := map[string]any{"notice": lobby.NoticeFor(cur.Notice.Record, cur.Notice.AI)}`,
-		to:  `snap := map[string]any{"notice": lobby.NoticeFor(g.Notice.Record, g.Notice.AI)}`,
+	{name: "notice is current: the guest stream keeps the notice it opened with", file: guest, from: `snap := map[string]any{"notice": s.noticeFor(cur.Notice.Record, cur.Notice.AI)}`,
+		to:  `snap := map[string]any{"notice": s.noticeFor(g.Notice.Record, g.Notice.AI)}`,
 		pkg: "./internal/server", test: "TestTheAdmittedGuestSeesTheCurrentNotice", want: `no "meeting" event (the stream so far: "event: token`},
 
 	// ---- 🔴 the guest name ----
@@ -586,7 +597,7 @@ var mutants = []mutant{
 		pkg: ".", test: "TestLoadConfigClientIPHeader", want: "set without trusted proxies: LoadConfig = <nil>"},
 	{name: "client ip header: X-Forwarded-For accepted as its name", file: mainGo, from: `if v == "X-Forwarded-For" {`, to: `if false {`,
 		pkg: ".", test: "TestLoadConfigClientIPHeader", want: `MEETINGS_CLIENT_IP_HEADER="X-Forwarded-For": LoadConfig accepted it`},
-	{name: "client ip header: not passed to the server", file: mainGo, from: "\t\tClientIPHeader: cfg.ClientIPHeader}", to: "\t\tClientIPHeader: \"\"}",
+	{name: "client ip header: not passed to the server", file: mainGo, from: "\t\tClientIPHeader: cfg.ClientIPHeader,", to: "\t\tClientIPHeader: \"\",",
 		pkg: ".", test: "TestTheProxySettingsReachTheServer", want: `server config: header ""`},
 
 	// ---- 🔴 phase 2c: the deployment files ----
@@ -624,7 +635,7 @@ var mutants = []mutant{
 		pkg: "./deploy", test: "TestKubernetesNetworkPolicies", want: "the plugin's :8081 admits [ANYONE]"},
 	{name: "deploy: LiveKit may reach the plugin's public port", file: kNetPol, from: "              app.kubernetes.io/name: muster-meetings\n      ports:\n        - {protocol: TCP, port: 8081}", to: "              app.kubernetes.io/name: muster-meetings\n      ports:\n        - {protocol: TCP, port: 8081}\n        - {protocol: TCP, port: 8080}",
 		pkg: "./deploy", test: "TestKubernetesNetworkPolicies", want: "the livekit pods' egress is"},
-	{name: "deploy: the plugin may reach anything (an empty egress rule)", file: kNetPol, from: "      ports:\n        - {protocol: TCP, port: 7880}\n", to: "      ports:\n        - {protocol: TCP, port: 7880}\n    - {}\n",
+	{name: "deploy: the plugin may reach anything (an empty egress rule)", file: kNetPol, from: "    - to:\n        - podSelector:\n            matchLabels:\n              app.kubernetes.io/name: stt-cohere\n", to: "    - {}\n    - to:\n        - podSelector:\n            matchLabels:\n              app.kubernetes.io/name: stt-cohere\n",
 		pkg: "./deploy", test: "TestKubernetesNetworkPolicies", want: "the muster-meetings pods' egress is"},
 	{name: "deploy: LiveKit may reach anything (a rule with no ports)", file: kNetPol, from: "              app.kubernetes.io/name: muster-meetings\n      ports:\n        - {protocol: TCP, port: 8081}\n", to: "              app.kubernetes.io/name: muster-meetings\n      ports:\n        - {protocol: TCP, port: 8081}\n    - {}\n",
 		pkg: "./deploy", test: "TestKubernetesNetworkPolicies", want: "the livekit pods' egress is"},
@@ -632,7 +643,7 @@ var mutants = []mutant{
 		pkg: "./deploy", test: "TestTheShippedMusterURLsPassTheCheck", want: "want plain http to a name with its trailing dot"},
 	{name: "deploy: compose names no http host", file: composeF, from: "      MEETINGS_MUSTER_HTTP_HOST: muster\n", to: "",
 		pkg: "./deploy", test: "TestTheShippedMusterURLsPassTheCheck", want: `MEETINGS_MUSTER_HTTP_HOST ""`},
-	{name: "deploy: compose plugin off muster's network", file: composeF, from: "networks: [meetings, default]", to: "networks: [meetings]",
+	{name: "deploy: compose plugin off muster's network", file: composeF, from: "      meetings: {}\n      default: {}\n", to: "      meetings: {}\n",
 		pkg: "./deploy", test: "TestTheShippedMusterURLsPassTheCheck", want: "want muster's default network"},
 	{name: "deploy: a param nobody reads", file: kBase, from: "      - client-ip-header=\n", to: "      - client-ip-header=\n      - unread=x\n",
 		pkg: "./deploy", test: "TestKubernetesParamsAreAllUsed", want: "they must match"},
@@ -647,7 +658,150 @@ var mutants = []mutant{
 	{name: "deploy: a real address in the base", file: kBase, from: "      - client-ip-header=\n", to: "      - client-ip-header=\n# 8.8.4.4\n",
 		pkg: "./deploy", test: "TestTheDeploymentFilesNameNoRealHost", want: "names the address 8.8.4.4"},
 
+	// ---- phase 3a: the PCM parser (Egress's 1920 B / 10 ms, S16LE stereo 48 kHz) ----
+	{name: "pcm: a misaligned message is read", file: pcm, from: "if len(msg)%InFrameBytes != 0 {", to: "if false {",
+		pkg: "./internal/ingest", test: "TestAMisalignedMessageIsRefusedAndChangesNothing", want: "want ErrMisaligned"},
+	{name: "pcm: chunks of 100 ms, not 80", file: pcm, from: "ChunkSamples = OutRate * 80 / 1000", to: "ChunkSamples = OutRate * 100 / 1000",
+		pkg: "./internal/ingest", test: "TestEgressFramesParseTo16kHzMonoIn80msChunks", want: "want exactly 1280"},
+	{name: "pcm: the second channel is read", file: pcm, from: "binary.LittleEndian.Uint16(msg[i:])", to: "binary.LittleEndian.Uint16(msg[i+2:])",
+		pkg: "./internal/ingest", test: "TestOnlyTheFirstChannelIsRead", want: "not the first channel alone"},
+	{name: "pcm: both channels mixed", file: pcm, from: "x := float64(int16(binary.LittleEndian.Uint16(msg[i:]))) // channel 0 only",
+		to:  "x := (float64(int16(binary.LittleEndian.Uint16(msg[i:]))) + float64(int16(binary.LittleEndian.Uint16(msg[i+2:])))) / 2",
+		pkg: "./internal/ingest", test: "TestOnlyTheFirstChannelIsRead", want: "not the first channel alone"},
+	{name: "pcm: no resampling (48 kHz out)", file: pcm, from: "if d.phase == 0 {", to: "if true {",
+		pkg: "./internal/ingest", test: "TestEgressFramesParseTo16kHzMonoIn80msChunks", want: "samples in whole chunks, want"},
+
+	// ---- 3a: the time base ----
+	{name: "ingest time: segments timestamped by arrival", file: trans, from: "start, end := base+seg.StartMS, base+seg.EndMS",
+		to:  "start, end := s.sinceStart(t.MeetingStart)-(seg.EndMS-seg.StartMS), s.sinceStart(t.MeetingStart)",
+		pkg: "./internal/server", test: "TestSegmentTimesComeFromTheSampleCountNotTheArrival", want: "want them equal"},
+	{name: "ingest time: the stream's base taken at every frame", file: trans, from: "if base.Load() < 0 {", to: "if true {",
+		pkg: "./internal/server", test: "TestSegmentTimesComeFromTheSampleCountNotTheArrival", want: "want them equal"},
+
+	// ---- 3a: the ingest's token (Egress sends no header) ----
+	{name: "ingest: the token check removed", file: trans, from: "if err := p.Check(s.cfg.IngestKey, t.MeetingID, track, t.Nonce, now); err != nil {",
+		to:  "if err := p.Check(s.cfg.IngestKey, t.MeetingID, track, t.Nonce, now); false && err != nil {",
+		pkg: "./internal/server", test: "TestTheIngestTokenGatesEveryStream", want: "the upgrade = 101, want 401"},
+	{name: "ingest: an older egress's token opens the track", file: ingTok, from: "if !hmac.Equal([]byte(p.Nonce), []byte(nonce)) {", to: "if false {",
+		pkg: "./internal/server", test: "TestTheIngestTokenGatesEveryStream", want: "an older egress's token: the upgrade = 101"},
+	{name: "ingest: the expiry not checked", file: ingTok, from: "if now.Unix() >= p.Exp {", to: "if false {",
+		pkg: "./internal/ingest", test: "TestTheTokenOpensOneEgressOfOneTrackOfOneMeetingUntilItsExpiry", want: "at its expiry: Check = <nil>"},
+	{name: "ingest: the track not in the MAC", file: ingTok, from: `meetingID + "\n" + track + "\n" + nonce`, to: `meetingID + "\n" + nonce`,
+		pkg: "./internal/ingest", test: "TestTheTokenOpensOneEgressOfOneTrackOfOneMeetingUntilItsExpiry", want: "another track: Check = <nil>"},
+	{name: "ingest: the full ingest URL (its token) logged", file: trans, from: "ingest.LogPath(r.URL.Path), sw.status", to: "r.URL.Path, sw.status",
+		pkg: "./internal/server", test: "TestTheIngestTokenGatesEveryStream", want: "the log carries a token"},
+	{name: "ingest: an ended meeting's audio taken", file: trans, from: "if !t.MeetingLive {\n\t\trefuse(http.StatusGone", to: "if false {\n\t\trefuse(http.StatusGone",
+		pkg: "./internal/server", test: "TestAnEndedMeetingTakesNoAudio", want: "want 410"},
+	{name: "ingest: audio taken with transcription off", file: trans, from: "if !s.Transcribing() {\n\t\trefuse(http.StatusNotFound", to: "if false {\n\t\trefuse(http.StatusNotFound",
+		pkg: "./internal/server", test: "TestWithTranscriptionOffNoEgressStartsAndTheIngestRefuses", want: "want 404"},
+	{name: "ingest: an ended meeting's open stream is never closed", file: trans, from: `conn.Close(ingest.CloseNormal, "the stream is no longer wanted")`, to: "_ = conn",
+		more: []edit{{trans, `s.closeConn(t.Track, ingest.CloseNormal, "the meeting ended")`, "_ = 0"}},
+		pkg:  "./internal/server", test: "TestAnEndedMeetingTakesNoAudio", want: "the open stream is closed by the plugin"},
+	{name: "ingest pings: a library's default (20 s ping, 20 s timeout)", file: ws, from: "const PingEvery time.Duration = 0", to: "const PingEvery time.Duration = 20 * time.Second",
+		pkg: "./internal/server", test: "TestTheIngestNeverPingsAWriteOnlyClient", want: "the server sent a write-only client"},
+
+	// ---- 3a: egress restart and start retry ----
+	{name: "egress restart: egress_ended ignored", file: machine, from: "s.onEgressEnded(ctx, *ev.EgressInfo)", to: "_ = ev.EgressInfo",
+		pkg: "./internal/server", test: "TestARefusedStartIsRetriedAndADeadEgressIsReplacedWithAGapUntilAudioFlows", want: "not within"},
+	{name: "egress retry: a refused start is not retried", file: trans, from: "\t\twait := backoff[min(attempt, len(backoff)-1)]", to: "\t\treturn\n\t\twait := backoff[min(attempt, len(backoff)-1)]",
+		pkg: "./internal/server", test: "TestARefusedStartIsRetriedAndADeadEgressIsReplacedWithAGapUntilAudioFlows", want: "not within"},
+	{name: "egress retry: no gap marker while refused", file: trans, from: "opened := s.store.OpenGap(ctx, track,", to: "opened := s.store.OpenGap(ctx, \"TR_none\",",
+		pkg: "./internal/server", test: "TestARefusedStartIsRetriedAndADeadEgressIsReplacedWithAGapUntilAudioFlows", want: `no "segment" event`},
+	{name: "egress restart: no gap marker for a dead egress", file: trans, from: "starting a new one in %s\", info.Status, wait)\n\tif err := s.store.OpenGap(ctx, t.Track,", to: "starting a new one in %s\", info.Status, wait)\n\tif err := s.store.OpenGap(ctx, \"TR_none\",",
+		pkg: "./internal/server", test: "TestARefusedStartIsRetriedAndADeadEgressIsReplacedWithAGapUntilAudioFlows", want: `no "segment" event`},
+	{name: "gap: never closed when audio flows", file: trans, from: "s.store.CloseGap(ctx, t.Track, b)\n", to: "_ = b\n",
+		pkg: "./internal/server", test: "TestARefusedStartIsRetriedAndADeadEgressIsReplacedWithAGapUntilAudioFlows", want: "no \"segment\" event"},
+
+	// ---- 3a: whose audio, and who sees the lines ----
+	{name: "transcript: a microphone of someone not admitted", file: trans, from: "ok, err := s.store.MayBeInRoom(ctx, room, identity, s.cfg.Now())\n\tif err != nil || !ok {",
+		to:  "ok, err := s.store.MayBeInRoom(ctx, room, identity, s.cfg.Now())\n\t_ = ok\n\tif err != nil {",
+		pkg: "./internal/server", test: "TestOnlyAnAdmittedIdentitysMicrophoneIsTranscribed", want: "want none"},
+	{name: "transcript: a camera transcribed", file: trans, from: "!tr.Microphone()", to: "false",
+		pkg: "./internal/server", test: "TestOnlyAnAdmittedIdentitysMicrophoneIsTranscribed", want: "want none"},
+	{name: "guest stream: the transcript to a removed guest", file: guest, from: "if cur.State != store.StAdmitted {\n\t\t\treturn true, sse(w, f, \"removed\"", to: "if false {\n\t\t\treturn true, sse(w, f, \"removed\"",
+		pkg: "./internal/server", test: "TestARemovedGuestGetsNoMoreOfTheTranscript", want: `no "removed" event`},
+	{name: "ownership: another person's transcript", file: segs, from: "m, err := r.Meeting(ctx, meetingID)\n\tif err != nil {\n\t\treturn Meeting{}, nil, err\n\t}",
+		to:   "m, err := scanMeeting(r.s.db.QueryRowContext(ctx, `SELECT `+meetingCols+` FROM meetings WHERE id = ?`, meetingID))\n\tif err != nil {\n\t\treturn Meeting{}, nil, err\n\t}",
+		more: []edit{{segs, "WHERE s.meeting_id = ? AND m.subject = ? ORDER BY s.start_ms, s.id`, meetingID, r.subject)", "WHERE s.meeting_id = ? AND ? IS NOT NULL ORDER BY s.start_ms, s.id`, meetingID, r.subject)"}},
+		pkg:  "./internal/server", test: "TestTheTranscriptIsTheOwnersAlone", want: "another person"},
+	{name: "panel: a line's text parsed as HTML", file: callJS, from: "text.textContent = g.text;", to: "text.innerHTML = g.text;",
+		pkg: "./internal/server", test: "TestTheAppPageCarriesNoInlineScript", want: "uses innerHTML"},
+	{name: "export: a guest's newline starts a line (txt)", file: tscript, from: "speakerTag(g), oneLine(g.Text))", to: "speakerTag(g), g.Text)",
+		pkg: "./internal/server", test: "TestTheExportsFenceGuestSpeech", want: "txt ="},
+	{name: "export: WebVTT markup not escaped", file: tscript, from: `strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(oneLine(v))`, to: "oneLine(v)",
+		pkg: "./internal/server", test: "TestTheExportsFenceGuestSpeech", want: "vtt ="},
+
+	// ---- 3a round 1: restart backoff, the speaker's fence, the notice ----
+	{name: "egress restart: no backoff", file: trans, from: "\t}\n\ts.startEgressAfter(t.Track, wait)\n}", to: "\t}\n\ts.startEgressAfter(t.Track, 0)\n}",
+		pkg: "./internal/server", test: "TestADyingEgressIsRestartedOnTheBackoffAndAHealthyStreamResetsIt", want: "the restarts waited"},
+	{name: "egress restart: the backoff never resets", file: trans, from: "s.tr.restarts[track] = 0\n", to: "_ = at\n",
+		pkg: "./internal/server", test: "TestADyingEgressIsRestartedOnTheBackoffAndAHealthyStreamResetsIt", want: "the restarts waited"},
+	{name: "egress restart: any stream resets the backoff", file: trans, from: "ok && s.cfg.Now().Sub(at) >= HealthyStream {", to: "ok && !at.IsZero() {",
+		pkg: "./internal/server", test: "TestADyingEgressIsRestartedOnTheBackoffAndAHealthyStreamResetsIt", want: "the restarts waited"},
+	{name: "export: the speaker's name unfenced (txt)", file: tscript, from: `tag := "«" + name + "»"`, to: `tag := name`,
+		pkg: "./internal/server", test: "TestTheExportsFenceGuestSpeech", want: "txt ="},
+	{name: "export: a fence mark in a name not escaped (txt)", file: tscript, from: "name = strings.NewReplacer(`\\`, `\\\\`, \"«\", `\\«`, \"»\", `\\»`).Replace(oneLine(name))", to: "name = oneLine(name)",
+		pkg: "./internal/server", test: "TestTheExportsFenceGuestSpeech", want: "txt ="},
+	{name: "notice: transcribed without an engine", file: trans, from: "return lobby.NoticeWith(record, ai, s.Transcribing())", to: "return lobby.NoticeFor(record, ai)",
+		pkg: "./internal/server", test: "TestTheNoticeSaysTranscribedOnlyWithAnEngine", want: "engine false"},
+	{name: "notice: a knock's transcribed answer not checked", file: guest, from: "if in.Notice.Transcribed == nil || *in.Notice.Transcribed != s.Transcribing() {", to: "if false {",
+		pkg: "./internal/server", test: "TestTheNoticeSaysTranscribedOnlyWithAnEngine", want: "want 409 with the current notice"},
+
+	// ---- 3a: a connected stream ends the start retries (CI, real LiveKit) ----
+	{name: "egress retry: the check before an attempt removed", file: trans, from: "\t\tif s.streamingCurrent(ctx, track) {\n\t\t\treturn\n\t\t}\n\t\troom := store.RoomName(t.MeetingID)", to: "\t\troom := store.RoomName(t.MeetingID)",
+		pkg: "./internal/server", test: "TestAStreamThatConnectsDuringAFailingStartEndsTheLoop", want: "phase 2:"},
+	{name: "egress retry: the check after a failed attempt removed", file: trans, from: "s.tr.gapMu.Lock()\n\t\tif s.streamingCurrent(ctx, track) {\n\t\t\ts.tr.gapMu.Unlock()\n\t\t\treturn\n\t\t}\n", to: "s.tr.gapMu.Lock()\n",
+		pkg: "./internal/server", test: "TestAStreamThatConnectsDuringAFailingStartEndsTheLoop", want: "phase 1:"},
+	{name: "egress retry: a stale stream counts as current", file: trans, from: "return err == nil && t.Nonce == lc.nonce", to: "return err == nil && (t.Nonce == lc.nonce || lc != nil)",
+		pkg: "./internal/server", test: "TestAStaleStreamDoesNotStopTheRetries", want: "not within 5s: egress"},
+	{name: "gap: a first audio not one step with the loop's gap", file: trans, from: "\t\t\ts.tr.gapMu.Lock()\n\t\t\tif s.streamingCurrent(ctx, t.Track) {", to: "\t\t\tif s.streamingCurrent(ctx, t.Track) {",
+		more: []edit{{trans, "\t\t\ts.tr.gapMu.Unlock()\n\t\t\ts.hub.Changed(t.MeetingID)", "\t\t\ts.hub.Changed(t.MeetingID)"}},
+		pkg:  "./internal/server", test: "TestAFirstAudioBetweenTheLoopsCheckAndItsGapLeavesNoGapOpen", want: "gaps stay open while audio flows"},
+	{name: "egress retry: an unknown egress's ended stream is not restarted", file: trans, from: "func (s *Server) streamEnded(t store.Track, lc *liveConn) {\n", to: "func (s *Server) streamEnded(t store.Track, lc *liveConn) {\n\treturn\n",
+		pkg: "./internal/server", test: "TestAConnectedStreamStopsTheStartRetries", want: "a new start once the unknown egress's stream ended"},
+	{name: "unknown egress: its death handled after the drain", file: trans, from: "\ts.streamEnded(t, lc)\n\tif tail := dec.Flush(); tail != nil {", to: "\tif tail := dec.Flush(); tail != nil {",
+		more: []edit{{trans, "\tcase <-time.After(2 * stt.CallTimeout):\n\t}\n}", "\tcase <-time.After(2 * stt.CallTimeout):\n\t}\n\ts.streamEnded(t, lc)\n}"}},
+		pkg:  "./internal/server", test: "TestAnUnknownEgresssDeathIsAGapFromTheStreamsEndNotTheDrains", want: "a gap opens while the engine is still draining"},
+	{name: "store: a gap opened on an ended track", file: segs, from: "\tif !live {\n\t\treturn ErrGone\n\t}", to: "\tif false && !live {\n\t\treturn ErrGone\n\t}",
+		pkg: "./internal/server", test: "TestNoGapOrRestartCountOnAnEndedTrack", want: "a gap on an ended track"},
+	{name: "restart count left behind by an ended track", file: trans, from: "err != nil || t.State != store.TrackActive || !t.MeetingLive {\n\t\ts.tr.mu.Lock()\n\t\tdelete(s.tr.restarts, track)", to: "false && (err != nil || t.State != store.TrackActive || !t.MeetingLive) {\n\t\ts.tr.mu.Lock()\n\t\tdelete(s.tr.restarts, track)",
+		pkg: "./internal/server", test: "TestNoGapOrRestartCountOnAnEndedTrack", want: "an ended track keeps a restart count"},
+
+	// ---- 3a: the engines ----
+	{name: "utterance: no in-flight cap", file: utt, from: "sem: make(chan struct{}, MaxInFlight)", to: "sem: make(chan struct{}, 64)",
+		pkg: "./internal/stt", test: "TestAtMostFourUtterancesAreInFlight", want: "want exactly 4"},
+	{name: "utterance: a full queue never drops", file: utt, from: "s.queued+int64(len(u.PCM)) > limit", to: "s.queued+int64(len(u.PCM)) > limit*100",
+		pkg: "./internal/stt", test: "TestAFullQueueDropsTheOldestWithAGapMarker", want: `want "final gap final final final"`},
+	{name: "vad: no DC removal", file: vad, from: "y := x - e.px + highPassR*e.py", to: "y := x",
+		pkg: "./internal/stt", test: "TestAPauseEndsTheUtteranceAbout700msIntoTheSilenceEvenWithADCOffset", want: "dc 6000"},
+	{name: "vad: a pause never ends an utterance", file: vad, from: "case end-e.lastEnd >= msSamples(SilenceEnd):", to: "case false:",
+		pkg: "./internal/stt", test: "TestAPauseEndsTheUtteranceAbout700msIntoTheSilenceEvenWithADCOffset", want: "the pause must end the first"},
+
+	// ---- 3a: the deployment ----
+	{name: "deploy: track_cpu_cost left at 0.5", file: kEgress, from: "track_cpu_cost: 0.1", to: "track_cpu_cost: 0.5",
+		pkg: "./deploy", test: "TestKubernetesEgressAndRedis", want: "cpu_cost.track_cpu_cost = 0.5"},
+	{name: "deploy: room_composite_cpu_cost left at 4", file: kEgress, from: "room_composite_cpu_cost: 2", to: "room_composite_cpu_cost: 4",
+		pkg: "./deploy", test: "TestKubernetesEgressAndRedis", want: "cpu_cost.room_composite_cpu_cost = 4"},
+	{name: "deploy: Egress's image by tag only", file: kEgress, from: "egress:v1.15.0@sha256:", to: "egress:v1.15.0-unpinned@sha256:",
+		pkg: "./deploy", test: "TestKubernetesEgressAndRedis", want: "want livekit/egress v1.15.0 pinned by digest"},
+	{name: "deploy: the meetings' Redis persists", file: kEgress, from: `"--save", "",`, to: `"--save", "60 1",`,
+		pkg: "./deploy", test: "TestKubernetesEgressAndRedis", want: "want no snapshot"},
+	{name: "deploy: LiveKit without the meetings' Redis", file: kLiveKit, from: "                redis:\n                  address: redis-meetings:6379\n", to: "",
+		pkg: "./deploy", test: "TestKubernetesLiveKitConfig", want: "redis.address = <nil>"},
+	{name: "deploy: the ingest open to every pod", file: kNetPol, from: "    - from:\n        - podSelector:\n            matchLabels:\n              app.kubernetes.io/name: egress\n      ports:\n        - {protocol: TCP, port: 8082}",
+		to:  "    - ports:\n        - {protocol: TCP, port: 8082}",
+		pkg: "./deploy", test: "TestKubernetesNetworkPolicies", want: "the plugin's :8082 (the ingest) admits [ANYONE]"},
+	{name: "deploy: Egress may reach anything", file: kNetPol, from: "              app.kubernetes.io/name: muster-meetings\n      ports:\n        - {protocol: TCP, port: 8082}\n",
+		to:  "              app.kubernetes.io/name: muster-meetings\n      ports:\n        - {protocol: TCP, port: 8082}\n    - {}\n",
+		pkg: "./deploy", test: "TestKubernetesNetworkPolicies", want: "the egress pods' egress is"},
+	{name: "deploy: compose ingest network not internal", file: composeF, from: "  meetings-ingest:\n    internal: true\n", to: "  meetings-ingest:\n",
+		pkg: "./deploy", test: "TestComposeEgressRedisAndTheIngestNetwork", want: "meetings-ingest internal = <nil>"},
+	{name: "deploy: compose ingest on every interface", file: composeF, from: "MEETINGS_INGEST_LISTEN: ${MEETINGS_INGEST_ADDR:-172.31.251.2}:8082", to: `MEETINGS_INGEST_LISTEN: ":8082"`,
+		pkg: "./deploy", test: "TestComposeEgressRedisAndTheIngestNetwork", want: "compose ingest: listen"},
+
 	// ---- configuration ----
+	{name: "config: the fake engine without MEETINGS_TEST_MODE", file: mainGo, from: `if strings.TrimSpace(getenv("MEETINGS_TEST_MODE")) != "1" {`, to: `if false {`,
+		pkg: ".", test: "TestLoadConfigTranscript", want: "fake without test mode: LoadConfig accepted it"},
 	{name: "config: allow the plugin on muster's own origin", file: mainGo, from: `if c.PublicURL == c.MusterOrigin {`, to: `if false {`,
 		pkg: ".", test: "TestLoadConfig", want: "public URL is muster's origin: LoadConfig accepted it"},
 }

@@ -10,9 +10,13 @@
 #   - the NodePorts, the PVC's StorageClass, Secret names, and the
 #     NetworkPolicies' selectors for muster and the ingress controller: patches
 #
-# Not here (phase 2c): Egress, Redis, the STT services, Ingress/IngressRoute
-# objects (the cluster's ingress is the tenant's), and the public 443 SNI
-# passthrough for TURN (an operator step; see the README).
+# Phase 3a adds Egress (track egress to the plugin's ingest) and its own
+# small Redis (egress.yaml).
+#
+# Not here: the STT services (the utterance engine calls muster's own
+# stt-cohere), Ingress/IngressRoute objects (the cluster's ingress is the
+# tenant's), and the public 443 SNI passthrough for TURN (an operator step;
+# see the README).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
@@ -24,6 +28,7 @@ labels:
 resources:
   - muster-meetings.yaml
   - livekit.yaml
+  - egress.yaml
   - networkpolicy.yaml
 
 configMapGenerator:
@@ -48,3 +53,8 @@ configMapGenerator:
       # peer address is counted (no proxy declared).
       - trusted-proxies=
       - client-ip-header=
+      # The transcript's engine: utterance (each pause-cut utterance to the
+      # STT service muster's dictation uses), or off. Its service, by its
+      # Service name in muster's namespace.
+      - stt-engine=utterance
+      - stt-url=http://stt-cohere:8000

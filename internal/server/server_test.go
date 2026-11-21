@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,6 +31,7 @@ import (
 	"github.com/ZacxDev/muster-meetings/internal/owners"
 	"github.com/ZacxDev/muster-meetings/internal/server"
 	"github.com/ZacxDev/muster-meetings/internal/store"
+	"github.com/ZacxDev/muster-meetings/internal/stt"
 )
 
 // Fixtures: ids, hosts and origins that equal no constant the code or the
@@ -83,9 +85,18 @@ type env struct {
 	server   *server.Server
 	srv      *httptest.Server
 	internal *httptest.Server
-	clock    *clock
-	log      *syncBuf
+	// ingest is the ingest listener (Egress's websocket streams).
+	ingest *httptest.Server
+	clock  *clock
+	log    *syncBuf
 }
+
+// fakeScript is the fake engine's lines in every env: pairwise distinct,
+// and one that looks like markup.
+var fakeScript = []string{"Budget goes to Sam by Friday.", "<b>Bold</b> & <i>sly</i>", "Same time next week."}
+
+// ingestKey is the env's MEETINGS_INGEST_SECRET.
+var ingestKey = []byte("env ingest key 0a1b2c3d4e5f6a7b8c9d")
 
 type syncBuf struct {
 	mu sync.Mutex
@@ -104,7 +115,12 @@ type liveKitAt struct {
 
 func newEnv(t *testing.T) *env { return newEnvWith(t, nil) }
 
-func newEnvWith(t *testing.T, real *liveKitAt) *env {
+func newEnvWith(t *testing.T, real *liveKitAt) *env { return newEnvOpts(t, real, nil) }
+
+// newEnvOpts is newEnvWith with a last word on the server's config: by
+// default the fake engine transcribes (fakeScript) and a refused egress
+// start is retried after 20, 40 and 80 ms.
+func newEnvOpts(t *testing.T, real *liveKitAt, opt func(*server.Config)) *env {
 	t.Helper()
 	e := &env{t: t, fake: mustertest.New(), clock: &clock{t: t0, real: real != nil && real.RealClock}, log: &syncBuf{}}
 	t.Cleanup(e.fake.Close)
@@ -142,14 +158,29 @@ func newEnvWith(t *testing.T, real *liveKitAt) *env {
 		t.Fatal(err)
 	}
 	lkc.Now = e.clock.Now
-	e.server = server.New(server.Config{PublicURL: publicURL, MusterOrigin: musterOrigin, Now: e.clock.Now, Log: lg,
+	// The ingest listener exists before the server, so its URL can be the
+	// server's IngestURL; it serves the server's Ingest once there is one.
+	var ingestH atomic.Value
+	e.ingest = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ingestH.Load().(http.Handler).ServeHTTP(w, r)
+	}))
+	t.Cleanup(e.ingest.CloseClientConnections)
+	t.Cleanup(e.ingest.Close)
+	cfg := server.Config{PublicURL: publicURL, MusterOrigin: musterOrigin, Now: e.clock.Now, Log: lg,
 		LiveKit: lkc, LiveKitURL: lkWS, ICE: "relay",
 		// The test client is the "ingress": a knock's address comes from
 		// X-Forwarded-For, so a test can knock from many addresses.
 		TrustedProxies: []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128")},
 		// The streams re-read the database often and send no heartbeat a
 		// test waits on; the reconcile loop runs only when a test calls it.
-		StreamRecheck: 50 * time.Millisecond, ReconcileEvery: time.Hour, Heartbeat: time.Hour}, st, e.app)
+		StreamRecheck: 50 * time.Millisecond, ReconcileEvery: time.Hour, Heartbeat: time.Hour,
+		Engine: stt.NewFake(fakeScript), IngestURL: "ws" + strings.TrimPrefix(e.ingest.URL, "http"), IngestKey: ingestKey,
+		EgressBackoff: []time.Duration{20 * time.Millisecond, 40 * time.Millisecond, 80 * time.Millisecond}}
+	if opt != nil {
+		opt(&cfg)
+	}
+	e.server = server.New(cfg, st, e.app)
+	ingestH.Store(e.server.Ingest())
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go e.server.Run(ctx)
@@ -157,6 +188,9 @@ func newEnvWith(t *testing.T, real *liveKitAt) *env {
 	t.Cleanup(e.srv.Close)
 	e.internal = httptest.NewServer(e.server.Internal())
 	t.Cleanup(e.internal.Close)
+	if e.lk != nil {
+		e.lk.WebhookURL = e.internal.URL + "/livekit/webhook"
+	}
 	return e
 }
 
@@ -1358,7 +1392,11 @@ func TestTheAppPageCarriesNoInlineScript(t *testing.T) {
 	}
 	for _, f := range []string{"/static/app.js", "/static/guest.js", "/static/call.js"} {
 		_, js := e.do("GET", f, "", nil)
-		for _, bad := range []string{"localStorage", "sessionStorage", "document.cookie", "innerHTML"} {
+		// No script parses HTML: a guest's name and what anyone SAID (the
+		// transcript) are rendered with textContent only. (A word check;
+		// the behavioural one is e2e/transcript.spec.ts, whose scripted
+		// line is markup and must come out as text.)
+		for _, bad := range []string{"localStorage", "sessionStorage", "document.cookie", "innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "DOMParser", "createContextualFragment"} {
 			if bytes.Contains(js, []byte(bad)) {
 				t.Errorf("%s uses %s", f, bad)
 			}

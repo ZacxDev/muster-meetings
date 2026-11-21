@@ -29,6 +29,10 @@ regexes = [
   '''^another-secret-entirely-0000000000$''',
   '''^a-secret-of-the-fixture-31f9c0de42$''',
   '''^fake-livekit-secret-for-tests-9f1c2e$''',
+  # RFC 6455's own sample websocket key ("the sample nonce"), and the
+  # Compose test's LiveKit secret
+  '''^dGhlIHNhbXBsZSBub25jZQ==$''',
+  '''^compose-fixture-secret-0123456789$''',
   # an environment flag the integration test passes to LiveKit's CLI, on the
   # line after LIVEKIT_API_SECRET, which generic-api-key reads as a value
   '''^LK_NO_SKILLS_PROMPT=1$''',

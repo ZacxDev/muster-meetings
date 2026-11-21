@@ -1,24 +1,36 @@
-# NetworkPolicies (design: "Deployment"), phase 2c's part. Both pods are
-# default-deny in both directions, then:
+# NetworkPolicies (design: "Deployment"). Every pod is default-deny in both
+# directions, then:
 #
 #   muster-meetings  in:  :8080 from the ingress controller's namespace
 #                         :8081 from LiveKit (the webhook) only
-#                    out: muster's pods (its API), LiveKit's API (:7880), DNS
+#                         :8082 from Egress (the ingest) only
+#                    out: muster's pods (its API), LiveKit's API (:7880), the
+#                         STT service (stt-cohere, :8000), DNS
 #   livekit          in:  :7880 and :5349 from anywhere: both are reached
 #                         through the NodePort (whose source is a node
 #                         address) and both authenticate every client (a
 #                         signed join token; TURN credentials from it)
-#                    out: the plugin's :8081 (the webhook), DNS
+#                         Egress's media: :7881/tcp and the ICE range
+#                         50000-50199/udp, from Egress alone
+#                    out: the plugin's :8081 (the webhook), its Redis, Egress
+#                         (UDP: the ICE checks of Egress's subscription), DNS
+#   egress           in:  UDP from LiveKit alone (its ICE checks)
+#                    out: LiveKit (signalling :7880, media :7881/tcp and the ICE
+#                         range), the plugin's ingest :8082, its Redis, DNS.
+#                         Phase 5 adds the object store, for recordings.
+#   redis-meetings   in:  :6379 from LiveKit and Egress alone
+#                    out: nothing
 #
-# The STT service, the object store and the internet (OpenRouter) join the
-# plugin's egress in the phases that use them; muster's own pods gain no
-# egress to any of these. muster's own NetworkPolicy, if it has one, must
-# admit the plugin's pods to its API port: that is muster's manifest, not
-# this one.
+# The object store and the internet (OpenRouter) join the plugin's egress
+# in the phases that use them; muster's own pods gain no egress to any of
+# these. muster's own NetworkPolicy, if it has one, must admit the plugin's
+# pods to its API port, and stt-cohere's must admit them to :8000: those are
+# muster's manifests, not these.
 #
 # PATCH TARGETS for the tenant: the ingress controller's namespace label
-# (`ingress-controller` below), muster's pod labels and port (8105 below), and
-# the DNS selector if the cluster's DNS pods are labelled differently.
+# (`ingress-controller` below), muster's pod labels and port (8105 below),
+# stt-cohere's pod labels and port (8000 below), and the DNS selector if the
+# cluster's DNS pods are labelled differently.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -41,6 +53,12 @@ spec:
               app.kubernetes.io/name: livekit
       ports:
         - {protocol: TCP, port: 8081}
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: egress
+      ports:
+        - {protocol: TCP, port: 8082}
   egress:
     - to:
         - podSelector:
@@ -54,6 +72,12 @@ spec:
               app.kubernetes.io/name: livekit
       ports:
         - {protocol: TCP, port: 7880}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: stt-cohere
+      ports:
+        - {protocol: TCP, port: 8000}
     - to:
         - namespaceSelector:
             matchLabels:
@@ -78,6 +102,13 @@ spec:
     - ports:
         - {protocol: TCP, port: 7880}
         - {protocol: TCP, port: 5349}
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: egress
+      ports:
+        - {protocol: TCP, port: 7881}
+        - {protocol: UDP, port: 50000, endPort: 50199}
   egress:
     - to:
         - podSelector:
@@ -85,6 +116,18 @@ spec:
               app.kubernetes.io/name: muster-meetings
       ports:
         - {protocol: TCP, port: 8081}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: redis-meetings
+      ports:
+        - {protocol: TCP, port: 6379}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: egress
+      ports:
+        - {protocol: UDP}
     - to:
         - namespaceSelector:
             matchLabels:
@@ -95,3 +138,72 @@ spec:
       ports:
         - {protocol: UDP, port: 53}
         - {protocol: TCP, port: 53}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: egress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: egress
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: livekit
+      ports:
+        - {protocol: UDP}
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: livekit
+      ports:
+        - {protocol: TCP, port: 7880}
+        - {protocol: TCP, port: 7881}
+        - {protocol: UDP, port: 50000, endPort: 50199}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: muster-meetings
+      ports:
+        - {protocol: TCP, port: 8082}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: redis-meetings
+      ports:
+        - {protocol: TCP, port: 6379}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-meetings
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: redis-meetings
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: livekit
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: egress
+      ports:
+        - {protocol: TCP, port: 6379}
+  egress: []

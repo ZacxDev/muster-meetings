@@ -80,8 +80,32 @@ func TestNoticeForEachSwitchState(t *testing.T) {
 		{false, false, "This meeting is transcribed.", "Transcribing"},
 	} {
 		n := lobby.NoticeFor(c.record, c.ai)
-		if got := strings.Join(n.Text, " | "); got != c.text || n.Badge != c.badge || n.Record != c.record || n.AI != c.ai {
+		if got := strings.Join(n.Text, " | "); got != c.text || n.Badge != c.badge || n.Record != c.record || n.AI != c.ai || !n.Transcribed {
 			t.Errorf("NoticeFor(%v, %v) = %q / %q", c.record, c.ai, got, n.Badge)
+		}
+		if w := lobby.NoticeWith(c.record, c.ai, true); strings.Join(w.Text, " | ") != c.text || w.Badge != c.badge {
+			t.Errorf("NoticeWith(%v, %v, true) = %q / %q, want NoticeFor's", c.record, c.ai, w.Text, w.Badge)
+		}
+	}
+}
+
+// 🔴 Without an engine nothing is transcribed, so nothing reaches the AI
+// service either: the notice never says "transcribed" or names the AI
+// service, and the badge never says Transcribing or AI.
+func TestTheNoticeWithoutATranscript(t *testing.T) {
+	for _, c := range []struct {
+		record, ai bool
+		text       string
+		badge      string
+	}{
+		{true, true, "This meeting is recorded.", "Recording"},
+		{true, false, "This meeting is recorded.", "Recording"},
+		{false, true, "This meeting is not recorded or transcribed.", ""},
+		{false, false, "This meeting is not recorded or transcribed.", ""},
+	} {
+		n := lobby.NoticeWith(c.record, c.ai, false)
+		if got := strings.Join(n.Text, " | "); got != c.text || n.Badge != c.badge || n.Transcribed || n.Record != c.record || n.AI != c.ai {
+			t.Errorf("NoticeWith(%v, %v, false) = %q / %q / transcribed %v; want %q / %q", c.record, c.ai, got, n.Badge, n.Transcribed, c.text, c.badge)
 		}
 	}
 }

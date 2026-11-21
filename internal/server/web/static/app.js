@@ -126,9 +126,9 @@
     text.className = 'text';
     text.appendChild(t); text.appendChild(meta);
     li.appendChild(text);
+    var actions = document.createElement('div');
+    actions.className = 'actions';
     if (linkLive(m)) {
-      var actions = document.createElement('div');
-      actions.className = 'actions';
       actions.appendChild(button('Open', 'primary open-row', function () {
         linkOf(m.id).then(function (url) { openCall(m.id, url); })
           .catch(function (e) { if (token) say('Could not open the meeting: ' + e.message); });
@@ -138,10 +138,68 @@
         linkOf(m.id).then(function (url) { showLink(url); return copyText(url, $('join-url'), say); })
           .catch(function (e) { if (token) say('Could not get the link: ' + e.message); });
       }));
-      li.appendChild(actions);
     }
+    actions.appendChild(button('Transcript', 'transcript-row', function () { openArchive(m); }));
+    li.appendChild(actions);
     return li;
   }
+
+  // ---- the archive: one meeting's transcript, and its downloads ----
+
+  var archived = null; // the meeting the archive view shows
+
+  function archiveSay(text) { $('archive-status').textContent = text || ''; }
+
+  function openArchive(m) {
+    archived = m;
+    $('list-view').hidden = true;
+    $('archive-view').hidden = false;
+    $('archive-lines').textContent = '';
+    $('archive-empty').hidden = true;
+    var meta = [when(m.created_at), m.state === 'open' ? 'Open' : 'Ended'];
+    var d = duration(m);
+    if (d) meta.push(d);
+    $('archive-title').textContent = m.title || 'Transcript';
+    $('archive-meta').textContent = meta.join(' · ');
+    archiveSay('Loading…');
+    api('GET', '/api/meetings/' + encodeURIComponent(m.id) + '/transcript').then(function (b) {
+      if (archived !== m) return;
+      archiveSay('');
+      var list = $('archive-lines');
+      b.segments.forEach(function (g) { list.appendChild(MeetingsCall.lineEl(g)); });
+      $('archive-empty').hidden = b.segments.length > 0;
+    }).catch(function (e) { if (token && archived === m) archiveSay('Could not load the transcript: ' + e.message); });
+  }
+
+  function closeArchive() {
+    archived = null;
+    $('archive-view').hidden = true;
+    $('list-view').hidden = false;
+  }
+
+  // download fetches the export with the bearer (a link cannot carry it) and
+  // saves it from a blob: URL.
+  function download(format) {
+    if (!archived) return;
+    var id = archived.id;
+    archiveSay('');
+    request('GET', '/api/meetings/' + encodeURIComponent(id) + '/transcript?format=' + format).then(function (res) {
+      if (!res.ok) throw new Error('the server answered ' + res.status);
+      return res.blob();
+    }).then(function (blob) {
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'meeting-' + id + '.' + format;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(function () { URL.revokeObjectURL(a.href); }, 10000);
+    }).catch(function (e) { if (token) archiveSay('Could not download: ' + e.message); });
+  }
+
+  $('archive-back').addEventListener('click', closeArchive);
+  $('dl-txt').addEventListener('click', function () { download('txt'); });
+  $('dl-vtt').addEventListener('click', function () { download('vtt'); });
 
   function load(append) {
     var path = '/api/meetings' + (append && next ? '?cursor=' + encodeURIComponent(next) : '');
@@ -219,10 +277,20 @@
     if (s.meeting.state !== 'open') meetingOver('This meeting has ended.');
   }
 
+  // The live transcript panel. Each event stream sends the transcript from
+  // its start, so a new stream redraws it.
+  var transcript = MeetingsCall.Transcript($('transcript'), $('transcript-status'), $('panels'));
+
   function watch(id, abort) {
     return request('GET', '/api/meetings/' + encodeURIComponent(id) + '/events', undefined, abort.signal).then(function (res) {
       if (!res.ok) throw new Error('the server answered ' + res.status);
-      return MeetingsCall.readEvents(res, function (name, data) { if (name === 'meeting') renderSnapshot(data); });
+      transcript.reset();
+      return MeetingsCall.readEvents(res, function (name, data) {
+        if (name === 'meeting') renderSnapshot(data);
+        else if (name === 'segment') transcript.segment(data);
+        else if (name === 'partials') transcript.partials(data.partials);
+        else if (name === 'transcript') transcript.status(data.status);
+      });
     }).then(function () {
       // The stream ended. While the call view is still this meeting's and it
       // has not ended, open it again.
@@ -267,6 +335,7 @@
 
   function openCall(id, url) {
     if (call) closeCall();
+    if (archived) closeArchive();
     call = { id: id, abort: new AbortController(), conn: null, ended: false };
     $('list-view').hidden = true;
     $('call-view').hidden = false;

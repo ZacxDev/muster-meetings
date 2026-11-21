@@ -27,6 +27,8 @@
 #     range (30000-32767) and outside each other.
 #   - room.auto_create is false: only the plugin's CreateRoom makes a room, so
 #     a token for a room the plugin did not create joins nothing.
+#   - redis is Egress's channel to LiveKit (phase 3a): its own small Redis,
+#     redis-meetings (egress.yaml), never muster's.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -104,6 +106,8 @@ spec:
                 webhook:
                   api_key: $(LIVEKIT_API_KEY)
                   urls: [http://muster-meetings:8081/livekit/webhook]
+                redis:
+                  address: redis-meetings:6379
                 logging:
                   level: info
           volumeMounts:

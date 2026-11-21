@@ -649,3 +649,22 @@ func (r *OwnerRepo) SetSwitch(ctx context.Context, id string, which Switch, on b
 	}
 	return Notice{Record: rec == 1, AI: ai == 1}, tx.Commit()
 }
+
+// NameInRoom is the name identity is shown by in room's meeting: the owner's
+// display name ("" when muster gave none), or what a guest typed, with guest
+// true. ErrNotFound when the identity is neither.
+func (s *Store) NameInRoom(ctx context.Context, room, identity string) (name string, guest bool, err error) {
+	if identity == OwnerIdentity {
+		err = s.db.QueryRowContext(ctx, `SELECT o.display_name FROM meetings m JOIN owners o ON o.subject = m.subject WHERE m.room = ?`, room).Scan(&name)
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", false, ErrNotFound
+		}
+		return name, false, err
+	}
+	err = s.db.QueryRowContext(ctx, `SELECT p.display_name FROM participants p JOIN meetings m ON m.id = p.meeting_id
+		WHERE m.room = ? AND p.identity = ? AND p.kind = 'guest'`, room, identity).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, ErrNotFound
+	}
+	return name, true, err
+}

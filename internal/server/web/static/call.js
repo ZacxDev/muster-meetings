@@ -222,5 +222,93 @@
     return !!LK && reason === LK.DisconnectReason.DUPLICATE_IDENTITY;
   }
 
-  window.MeetingsCall = { join: join, readEvents: readEvents, showBadge: showBadge, replacedElsewhere: replacedElsewhere };
+  // clock is a meeting time in ms as m:ss (h:mm:ss past an hour).
+  function clock(ms) {
+    var t = Math.max(0, Math.floor(ms / 1000));
+    var h = Math.floor(t / 3600), m = Math.floor(t / 60) % 60, s = t % 60;
+    var ss = (s < 10 ? '0' : '') + s;
+    return h > 0 ? h + ':' + (m < 10 ? '0' : '') + m + ':' + ss : m + ':' + ss;
+  }
+
+  // lineEl draws one segment: a line (when, who, what was said) or a gap
+  // marker. 🔴 Every part is textContent: the words are what a participant
+  // SAID (a guest is a stranger) and the name is what they typed. Nothing
+  // here is ever parsed as HTML.
+  function lineEl(g) {
+    var li = document.createElement('li');
+    li.setAttribute('data-id', String(g.id));
+    var when = document.createElement('span');
+    when.className = 'when';
+    when.textContent = clock(g.start_ms);
+    li.appendChild(when);
+    if (g.kind === 'gap') {
+      li.className = 'gap';
+      var what = document.createElement('span');
+      what.className = 'text';
+      what.textContent = g.speaker + ': not transcribed' + (g.end_ms == null ? '…' : ' until ' + clock(g.end_ms));
+      li.appendChild(what);
+      return li;
+    }
+    li.className = 'line';
+    var who = document.createElement('span');
+    who.className = 'who';
+    who.textContent = g.speaker;
+    var text = document.createElement('span');
+    text.className = 'text';
+    text.textContent = g.text;
+    li.appendChild(who); li.appendChild(text);
+    return li;
+  }
+
+  // Transcript is the live transcript panel over a list: segment events add
+  // or (a gap that closed) replace a line, partials are the lines in
+  // progress at the end, and the status says when the transcript is paused.
+  // The panel shows itself with its first line.
+  function Transcript(list, statusEl, panel) {
+    var partials = [];
+    function reveal() { if (panel) panel.hidden = false; }
+    function follow(fn) {
+      var atEnd = list.scrollHeight - list.scrollTop - list.clientHeight < 40;
+      fn();
+      if (atEnd) list.scrollTop = list.scrollHeight;
+    }
+    return {
+      segment: function (g) {
+        follow(function () {
+          var el = lineEl(g);
+          var old = list.querySelector('li[data-id="' + String(Number(g.id)) + '"]');
+          if (old) { list.replaceChild(el, old); return; }
+          var first = partials.length ? partials[0] : null;
+          list.insertBefore(el, first);
+        });
+        reveal();
+      },
+      partials: function (ps) {
+        follow(function () {
+          partials.forEach(function (el) { el.remove(); });
+          partials = (ps || []).map(function (p) {
+            var li = lineEl({ id: 'p', kind: 'text', start_ms: p.start_ms, speaker: p.speaker, text: p.text + '…' });
+            li.className = 'line partial';
+            li.removeAttribute('data-id');
+            list.appendChild(li);
+            return li;
+          });
+        });
+        if (partials.length) reveal();
+      },
+      status: function (s) {
+        if (statusEl) statusEl.textContent = s || '';
+        if (s) reveal();
+      },
+      reset: function () {
+        list.textContent = '';
+        partials = [];
+        if (statusEl) statusEl.textContent = '';
+        if (panel) panel.hidden = true;
+      }
+    };
+  }
+
+  window.MeetingsCall = { join: join, readEvents: readEvents, showBadge: showBadge, replacedElsewhere: replacedElsewhere,
+    Transcript: Transcript, lineEl: lineEl, clock: clock };
 })();

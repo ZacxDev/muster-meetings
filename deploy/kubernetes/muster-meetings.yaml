@@ -3,7 +3,10 @@
 #
 # Secrets it reads (create them before applying; names are patch targets):
 #   muster-meetings  MUSTER_PLUGIN_TOKEN (from `muster-server app install`),
-#                    MEETINGS_LINK_KEY (openssl rand -base64 32)
+#                    MEETINGS_LINK_KEY (openssl rand -base64 32),
+#                    MEETINGS_INGEST_SECRET (openssl rand -base64 32: the ingest
+#                    URL tokens' key), MEETINGS_STT_TOKEN (a COPY of
+#                    stt-cohere's one bearer: rotating it means updating both)
 #   livekit-keys     LIVEKIT_API_KEY, LIVEKIT_API_SECRET (shared with LiveKit)
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -55,6 +58,10 @@ spec:
               containerPort: 8080
             - name: internal
               containerPort: 8081
+            # Egress's websocket streams (the transcript's audio) and nothing
+            # else; the NetworkPolicy admits Egress alone.
+            - name: ingest
+              containerPort: 8082
           env:
             - name: MUSTER_URL
               valueFrom: {configMapKeyRef: {name: muster-meetings-params, key: muster-url}}
@@ -76,10 +83,25 @@ spec:
               value: relay
             - name: STATE_DIR
               value: /state
+            # The transcript (phase 3a): the engine, the STT service the
+            # utterance engine calls (stt-cohere, as dictation does), and the
+            # ingest Egress streams to.
+            - name: MEETINGS_STT_ENGINE
+              valueFrom: {configMapKeyRef: {name: muster-meetings-params, key: stt-engine}}
+            - name: MEETINGS_STT_URL
+              valueFrom: {configMapKeyRef: {name: muster-meetings-params, key: stt-url}}
+            - name: MEETINGS_INGEST_LISTEN
+              value: ":8082"
+            - name: MEETINGS_INGEST_URL
+              value: ws://muster-meetings:8082
             - name: MUSTER_PLUGIN_TOKEN
               valueFrom: {secretKeyRef: {name: muster-meetings, key: MUSTER_PLUGIN_TOKEN}}
             - name: MEETINGS_LINK_KEY
               valueFrom: {secretKeyRef: {name: muster-meetings, key: MEETINGS_LINK_KEY}}
+            - name: MEETINGS_INGEST_SECRET
+              valueFrom: {secretKeyRef: {name: muster-meetings, key: MEETINGS_INGEST_SECRET}}
+            - name: MEETINGS_STT_TOKEN
+              valueFrom: {secretKeyRef: {name: muster-meetings, key: MEETINGS_STT_TOKEN}}
             - name: LIVEKIT_API_KEY
               valueFrom: {secretKeyRef: {name: livekit-keys, key: LIVEKIT_API_KEY}}
             - name: LIVEKIT_API_SECRET
@@ -124,7 +146,7 @@ spec:
 ---
 # :8080 is public (route meet-<x>.<domain> to it). :8081 is internal:
 # /healthz and LiveKit's webhook; never route it, and the NetworkPolicy admits
-# only LiveKit to it.
+# only LiveKit to it. :8082 is the ingest, Egress's alone: never route it.
 apiVersion: v1
 kind: Service
 metadata:
@@ -142,3 +164,6 @@ spec:
     - name: internal
       port: 8081
       targetPort: internal
+    - name: ingest
+      port: 8082
+      targetPort: ingest

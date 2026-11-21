@@ -8,7 +8,8 @@
   if (!root) return;
   var $ = function (id) { return document.getElementById(id); };
   var base = location.pathname.replace(/\/+$/, '');
-  var shown = { record: root.getAttribute('data-record') === 'true', ai: root.getAttribute('data-ai') === 'true' };
+  var shown = { record: root.getAttribute('data-record') === 'true', ai: root.getAttribute('data-ai') === 'true',
+    transcribed: root.getAttribute('data-transcribed') === 'true' };
   var ticket = null;
   var preview = null; // the camera preview's stream
   var conn = null;
@@ -26,7 +27,7 @@
       p.textContent = t;
       box.appendChild(p);
     });
-    shown = { record: !!n.record, ai: !!n.ai };
+    shown = { record: !!n.record, ai: !!n.ai, transcribed: !!n.transcribed };
   }
 
   function post(path, body, signal) {
@@ -94,18 +95,26 @@
     connect(t);
   }
 
+  // The live transcript, the same as the owner's panel. Each stream sends it
+  // from the start, so a new stream (a Retry) redraws it.
+  var transcript = MeetingsCall.Transcript($('transcript'), $('transcript-status'), $('panels'));
+
   // events follows the admitted guest's stream: a fresh token at its start
-  // (used on a Retry), the CURRENT notice (its badge), and the end or a
-  // removal.
+  // (used on a Retry), the CURRENT notice (its badge), the live transcript,
+  // and the end or a removal.
   function events() {
     if (abort) abort.abort();
     abort = new AbortController();
+    transcript.reset();
     post('/events', { ticket: ticket }, abort.signal).then(function (res) {
       if (res.status === 410) { finish('ended', 'This meeting has ended.'); return; }
       if (!res.ok) { finish('removed', 'You are no longer in this meeting.'); return; }
       return MeetingsCall.readEvents(res, function (name, data) {
         if (name === 'token') { if (needToken) { needToken = false; connect(data); } }
         else if (name === 'meeting') MeetingsCall.showBadge(data.notice);
+        else if (name === 'segment') transcript.segment(data);
+        else if (name === 'partials') transcript.partials(data.partials);
+        else if (name === 'transcript') transcript.status(data.status);
         else if (name === 'ended') finish('ended', 'This meeting has ended.');
         else if (name === 'removed') finish('removed', 'You are no longer in this meeting.');
       });

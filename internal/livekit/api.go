@@ -67,6 +67,10 @@ func NotFound(err error) bool {
 }
 
 func (c *Client) call(ctx context.Context, method string, grant VideoGrant, in, out any) error {
+	return c.callService(ctx, "livekit.RoomService", method, grant, in, out)
+}
+
+func (c *Client) callService(ctx context.Context, service, method string, grant VideoGrant, in, out any) error {
 	tok, err := c.keys.apiToken(grant, c.Now())
 	if err != nil {
 		return err
@@ -75,7 +79,7 @@ func (c *Client) call(ctx context.Context, method string, grant VideoGrant, in, 
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/twirp/livekit.RoomService/"+method, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/twirp/"+service+"/"+method, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -146,9 +150,45 @@ func (c *Client) ListRooms(ctx context.Context) ([]Room, error) {
 
 // ParticipantInfo is the part of LiveKit's ParticipantInfo the plugin reads.
 type ParticipantInfo struct {
-	SID      string `json:"sid"`
-	Identity string `json:"identity"`
-	Name     string `json:"name"`
+	SID      string      `json:"sid"`
+	Identity string      `json:"identity"`
+	Name     string      `json:"name"`
+	Tracks   []TrackInfo `json:"tracks"`
+}
+
+// TrackInfo is the part of LiveKit's TrackInfo the plugin reads. Source is
+// the protobuf enum's name ("MICROPHONE", "CAMERA", "SCREEN_SHARE",
+// "SCREEN_SHARE_AUDIO"); protojson leaves out a zero value, so an absent
+// Type is AUDIO.
+type TrackInfo struct {
+	SID    string `json:"sid"`
+	Type   string `json:"type"`
+	Source string `json:"source"`
+}
+
+// SourceMicrophone is a microphone track's source: the only kind the
+// plugin transcribes (design: "started by the plugin on every
+// track_published webhook for a microphone track").
+const SourceMicrophone = "MICROPHONE"
+
+// Microphone says t is a microphone's audio.
+func (t TrackInfo) Microphone() bool {
+	return t.Source == SourceMicrophone && (t.Type == "" || t.Type == "AUDIO")
+}
+
+// Published says identity has track published in ps.
+func Published(ps []ParticipantInfo, identity, track string) bool {
+	for _, p := range ps {
+		if p.Identity != identity {
+			continue
+		}
+		for _, t := range p.Tracks {
+			if t.SID == track {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ListParticipants lists who is in room. A room that does not exist has
@@ -169,6 +209,72 @@ func (c *Client) ListParticipants(ctx context.Context, room string) ([]Participa
 func (c *Client) RemoveParticipant(ctx context.Context, room, identity string) error {
 	err := c.call(ctx, "RemoveParticipant", VideoGrant{RoomAdmin: true, Room: room}, map[string]any{"room": room, "identity": identity}, nil)
 	if NotFound(err) {
+		return nil
+	}
+	return err
+}
+
+// ---- Egress (design: "Audio for STT: track Egress to a websocket") ----
+
+// EgressInfo is the part of LiveKit's EgressInfo the plugin reads. LiveKit's
+// Twirp answers use the protobuf field names (egress_id) and its webhooks
+// protojson's (egressId): both are read.
+type EgressInfo struct {
+	EgressID string
+	RoomName string
+	Status   string // EGRESS_STARTING, EGRESS_ACTIVE, EGRESS_ENDING, EGRESS_COMPLETE, EGRESS_FAILED, EGRESS_ABORTED, EGRESS_LIMIT_REACHED
+	Error    string
+}
+
+// UnmarshalJSON reads either spelling.
+func (e *EgressInfo) UnmarshalJSON(b []byte) error {
+	var v struct {
+		A  string `json:"egress_id"`
+		B  string `json:"egressId"`
+		RA string `json:"room_name"`
+		RB string `json:"roomName"`
+		S  any    `json:"status"`
+		E  string `json:"error"`
+	}
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	e.EgressID, e.RoomName, e.Error = v.A+v.B, v.RA+v.RB, v.E
+	switch s := v.S.(type) {
+	case string:
+		e.Status = s
+	case float64:
+		e.Status = egressStatus[int(s)]
+	case nil:
+		e.Status = "EGRESS_STARTING" // protojson leaves out the zero value
+	}
+	return nil
+}
+
+var egressStatus = map[int]string{0: "EGRESS_STARTING", 1: "EGRESS_ACTIVE", 2: "EGRESS_ENDING", 3: "EGRESS_COMPLETE",
+	4: "EGRESS_FAILED", 5: "EGRESS_ABORTED", 6: "EGRESS_LIMIT_REACHED"}
+
+// StartTrackEgress asks LiveKit to stream one track's raw audio to a
+// websocket (Egress connects to wsURL and sends binary PCM frames). The
+// grant is roomRecord, which only the plugin's own API bearer carries.
+func (c *Client) StartTrackEgress(ctx context.Context, room, track, wsURL string) (EgressInfo, error) {
+	var out EgressInfo
+	err := c.callService(ctx, "livekit.Egress", "StartTrackEgress", VideoGrant{RoomRecord: true, Room: room},
+		map[string]any{"room_name": room, "track_id": track, "websocket_url": wsURL}, &out)
+	if err == nil && out.EgressID == "" {
+		err = fmt.Errorf("livekit StartTrackEgress: an answer with no egress id")
+	}
+	return out, err
+}
+
+// StopEgress stops an egress. One that has already ended is not an error.
+func (c *Client) StopEgress(ctx context.Context, egressID string) error {
+	err := c.callService(ctx, "livekit.Egress", "StopEgress", VideoGrant{RoomRecord: true}, map[string]any{"egress_id": egressID}, nil)
+	if NotFound(err) {
+		return nil
+	}
+	var e *APIError
+	if errors.As(err, &e) && e.Code == "failed_precondition" {
 		return nil
 	}
 	return err

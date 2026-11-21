@@ -10,9 +10,13 @@ import (
 // Run starts the server's background work and returns when ctx ends: the
 // knock notifier, and the reconcile loop every ReconcileEvery.
 func (s *Server) Run(ctx context.Context) {
+	defer s.bgStop()
+	go func() { <-ctx.Done(); s.bgStop() }()
 	go s.knocker.Run(ctx)
 	// Once at start: a restart may have missed webhooks.
 	s.Reconcile(ctx)
+	// And every transcribed track lost its egress's stream.
+	s.resumeTranscription(ctx)
 	t := time.NewTicker(s.cfg.ReconcileEvery)
 	defer t.Stop()
 	for {
@@ -64,6 +68,19 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		// reconnect with a fresh token from /events. An admission ends only by
 		// the owner's Remove, the guest's own Leave (/j/{code}/leave), or the
 		// meeting's end.
+	case "track_published":
+		if ev.Participant == nil || ev.Track == nil || room == "" {
+			break
+		}
+		s.onTrackPublished(ctx, room, ev.Participant.Identity, *ev.Track)
+	case "track_unpublished":
+		if ev.Track != nil {
+			s.onTrackUnpublished(ctx, *ev.Track)
+		}
+	case "egress_ended":
+		if ev.EgressInfo != nil {
+			s.onEgressEnded(ctx, *ev.EgressInfo)
+		}
 	case "room_finished":
 		if room == "" {
 			break

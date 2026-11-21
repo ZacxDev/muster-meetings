@@ -21,6 +21,8 @@ type Event struct {
 	ID          string           `json:"id"`
 	Room        *Room            `json:"room"`
 	Participant *ParticipantInfo `json:"participant"`
+	Track       *TrackInfo       `json:"track"`
+	EgressInfo  *EgressInfo      `json:"egressInfo"`
 }
 
 // ErrWebhook is a webhook that does not verify: one error for every reason.

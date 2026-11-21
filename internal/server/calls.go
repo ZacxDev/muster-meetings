@@ -130,7 +130,7 @@ func (s *Server) handleSwitch(which store.Switch) ownerHandler {
 			return
 		}
 		s.hub.Changed(id)
-		writeJSON(w, http.StatusOK, map[string]any{"notice": lobby.NoticeFor(n.Record, n.AI)})
+		writeJSON(w, http.StatusOK, map[string]any{"notice": s.noticeFor(n.Record, n.AI)})
 	}
 }
 
@@ -195,6 +195,7 @@ func (s *Server) handleEnd(w http.ResponseWriter, r *http.Request, repo *store.O
 	}
 	s.hub.Changed(id)
 	s.knocker.Kick(id)
+	s.stopTranscription(r.Context(), id)
 	if err := s.cfg.LiveKit.DeleteRoom(r.Context(), room); err != nil {
 		s.cfg.Log.Printf("end: LiveKit: %v (the reconcile loop retries)", err)
 	}
@@ -298,6 +299,7 @@ func (s *Server) handleOwnerEvents(w http.ResponseWriter, r *http.Request, repo 
 		return
 	}
 	var last []byte
+	tc := newTCursor()
 	s.stream(ctx, w, f, id, true, func() (bool, error) {
 		// 🔴 The session is checked again before every send, not only when
 		// the stream opened: an expired grant deletes the owner's sessions
@@ -320,7 +322,7 @@ func (s *Server) handleOwnerEvents(w http.ResponseWriter, r *http.Request, repo 
 			m.State = "ended"
 			lob = []store.Participant{}
 		}
-		snap := ownerSnapshot{Meeting: m, Notice: lobby.NoticeFor(m.Record, m.AI), Locked: len(lob) > 0, Lobby: lob}
+		snap := ownerSnapshot{Meeting: m, Notice: s.noticeFor(m.Record, m.AI), Locked: len(lob) > 0, Lobby: lob}
 		if !snap.Locked && liveNow {
 			snap.Locked, err = repo.Knocked(r.Context(), id)
 			if err != nil {
@@ -331,6 +333,15 @@ func (s *Server) handleOwnerEvents(w http.ResponseWriter, r *http.Request, repo 
 		if string(b) != string(last) {
 			last = b
 			if err := sse(w, f, "meeting", snap); err != nil {
+				return true, err
+			}
+		}
+		if liveNow {
+			// The transcript, through the owner's repository: only this
+			// owner's meeting's lines.
+			if err := s.sendTranscript(r.Context(), w, f, id, tc, func(after int64) ([]store.Segment, error) {
+				return repo.SegmentsAfter(r.Context(), id, after, store.MaxSegmentsPage)
+			}); err != nil {
 				return true, err
 			}
 		}
@@ -359,4 +370,4 @@ func (s *Server) guestToken(ctx context.Context, g store.Guest) (tokenAnswer, bo
 
 // guestLabel is how a guest is named to everyone: what they typed, then
 // "(guest)" (design: "shown … with "(guest)" after it").
-func guestLabel(name string) string { return strings.TrimSpace(name) + " (guest)" }
+func guestLabel(name string) string { return strings.TrimSpace(name) + guestSuffix }

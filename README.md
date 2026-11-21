@@ -6,7 +6,7 @@ was said. It is a muster **plugin**, a small Go program you run beside muster
 on a subdomain of muster's host. The design is muster's
 [docs/design/meetings.md](https://github.com/ZacxDev/muster/blob/main/docs/design/meetings.md).
 
-**What works today (phases 2a and 2b):** the tab opens the Meetings page
+**What works today (phases 2a, 2b and 3a):** the tab opens the Meetings page
 inside muster; **New meeting** puts you in a call (LiveKit) with the link
 and **Copy link** at the top. A guest opens the link, reads what the meeting
 does with what they say, types a name and asks to join; their row appears at
@@ -15,9 +15,13 @@ all** when several wait), and your phone gets a push when you are not looking
 at the meeting. Camera, microphone and **Share screen** for everyone in the
 call, **Remove** for a guest, **End meeting** for you. The page also lists
 your meetings, newest first, with **Open** and **Copy link** on an open one.
-Transcripts, action items and recordings come later: the two switches
-(**Record**, **AI action items**) and the notice are already here, because
-the notice says what will happen.
+**The live transcript (3a):** each microphone in the call is transcribed,
+and the lines appear under each speaker's name in a panel that you and every
+admitted guest see alike; after the meeting, **Transcript** on its row opens
+the archive, with **Download text** and **Download WebVTT**. Action items
+and recordings come later: the two switches (**Record**, **AI action
+items**) and the notice are already here, because the notice says what will
+happen.
 
 For you, the owner, that is the whole feature: open **Meetings**, press
 **New meeting**, copy the link, send it, admit whoever knocks.
@@ -162,6 +166,13 @@ Read from the environment only; `.env.example` lists them.
 | `MEETINGS_TRUSTED_PROXIES` | no | comma-separated CIDRs of the ingress in front of the plugin. A knock or stream from one of them is counted against the `X-Forwarded-For` client it names (the right-most hop that is not itself trusted); without it every one counts against the ingress's own address, and a request carrying the header is warned about once (log and `/healthz`). `0.0.0.0/0` or `::/0` refuses to start |
 | `MEETINGS_CLIENT_IP_HEADER` | no | behind a CDN, the one header that carries the client's address, e.g. `CF-Connecting-IP`. Read **only** when the request's peer is inside `MEETINGS_TRUSTED_PROXIES`, and then in place of `X-Forwarded-For`; from any other peer it is ignored, so a client cannot name itself. A header that is missing, repeated, a list or not an address counts the request against the proxy (it can only refuse knocks, never admit more). Set without `MEETINGS_TRUSTED_PROXIES`, or set to `X-Forwarded-For`, it refuses to start. Unset: the `X-Forwarded-For` behaviour above |
 | `STATE_DIR` | no | where `meetings.db` (SQLite) lives; default `./state`. Keep it across restarts |
+| `MEETINGS_STT_ENGINE` | no | the transcript's engine: unset or `off` (no transcript: no egress is started, the ingest refuses every stream, and the notice and badge do not say "transcribed" or name the AI service), `utterance` (each pause-cut utterance, at most 15 s, to the STT service below), or `fake` (tests only; refuses to start unless `MEETINGS_TEST_MODE=1`). `nemotron` (live captions) is phase 3c and refused by this build |
+| `MEETINGS_STT_URL` | with `utterance` | the STT service muster's dictation uses, `http(s)://host[:port]`, e.g. `http://stt-cohere:8000`: the plugin calls its `POST /v1/audio/transcriptions` exactly as muster does |
+| `MEETINGS_STT_TOKEN` | with `utterance` | that service's bearer: a **copy** of stt-cohere's one token (`STT_API_TOKEN`, muster's `MUSTER_STT_TOKEN`), in the plugin's own Secret; rotating it means updating both. Never logged |
+| `MEETINGS_STT_MODEL` | no | the `model` form field, sent only when set (stt-cohere ignores it; speaches needs it) |
+| `MEETINGS_INGEST_SECRET` | with an engine | 32 or more random bytes, base64 (`openssl rand -base64 32`): the key of every ingest URL's token (below). Never logged |
+| `MEETINGS_INGEST_URL` | with an engine | the ingest listener as **Egress** reaches it, e.g. `ws://muster-meetings:8082`; each track egress streams to `<this>/stt/ingest/<track>/<token>` |
+| `MEETINGS_INGEST_LISTEN` | no | the ingest listener; default `:8082`. Egress's alone: never route it |
 
 The plugin refuses to start when muster answers the token `401`
 (uninstalled or rotated away; it ends every session and open meeting
@@ -213,12 +224,15 @@ settings (or give the cluster a pull secret).
 |---|---|---|
 | `muster-meetings` | `MUSTER_PLUGIN_TOKEN` | the `mpl_…` token `muster-server app install` (or `/admin/apps`) prints once |
 | | `MEETINGS_LINK_KEY` | `openssl rand -base64 32` |
+| | `MEETINGS_INGEST_SECRET` | `openssl rand -base64 32` (the ingest URL tokens' key) |
+| | `MEETINGS_STT_TOKEN` | a copy of stt-cohere's bearer (`STT_API_TOKEN`) |
 | `livekit-keys` | `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | your choice (`livekit-server generate-keys`); the plugin and LiveKit read the same Secret |
 | `meetings-turn-tls` | `tls.crt`, `tls.key` (type `kubernetes.io/tls`) | a **publicly trusted** certificate for the TURN host; browsers refuse TURN/TLS with a self-signed one. Nothing serves port 80 for that name, so issue it with a DNS-01 challenge, and renew it (LiveKit reads it at start: restart LiveKit after a renewal) |
 
 ```sh
 kubectl -n <muster namespace> create secret generic muster-meetings \
-  --from-literal=MUSTER_PLUGIN_TOKEN=mpl_… --from-literal=MEETINGS_LINK_KEY="$(openssl rand -base64 32)"
+  --from-literal=MUSTER_PLUGIN_TOKEN=mpl_… --from-literal=MEETINGS_LINK_KEY="$(openssl rand -base64 32)" \
+  --from-literal=MEETINGS_INGEST_SECRET="$(openssl rand -base64 32)" --from-literal=MEETINGS_STT_TOKEN=…
 kubectl -n <muster namespace> create secret generic livekit-keys \
   --from-literal=LIVEKIT_API_KEY=API… --from-literal=LIVEKIT_API_SECRET=…
 kubectl -n <muster namespace> create secret tls meetings-turn-tls --cert=tls.crt --key=tls.key
@@ -247,27 +261,42 @@ tenant overlay sets every value. `deploy/example-overlay` sets each one with
   `room.auto_create: false` (only the plugin creates rooms), `empty_timeout`
   and `departure_timeout` 600; the webhook to
   `http://muster-meetings:8081/livekit/webhook`, keys from `livekit-keys`.
+- `egress`: LiveKit's Egress v1.15.0 **pinned by digest**, as its image's
+  own user (uid 1001), with `cpu_cost.track_cpu_cost: 0.1` and
+  `room_composite_cpu_cost: 2` (spike S3: LiveKit's defaults refused most
+  track starts at a meeting's start). It is the one container that writes
+  its root filesystem: its entrypoint recreates PulseAudio's state at every
+  start. And `redis-meetings`: Redis 7.2 pinned by digest, persisting
+  nothing, Egress's channel to LiveKit (LiveKit's config names it too).
+  Neither is muster's.
 - Services: `livekit` (ClusterIP `7880`: the API for the plugin, signalling
-  for your ingress) and `livekit-nodeport` (NodePort `signal` 7880 and
-  `turn-tls` 5349, for a route from outside the cluster).
-- NetworkPolicies: both pods deny by default. The plugin admits `:8080` from
-  the ingress controller's namespace and `:8081` from LiveKit alone, and
-  reaches muster's pods, LiveKit's `:7880` and DNS. LiveKit admits `:7880`
+  for your ingress), `livekit-nodeport` (NodePort `signal` 7880 and
+  `turn-tls` 5349, for a route from outside the cluster), `redis-meetings`
+  (ClusterIP `6379`), and the plugin's `ingest` `:8082` on `muster-meetings`
+  (never route it).
+- NetworkPolicies: every pod denies by default. The plugin admits `:8080`
+  from the ingress controller's namespace, `:8081` from LiveKit alone and
+  `:8082` (the ingest) from Egress alone, and reaches muster's pods,
+  LiveKit's `:7880`, stt-cohere's `:8000` and DNS. LiveKit admits `:7880`
   and `:5349` from anywhere (both come through the NodePort, and both
-  authenticate every client) and reaches only the plugin's `:8081` and DNS.
-  muster's own NetworkPolicy, if any, must admit the plugin's pods.
+  authenticate every client) and Egress's media (`7881/tcp`, the ICE range)
+  from Egress alone, and reaches the plugin's `:8081`, its Redis, Egress's
+  ICE (UDP) and DNS. Egress reaches LiveKit, the plugin's ingest, its Redis
+  and DNS, nothing else (phase 5 adds the object store). Redis admits
+  LiveKit and Egress and reaches nothing. muster's own NetworkPolicies, if
+  any, must admit the plugin's pods (to muster, and to stt-cohere's `:8000`).
 
 What an overlay sets:
 
 | knob | how |
 |---|---|
-| hostnames, muster's address and origin, trusted proxies, the client-IP header | `configMapGenerator` `muster-meetings-params`, `behavior: merge`: `muster-url` (`http://<muster svc>.<ns>.svc.cluster.local.:<port>`, the trailing dot included), `cluster-domain`, `muster-origin`, `public-url`, `livekit-url`, `turn-domain`, `trusted-proxies`, `client-ip-header` |
+| hostnames, muster's address and origin, trusted proxies, the client-IP header, the transcript | `configMapGenerator` `muster-meetings-params`, `behavior: merge`: `muster-url` (`http://<muster svc>.<ns>.svc.cluster.local.:<port>`, the trailing dot included), `cluster-domain`, `muster-origin`, `public-url`, `livekit-url`, `turn-domain`, `trusted-proxies`, `client-ip-header`, `stt-engine` (`utterance`, or `off`), `stt-url` (stt-cohere's Service) |
 | namespace | `namespace:` |
 | the plugin's image | `images:` (pin a digest) |
 | NodePorts | a patch on `livekit-nodeport` (`/spec/ports/0/nodePort` signalling, `/spec/ports/1/nodePort` TURN) |
 | the PVC's StorageClass | a patch on `muster-meetings-state` |
 | a Secret's name | a patch on the Deployment's `secretKeyRef` or volume |
-| the ingress controller's namespace, muster's pod labels and port | a patch on the `muster-meetings` NetworkPolicy |
+| the ingress controller's namespace, muster's pod labels and port, stt-cohere's pod labels and port | a patch on the `muster-meetings` NetworkPolicy (`/spec/egress/0` muster, `/spec/egress/2` stt-cohere) |
 | `rtc.node_ip`, if not the pod's address | a patch on `livekit`'s `LIVEKIT_NODE_IP` env entry |
 
 ```sh
@@ -295,7 +324,27 @@ because the file sets `MEETINGS_MUSTER_HTTP_HOST=muster`: the token stays on
 the Compose network and never passes your CDN or proxy. It
 publishes, on `127.0.0.1` only, the plugin (`8106`), signalling (`8107`) and
 TURN/TLS (`8108`) for your reverse proxy: HTTPS for the first two, an SNI
-passthrough on 443 for the third.
+passthrough on 443 for the third. It also adds `egress` and
+`redis-meetings` (the same images and Egress config as Kubernetes; neither
+publishes anything). The ingest is on an **internal** network of its own,
+`meetings-ingest`, that only the plugin and Egress join, and the plugin
+listens for it on its own address there (`MEETINGS_INGEST_ADDR`, default
+`172.31.251.2`). The transcript calls muster's `stt-cohere` (its compose
+profile) by name, with `MEETINGS_STT_TOKEN` the same value as muster's
+`MUSTER_STT_TOKEN`; set `MEETINGS_STT_ENGINE=off` without one.
+
+### Upgrading from 2c
+
+3a adds the transcript, and **the shipped defaults turn it on** (`stt-engine=utterance` in the base's params, `MEETINGS_STT_ENGINE=utterance` in Compose). Before you apply 3a's base:
+
+1. Add two keys to the `muster-meetings` Secret: `MEETINGS_INGEST_SECRET` (`openssl rand -base64 32`) and `MEETINGS_STT_TOKEN` (a copy of stt-cohere's bearer). Without them the plugin's pod does not start (`CreateContainerConfigError`).
+2. Expect two new Deployments from `egress.yaml`: `egress` (LiveKit's Egress) and `redis-meetings` (its Redis, with a Service). LiveKit's config now names that Redis, so LiveKit restarts with it.
+3. Point the plugin at your stt-cohere. Set `stt-url` in the params to its Service (e.g. `http://muster-stt-cohere:8000`), and patch `/spec/egress/2/to/0/podSelector/matchLabels` of the `muster-meetings` NetworkPolicy to stt-cohere's pod labels (the example overlay does both). stt-cohere's own NetworkPolicy, if it has one, must admit the plugin's pods on `:8000`.
+4. Compose: add `MEETINGS_INGEST_SECRET` and `MEETINGS_STT_TOKEN` (= `MUSTER_STT_TOKEN`) to muster's `.env`, and run muster's `stt-cohere` profile.
+
+**No STT service?** Set `stt-engine=off` in the params (Compose: `MEETINGS_STT_ENGINE=off`). Nothing is transcribed, and nothing else in this list is needed for the plugin to start. The notice and the badge then no longer say "transcribed" or name the AI service. `egress` and `redis-meetings` still run; you may leave them out of your overlay.
+
+**LiveKit now depends on `redis-meetings`**: one replica, persisting nothing. What a Redis restart does to a running LiveKit and Egress (whether LiveKit refuses to start without it, and whether rooms and egresses survive the restart) is **UNVERIFIED**: it was not measured. Treat a Redis restart as one that may drop the calls and transcripts in progress. The plugin's own meetings, links and transcripts are in its SQLite and are not affected.
 
 ### Capacity and limits
 
@@ -367,16 +416,18 @@ that does not exist.
 | `GET /api/meetings/{id}` | `{"meeting", "link"}`: `link` is the guest link while the meeting is open and under 24 hours old, `null` otherwise. This is how the page lets you copy an open meeting's link again |
 | `POST /api/meetings/{id}/token` | your LiveKit token for the call (identity `owner`, the owner grant below); `410` once the meeting has ended, `503` "Calls are unavailable" when LiveKit does not answer |
 | `POST /api/meetings/{id}/record` · `/ai` `{"on"}` | the two switches. Off at any time; back on only before any guest has knocked (`409` after) |
-| `GET /api/meetings/{id}/events` | your event stream (read with `fetch`: it needs the bearer): `meeting` events with the meeting, its notice, whether the switches are locked, and the lobby. While it is open no knock is pushed to your phone |
+| `GET /api/meetings/{id}/events` | your event stream (read with `fetch`: it needs the bearer): `meeting` events with the meeting, its notice, whether the switches are locked, and the lobby; the transcript (`segment` `{"id", "speaker", "kind": "text"\|"gap", "start_ms", "end_ms", "text"}`, a gap sent again when it closes; `partials`; `transcript` `{"status"}`). While it is open no knock is pushed to your phone |
 | `POST /api/meetings/{id}/lobby/{pid}/admit` · `/deny` | let a waiting guest in, or not. At most 7 guests in the call (8 with you): past that `429` |
 | `DELETE /api/meetings/{id}/participants/{pid}` | remove a guest from the call |
 | `POST /api/meetings/{id}/end` | End meeting |
+| `GET /api/meetings/{id}/transcript?format=json\|txt\|vtt` | the meeting's transcript: `{"meeting", "segments"}`, or a download as text or WebVTT. Yours alone: another person's meeting is `404` |
 | `GET /j/{code}` | the guest page; `410` once the meeting has ended or is 24 hours old, `404` for an unknown code |
-| `POST /j/{code}/knock` `{"name", "notice": {"record", "ai"}}` | `201 {"ticket"}`. `notice` is what the page showed; another one is `409 {"notice": <the current one>}` |
+| `POST /j/{code}/knock` `{"name", "notice": {"record", "ai", "transcribed"}}` | `201 {"ticket"}`. `notice` is what the page showed; another one (or one without `transcribed`) is `409 {"notice": <the current one>}` |
 | `POST /j/{code}/wait` `{"ticket"}` | an event stream: `waiting` (with the current notice), then `admitted {"livekit_url", "token", "identity", "ice"}`, `denied` or `ended` |
-| `POST /j/{code}/events` `{"ticket"}` | an admitted guest's stream: a fresh `token` (the reconnect after a drop), the current notice (its badge), then `removed` or `ended` |
+| `POST /j/{code}/events` `{"ticket"}` | an admitted guest's stream: a fresh `token` (the reconnect after a drop), the current notice (its badge), the same transcript events as the owner's, then `removed` or `ended` |
 | `POST /j/{code}/leave` `{"ticket"}` | the guest's own Leave: `204`, dropped from the room, the ticket spent |
 | `POST /livekit/webhook` | internal listener only: LiveKit's signed webhook |
+| `WS /stt/ingest/{track}/{token}` | the ingest listener only: one track egress's audio (above) |
 | `GET /healthz` | internal listener only |
 
 **The link** is `https://meet-<x>.<domain>/j/<code>`. The code is
@@ -476,6 +527,70 @@ database.
   shared screen on top, the others in a strip, the controls in a bottom bar
   of 44 px targets, the lobby rows and the badge pinned at the top.
 
+## The transcript
+
+1. When someone who may be in the call (the owner, or an admitted guest)
+   publishes a **microphone**, LiveKit's webhook says so, and the plugin
+   starts a LiveKit **track egress** for that track: Egress streams its raw
+   audio to the plugin's ingest listener,
+   `ws://<ingest>/stt/ingest/<track>/<token>`. Egress sends no credential on
+   that websocket (spike S2), so the URL's token is the only one: an HMAC
+   under `MEETINGS_INGEST_SECRET` of the meeting, the track, a fresh nonce
+   per egress, and the meeting's 24 h cap, compared in constant time. A
+   token opens one track of one meeting, only while it is that track's
+   **current** egress, and never after the meeting ends (`410`) or with
+   the transcript off (`404`). The access log names `/stt/ingest/<track>`,
+   never the token; Egress's own log does record the full URL it was given,
+   which is why a token dies with its egress.
+2. The ingest is a small websocket server that **never pings** (Egress
+   answers no ping; S2's streams died at exactly 40 s under a 20 s ping) and
+   sets no read deadline. It reads Egress's format exactly: binary frames of
+   1920 bytes per 10 ms, 16-bit little-endian stereo at 48 kHz, the two
+   channels identical. It takes the first channel, filters and resamples it
+   to 16 kHz mono, and hands it on in 80 ms chunks. A frame that is not a
+   whole number of stereo samples closes the stream.
+3. **Times come from the sample count**, never from arrival: a segment is
+   placed at the meeting time of its stream's first sample plus its own
+   sample time, so a burst after a stall (S2 saw stalls of 7 s) lands where
+   it was said.
+4. The engine: the plugin's endpointer (energy, after a DC-removing
+   high-pass, so a clipped or offset microphone still pauses) cuts the
+   audio at 700 ms of silence, at most 15 s per utterance, and the
+   `utterance` engine sends each one, as a WAV, to the STT service muster's
+   dictation uses, `POST /v1/audio/transcriptions` with the same fields. At
+   most 4 are in flight per plugin (it shares the GPU with dictation); each
+   participant's queue holds 30 s of audio, and past it the oldest is
+   dropped and stored as a gap. A constant signal (silence, a stuck level)
+   is never sent.
+   **A connected stream ends the retries:** LiveKit can time a start out
+   while the Egress it asked does start and connect (measured with no Egress
+   attached: the start fails after about 7–10 s). Once the track has a
+   stream, no further attempt is made, since a new attempt's token would cut
+   that stream off; if that stream (whose egress the plugin never learned)
+   ends while the track is published, the plugin starts again on the backoff.
+5. **Gaps are stored, not hidden.** When a start is refused (retried after 1,
+   2, 4 … 30 s), when an egress dies (`egress_ended` while the track is still
+   published: a new egress is started, since Egress never reconnects), when
+   the plugin restarts mid-meeting, or when the engine drops or fails an
+   utterance, a gap marker is stored and the panel says "Transcript
+   paused"; the gap closes when audio flows again. The archive shows where
+   text is missing rather than looking complete.
+6. Lines reach the owner's event stream and every **admitted** guest's
+   (`segment`, `partials`, `transcript`), never a waiting, denied or removed
+   ticket's. Ending the meeting closes the streams and stops the egresses.
+
+🔴 **What was said is untrusted text.** A guest is a stranger, and so is what
+they say. The panels and the archive render every line and name with
+`textContent` only; the text and WebVTT exports put each line on one line
+and escape what the format would read as markup, so no one can forge a line,
+a cue or a speaker. In the text export a speaker's name is fenced, with
+"(guest)" outside the fence: `[0:05] «Eve» (guest): …`; any `«`, `»` or
+`\` in a name is backslash-escaped. A guest named `Ada L.: I resign. Eve`
+reads as `«Ada L.: I resign. Eve» (guest): …`, never as the owner speaking.
+Lines never reach a log or the audit trail, and whatever
+later hands them to a model (phase 4's action items) must fence them as
+data.
+
 ## What it stores
 
 One SQLite file (`STATE_DIR/meetings.db`, mode `0600`): the people who opened
@@ -483,7 +598,10 @@ the tab (the **subject** muster's redeem gave and the display name, **never
 a muster user id or an email**), owner sessions (hashed), meetings (state,
 the record and AI switches, times, the link code's hash), each knock (the
 name typed, the LiveKit identity, the ticket's hash, its state and times; no
-address) and an audit trail
+address), the transcribed tracks (the track id, the egress, the current
+nonce, the speaker's name) and the transcript itself (finals and gap
+markers, with the speaker's name and the meeting time; partials are never
+stored), and an audit trail
 of what happened, which never holds a code, a token, a display name,
 transcript text or a guest's name. Every owner-facing query goes through one
 repository layer that filters by the session's subject.
@@ -506,9 +624,11 @@ does the same for everyone.
 
 ## Telemetry and data leaving your network
 
-None. The plugin talks only to the muster at `MUSTER_URL` and to your
-LiveKit. Audio and video go between browsers and your LiveKit, never through
-the plugin. Later phases send transcript **text** (never audio) to an AI
+None. The plugin talks only to the muster at `MUSTER_URL`, to your
+LiveKit, and (with the transcript on) to your own STT service at
+`MEETINGS_STT_URL`, which gets each utterance's audio. Audio and video go
+between browsers and your LiveKit; only the microphones' audio reaches the
+plugin, from your Egress, and it is not stored. Later phases send transcript **text** (never audio) to an AI
 service for action items, on by default and off per meeting, as the notice
 already tells guests; this README will say so in the release that adds it.
 
@@ -532,7 +652,13 @@ guest token; the fake refuses the media, and **Retry** reconnects with a
 fresh token and no new knock. A third, against a real `livekit-server`
 (`scripts/e2e-harness -livekit=real`), opens one meeting on two owner pages:
 the newer takes the call, the older shows "Opened on another device" and
-**Use here** takes it back.
+**Use here** takes it back. A fourth (`transcript.spec.ts`) admits a guest,
+has the fake LiveKit act as Egress for the owner's and the guest's
+microphones (streaming Egress's own PCM format to the ingest), and checks
+that the owner's panel and the guest's show the same four lines of the
+**fake** engine under the right names, that a scripted line that looks like
+markup stays text, and that the archive and its text download hold them
+after End meeting.
 
 **Against a real LiveKit:** `internal/server/livekit_integration_test.go`
 starts `livekit-server` and joins with LiveKit's CLI (`lk room join`): the
@@ -541,7 +667,16 @@ admitted guests in the room; a removed guest rejoining with a valid
 credential and being thrown out by the plugin (`PARTICIPANT_REMOVED`); an
 admitted guest whose connection drops reconnecting and staying; two `owner`
 connections, the newer one winning and neither removed by the plugin; End
-meeting deleting the room; a real `room_finished` ending a meeting. It runs
+meeting deleting the room; a real `room_finished` ending a meeting.
+`transcript_integration_test.go` has the CLI publish a real Opus microphone
+(`testdata/tone.ogg`): the real `track_published` is read as the owner's
+microphone, LiveKit's real answer to `StartTrackEgress` with no Egress
+attached (a `408` after 7 s) is retried with a gap, and the real
+`track_unpublished` ends the track. **LiveKit's Egress is not in nixpkgs**
+and is not run in CI, so in that test (and every other) the test itself, or
+the fake LiveKit, plays Egress: it dials the ingest with the token of the
+plugin's current attempt and streams Egress's measured PCM format. The real
+Egress first runs in a deployment. It runs
 when `livekit-server` and `lk` are on `PATH` (`nix-shell -p livekit
 livekit-cli`) or named by `MEETINGS_LIVEKIT_SERVER` and `MEETINGS_LK_CLI`,
 and skips otherwise, unless `MEETINGS_REQUIRE_LIVEKIT=1` (CI downloads
@@ -597,7 +732,10 @@ phase 2d's click path, with TURN, after 2c deploys it.
 | `main.go` | reads the environment, starts the listeners and loops |
 | `internal/muster` | the client for muster's plugin routes (`/self`, the redeem, `owners/check`, notify, tasks) |
 | `internal/livekit` | LiveKit: access tokens and their grants, the RoomService API, webhook verification |
-| `internal/livekittest` | a fake LiveKit for tests (`httptest`) |
+| `internal/livekittest` | a fake LiveKit for tests (`httptest`): rooms, participants, tracks, and Egress (it streams PCM to the ingest) |
+| `internal/ingest` | the ingest: the websocket server that never pings, Egress's PCM parser and resampler, the URL token |
+| `internal/stt` | the `Engine` interface, the endpointer, the `utterance` engine and its client for muster's STT service, the `fake` engine |
+| `internal/egresstest` | a fake Egress client and Egress-format PCM fixtures |
 | `internal/lobby` | the guest name, the notice's words, the change hub, the knock limit and the knock notifier |
 | `internal/mustertest` | a fake muster for tests (`httptest`), server-installed apps included |
 | `internal/owners` | the one server token, the boot check and reconcile, and the `/self` and `owners/check` poll |
@@ -608,7 +746,7 @@ phase 2d's click path, with TURN, after 2c deploys it.
 | `compose.meetings.yml` | the fragment for muster's Compose stack |
 | `deploy/deploy_test.go` | the rendered objects and both LiveKit configs, pinned |
 | `scripts/mutate` | the security-gate mutation sweep |
-| `scripts/e2e-harness`, `e2e/` | the browser tests: the `/enter` frame gate, and the lobby at 390×844 |
+| `scripts/e2e-harness`, `e2e/` | the browser tests: the `/enter` frame gate, the lobby at 390×844, two owner devices, and the transcript in both panels |
 
 ## Licence
 

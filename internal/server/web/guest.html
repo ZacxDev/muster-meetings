@@ -15,7 +15,7 @@
   <p id="message">{{.Message}}</p>
 </main>
 {{- else}}
-<main id="guest" data-state="start" data-owner="{{.OwnerName}}" data-record="{{.Notice.Record}}" data-ai="{{.Notice.AI}}">
+<main id="guest" data-state="start" data-owner="{{.OwnerName}}" data-record="{{.Notice.Record}}" data-ai="{{.Notice.AI}}" data-transcribed="{{.Notice.Transcribed}}">
   <section id="join-view" class="join">
     <h1 id="whose">{{if .OwnerName}}{{.OwnerName}}’s meeting{{else}}Join the meeting{{end}}</h1>
     <div id="notice" class="notice-box" role="note">
@@ -45,9 +45,12 @@
       <div id="stage" class="stage"></div>
       <div id="strip" class="strip"></div>
     </div>
-    <!-- The transcript and action items arrive here in later phases: the same
-         panels as the owner's, without Make task or Dismiss. -->
-    <aside id="panels" class="panels" hidden></aside>
+    <!-- The same live transcript as the owner's; the action items join it in
+         phase 4, without Make task or Dismiss. -->
+    <aside id="panels" class="panels" hidden aria-label="Transcript">
+      <h2 class="panel-title">Transcript <span id="transcript-status" class="tstatus" role="status"></span></h2>
+      <ol id="transcript" class="transcript" aria-live="polite"></ol>
+    </aside>
     <div id="audio" hidden></div>
     <nav class="controls" aria-label="Call controls">
       <button id="btn-mic" type="button" aria-pressed="true">Mute</button>

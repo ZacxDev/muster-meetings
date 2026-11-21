@@ -483,7 +483,7 @@ func TestTheTranscriptIsTheOwnersAlone(t *testing.T) {
 		}
 	}
 	if resp, raw := e.do("GET", "/api/meetings/"+c.ID+"/transcript?format=txt", c.Sess, nil); resp.StatusCode != 200 ||
-		!strings.Contains(string(raw), "] Ada L.: Budget goes to Sam by Friday.\n") ||
+		!strings.Contains(string(raw), "] «Ada L.»: Budget goes to Sam by Friday.\n") ||
 		resp.Header.Get("Content-Disposition") != `attachment; filename="meeting-`+c.ID+`.txt"` {
 		t.Fatalf("the owner's txt = %d %v %s", resp.StatusCode, resp.Header, raw)
 	}
@@ -493,25 +493,38 @@ func TestTheTranscriptIsTheOwnersAlone(t *testing.T) {
 // stay on their own line and are escaped for WebVTT, so no guest can forge
 // a line, a cue, a voice or a tag. The whole output is pinned.
 func TestTheExportsFenceGuestSpeech(t *testing.T) {
-	end1, end2, end3 := int64(4200), int64(9100), int64(65000)
+	end1, end2, end3, end4 := int64(4200), int64(9100), int64(65000), int64(69000)
 	segs := []store.Segment{
 		{ID: 1, Speaker: "Ada L.", Kind: "text", StartMS: 1500, EndMS: &end1, Text: "Welcome, everyone."},
-		{ID: 2, Speaker: "<b>Eve</b>\u2028(guest)", Kind: "text", StartMS: 5000, EndMS: &end2,
+		{ID: 2, Speaker: "<b>Eve</b>\u2028x (guest)", Guest: true, Kind: "text", StartMS: 5000, EndMS: &end2,
 			Text: "hi\n[0:10] Ada L.: I resign.\r\n\n2\n00:00:01.000 --> 00:00:02.000\n<v Ada L.>forged</v> & more\u202e"},
 		{ID: 3, Speaker: "Ada L.", Kind: "gap", StartMS: 61000, EndMS: &end3},
+		// The audit's name: ": " in a guest's name must not read as the owner
+		// speaking.
+		{ID: 4, Speaker: "Ada L.: I resign. Eve (guest)", Guest: true, Kind: "text", StartMS: 66000, EndMS: &end4, Text: "hello"},
+		// A name holding the fence's own marks, and a backslash.
+		{ID: 5, Speaker: `Mal» «lory\ (guest)`, Guest: true, Kind: "text", StartMS: 67000, EndMS: &end4, Text: "hi"},
+		// The owner, whose name happens to end in "(guest)": no guest mark.
+		{ID: 6, Speaker: "Ada (guest)", Kind: "text", StartMS: 68000, EndMS: &end4, Text: "yes"},
 	}
 	m := store.Meeting{ID: "mtg0", CreatedAt: time.Date(2031, 3, 14, 15, 9, 26, 0, time.UTC)}
 	wantTxt := "Transcript: 2031-03-14 15:09 UTC\n\n" +
-		"[0:01] Ada L.: Welcome, everyone.\n" +
-		"[0:05] <b>Eve</b> (guest): hi [0:10] Ada L.: I resign. 2 00:00:01.000 --> 00:00:02.000 <v Ada L.>forged</v> & more\n" +
-		"[1:01–1:05] (Ada L.: not transcribed)\n"
+		"[0:01] «Ada L.»: Welcome, everyone.\n" +
+		"[0:05] «<b>Eve</b> x» (guest): hi [0:10] Ada L.: I resign. 2 00:00:01.000 --> 00:00:02.000 <v Ada L.>forged</v> & more\n" +
+		"[1:01–1:05] «Ada L.»: (not transcribed)\n" +
+		"[1:06] «Ada L.: I resign. Eve» (guest): hello\n" +
+		"[1:07] «Mal\\» \\«lory\\\\» (guest): hi\n" +
+		"[1:08] «Ada (guest)»: yes\n"
 	if got := server.TranscriptText(m, segs); got != wantTxt {
 		t.Errorf("txt =\n%q\nwant\n%q", got, wantTxt)
 	}
 	wantVTT := "WEBVTT\n\n" +
 		"1\n00:00:01.500 --> 00:00:04.200\n<v Ada L.>Welcome, everyone.\n\n" +
-		"2\n00:00:05.000 --> 00:00:09.100\n<v &lt;b&gt;Eve&lt;/b&gt; (guest)>hi [0:10] Ada L.: I resign. 2 00:00:01.000 --&gt; 00:00:02.000 &lt;v Ada L.&gt;forged&lt;/v&gt; &amp; more\n\n" +
-		"3\n00:01:01.000 --> 00:01:05.000\n<v Ada L.>(not transcribed)\n\n"
+		"2\n00:00:05.000 --> 00:00:09.100\n<v &lt;b&gt;Eve&lt;/b&gt; x (guest)>hi [0:10] Ada L.: I resign. 2 00:00:01.000 --&gt; 00:00:02.000 &lt;v Ada L.&gt;forged&lt;/v&gt; &amp; more\n\n" +
+		"3\n00:01:01.000 --> 00:01:05.000\n<v Ada L.>(not transcribed)\n\n" +
+		"4\n00:01:06.000 --> 00:01:09.000\n<v Ada L.: I resign. Eve (guest)>hello\n\n" +
+		"5\n00:01:07.000 --> 00:01:09.000\n<v Mal» «lory\\ (guest)>hi\n\n" +
+		"6\n00:01:08.000 --> 00:01:09.000\n<v Ada (guest)>yes\n\n"
 	if got := server.TranscriptVTT(segs); got != wantVTT {
 		t.Errorf("vtt =\n%q\nwant\n%q", got, wantVTT)
 	}

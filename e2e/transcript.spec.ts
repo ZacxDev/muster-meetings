@@ -118,7 +118,10 @@ test('the owner and a guest see the same transcript lines from the fake engine, 
   await expect(app.locator('#archive-lines').locator('b, i')).toHaveCount(0);
   const [dl] = await Promise.all([owner.waitForEvent('download'), app.locator('#dl-txt').click()]);
   const text = fs.readFileSync(await dl.path(), 'utf8');
-  for (const l of want) expect(text).toContain(`] ${l}\n`);
+  // The text export fences each speaker's name, a guest's mark outside it.
+  for (const l of [`«Ada L.»: ${first}`, `«Ada L.»: ${markup}`, `«Grace» (guest): ${first}`, `«Grace» (guest): ${markup}`]) {
+    expect(text).toContain(`] ${l}\n`);
+  }
   await guestCtx.close();
   await owner.close();
 });

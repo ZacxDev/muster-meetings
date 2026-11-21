@@ -130,7 +130,7 @@ func (s *Server) handleSwitch(which store.Switch) ownerHandler {
 			return
 		}
 		s.hub.Changed(id)
-		writeJSON(w, http.StatusOK, map[string]any{"notice": lobby.NoticeFor(n.Record, n.AI)})
+		writeJSON(w, http.StatusOK, map[string]any{"notice": s.noticeFor(n.Record, n.AI)})
 	}
 }
 
@@ -322,7 +322,7 @@ func (s *Server) handleOwnerEvents(w http.ResponseWriter, r *http.Request, repo 
 			m.State = "ended"
 			lob = []store.Participant{}
 		}
-		snap := ownerSnapshot{Meeting: m, Notice: lobby.NoticeFor(m.Record, m.AI), Locked: len(lob) > 0, Lobby: lob}
+		snap := ownerSnapshot{Meeting: m, Notice: s.noticeFor(m.Record, m.AI), Locked: len(lob) > 0, Lobby: lob}
 		if !snap.Locked && liveNow {
 			snap.Locked, err = repo.Knocked(r.Context(), id)
 			if err != nil {
@@ -370,4 +370,4 @@ func (s *Server) guestToken(ctx context.Context, g store.Guest) (tokenAnswer, bo
 
 // guestLabel is how a guest is named to everyone: what they typed, then
 // "(guest)" (design: "shown … with "(guest)" after it").
-func guestLabel(name string) string { return strings.TrimSpace(name) + " (guest)" }
+func guestLabel(name string) string { return strings.TrimSpace(name) + guestSuffix }

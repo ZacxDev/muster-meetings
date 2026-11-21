@@ -66,7 +66,7 @@ func (s *Server) handleGuestPage(w http.ResponseWriter, r *http.Request) {
 		s.renderGuest(w, http.StatusInternalServerError, guestPage{Message: "Something went wrong. Try again in a moment."})
 		return
 	}
-	s.renderGuest(w, http.StatusOK, guestPage{OwnerName: g.OwnerName, Notice: lobby.NoticeFor(g.Notice.Record, g.Notice.AI)})
+	s.renderGuest(w, http.StatusOK, guestPage{OwnerName: g.OwnerName, Notice: s.noticeFor(g.Notice.Record, g.Notice.AI)})
 }
 
 // guestErr answers a guest route's refusal as JSON.
@@ -85,9 +85,9 @@ func noQuery(w http.ResponseWriter, r *http.Request) bool {
 }
 
 // handleKnock stores a knock: the guest's name, checked (lobby.CleanName),
-// and the notice the page showed them, which must be the meeting's current
-// one (409 with the current notice otherwise, and the page shows it again
-// before the guest may knock). Limits: 10 knocks per source address per 10
+// and the notice the page showed them ({"record", "ai", "transcribed"}),
+// which must be the meeting's current one (409 with the current notice
+// otherwise, and the page shows it again before the guest may knock). Limits: 10 knocks per source address per 10
 // minutes, 20 waiting per meeting; past either 429. It answers the ticket,
 // which the page keeps in memory.
 func (s *Server) handleKnock(w http.ResponseWriter, r *http.Request) {
@@ -98,8 +98,9 @@ func (s *Server) handleKnock(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Name   string `json:"name"`
 		Notice *struct {
-			Record *bool `json:"record"`
-			AI     *bool `json:"ai"`
+			Record      *bool `json:"record"`
+			AI          *bool `json:"ai"`
+			Transcribed *bool `json:"transcribed"`
 		} `json:"notice"`
 	}
 	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 2048))
@@ -109,7 +110,8 @@ func (s *Server) handleKnock(w http.ResponseWriter, r *http.Request) {
 	}
 	now := s.cfg.Now()
 	// The meeting first: a dead link says so whatever else is wrong.
-	if _, err := s.store.MeetingByCode(r.Context(), code, now); err != nil {
+	gm, err := s.store.MeetingByCode(r.Context(), code, now)
+	if err != nil {
 		s.guestMeetingErr(w, err)
 		return
 	}
@@ -123,12 +125,20 @@ func (s *Server) handleKnock(w http.ResponseWriter, r *http.Request) {
 		guestErr(w, http.StatusTooManyRequests, GuestTooMany)
 		return
 	}
+	// 🔴 Whether the meeting is transcribed is part of the notice: a page
+	// that showed another answer (or none: a page from before it was) is
+	// the same 409 as a switch that changed, with the current notice.
+	if in.Notice.Transcribed == nil || *in.Notice.Transcribed != s.Transcribing() {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "The meeting's notice changed. Read it again before you ask to join.",
+			"notice": s.noticeFor(gm.Notice.Record, gm.Notice.AI)})
+		return
+	}
 	k, err := s.store.Knock(r.Context(), code, name, store.Notice{Record: *in.Notice.Record, AI: *in.Notice.AI}, now)
 	var mismatch *store.NoticeMismatch
 	switch {
 	case errors.As(err, &mismatch):
 		writeJSON(w, http.StatusConflict, map[string]any{"error": "The meeting's notice changed. Read it again before you ask to join.",
-			"notice": lobby.NoticeFor(mismatch.Current.Record, mismatch.Current.AI)})
+			"notice": s.noticeFor(mismatch.Current.Record, mismatch.Current.AI)})
 		return
 	case errors.Is(err, store.ErrLobbyFull):
 		w.Header().Set("Retry-After", "60")
@@ -241,7 +251,7 @@ func (s *Server) handleWait(w http.ResponseWriter, r *http.Request) {
 			return true, sse(w, f, "admitted", tok)
 		}
 		if cur.State == store.StWaiting {
-			n := lobby.NoticeFor(cur.Notice.Record, cur.Notice.AI)
+			n := s.noticeFor(cur.Notice.Record, cur.Notice.AI)
 			if b, _ := json.Marshal(n); string(b) != lastNotice {
 				lastNotice = string(b)
 				return false, sse(w, f, "waiting", map[string]any{"notice": n})
@@ -307,7 +317,7 @@ func (s *Server) handleGuestEvents(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		snap := map[string]any{"notice": lobby.NoticeFor(cur.Notice.Record, cur.Notice.AI)}
+		snap := map[string]any{"notice": s.noticeFor(cur.Notice.Record, cur.Notice.AI)}
 		if b, _ := json.Marshal(snap); string(b) != last {
 			last = string(b)
 			if err := sse(w, f, "meeting", snap); err != nil {

@@ -8,7 +8,8 @@
   if (!root) return;
   var $ = function (id) { return document.getElementById(id); };
   var base = location.pathname.replace(/\/+$/, '');
-  var shown = { record: root.getAttribute('data-record') === 'true', ai: root.getAttribute('data-ai') === 'true' };
+  var shown = { record: root.getAttribute('data-record') === 'true', ai: root.getAttribute('data-ai') === 'true',
+    transcribed: root.getAttribute('data-transcribed') === 'true' };
   var ticket = null;
   var preview = null; // the camera preview's stream
   var conn = null;
@@ -26,7 +27,7 @@
       p.textContent = t;
       box.appendChild(p);
     });
-    shown = { record: !!n.record, ai: !!n.ai };
+    shown = { record: !!n.record, ai: !!n.ai, transcribed: !!n.transcribed };
   }
 
   function post(path, body, signal) {

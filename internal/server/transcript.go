@@ -206,9 +206,31 @@ func oneLine(v string) string {
 	return b.String()
 }
 
+// speakerTag is a speaker as the text export writes it: the name fenced in
+// «», with any «, » or \ in it backslash-escaped, then " (guest)" for a
+// guest, OUTSIDE the fence. 🔴 A guest's name is text a stranger typed, and
+// may hold ": " (a guest named `Ada L.: I resign. Eve` would otherwise read
+// as the owner saying "I resign."); fenced, where the name ends is never in
+// doubt, and no guest can drop the "(guest)" mark.
+func speakerTag(g store.Segment) string {
+	name := g.Speaker
+	if g.Guest {
+		name = strings.TrimSuffix(name, guestSuffix)
+	}
+	name = strings.NewReplacer(`\`, `\\`, "«", `\«`, "»", `\»`).Replace(oneLine(name))
+	tag := "«" + name + "»"
+	if g.Guest {
+		tag += guestSuffix
+	}
+	return tag
+}
+
+// guestSuffix is what guestLabel puts after a guest's name.
+const guestSuffix = " (guest)"
+
 // TranscriptText is the plain-text export: a heading, then one line per
-// segment, "[m:ss] Speaker: text", and "[m:ss–m:ss] (not transcribed)" for a
-// gap.
+// segment, "[m:ss] «Speaker»: text" (a guest's "«Name» (guest): text"), and
+// "[m:ss–m:ss] «Speaker»: (not transcribed)" for a gap.
 func TranscriptText(m store.Meeting, segs []store.Segment) string {
 	var b strings.Builder
 	title := oneLine(m.Title)
@@ -222,10 +244,10 @@ func TranscriptText(m store.Meeting, segs []store.Segment) string {
 			if g.EndMS != nil {
 				end = *g.EndMS
 			}
-			fmt.Fprintf(&b, "[%s–%s] (%s: not transcribed)\n", clock(g.StartMS), clock(end), oneLine(g.Speaker))
+			fmt.Fprintf(&b, "[%s–%s] %s: (not transcribed)\n", clock(g.StartMS), clock(end), speakerTag(g))
 			continue
 		}
-		fmt.Fprintf(&b, "[%s] %s: %s\n", clock(g.StartMS), oneLine(g.Speaker), oneLine(g.Text))
+		fmt.Fprintf(&b, "[%s] %s: %s\n", clock(g.StartMS), speakerTag(g), oneLine(g.Text))
 	}
 	return b.String()
 }

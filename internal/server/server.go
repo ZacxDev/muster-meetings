@@ -118,6 +118,9 @@ type Config struct {
 	// EgressBackoff is the wait before each retry of a refused track egress
 	// start; default DefaultEgressBackoff.
 	EgressBackoff []time.Duration
+	// After is the timer the egress start and restart waits use; default
+	// time.After (a test records the waits).
+	After func(time.Duration) <-chan time.Time
 }
 
 // Server is the plugin's public handler.

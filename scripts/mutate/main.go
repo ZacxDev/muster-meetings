@@ -473,8 +473,8 @@ var mutants = []mutant{
 		pkg: "./internal/store", test: "TestASwitchGoesBackOnOnlyBeforeAnyGuestKnocked", want: "want ErrSwitchLocked"},
 	{name: "consent: Record defaults off", file: repo, from: "SELECT ?, ?, ?, ?, 'open', 1, 1, ?", to: "SELECT ?, ?, ?, ?, 'open', 0, 1, ?",
 		pkg: "./internal/store", test: "TestASwitchGoesBackOnOnlyBeforeAnyGuestKnocked", want: "a new meeting: record false, ai true; want both on"},
-	{name: "notice is current: the guest stream keeps the notice it opened with", file: guest, from: `snap := map[string]any{"notice": lobby.NoticeFor(cur.Notice.Record, cur.Notice.AI)}`,
-		to:  `snap := map[string]any{"notice": lobby.NoticeFor(g.Notice.Record, g.Notice.AI)}`,
+	{name: "notice is current: the guest stream keeps the notice it opened with", file: guest, from: `snap := map[string]any{"notice": s.noticeFor(cur.Notice.Record, cur.Notice.AI)}`,
+		to:  `snap := map[string]any{"notice": s.noticeFor(g.Notice.Record, g.Notice.AI)}`,
 		pkg: "./internal/server", test: "TestTheAdmittedGuestSeesTheCurrentNotice", want: `no "meeting" event (the stream so far: "event: token`},
 
 	// ---- 🔴 the guest name ----
@@ -707,9 +707,9 @@ var mutants = []mutant{
 		pkg: "./internal/server", test: "TestARefusedStartIsRetriedAndADeadEgressIsReplacedWithAGapUntilAudioFlows", want: "not within"},
 	{name: "egress retry: no gap marker while refused", file: trans, from: "// flows: a gap marker says so.\n\t\tif err := s.store.OpenGap(ctx, track,", to: "// flows: a gap marker says so.\n\t\tif err := s.store.OpenGap(ctx, \"TR_none\",",
 		pkg: "./internal/server", test: "TestARefusedStartIsRetriedAndADeadEgressIsReplacedWithAGapUntilAudioFlows", want: `no "segment" event`},
-	{name: "egress restart: no gap marker for a dead egress", file: trans, from: "starting a new one\", info.Status)\n\tif err := s.store.OpenGap(ctx, t.Track,", to: "starting a new one\", info.Status)\n\tif err := s.store.OpenGap(ctx, \"TR_none\",",
+	{name: "egress restart: no gap marker for a dead egress", file: trans, from: "starting a new one in %s\", info.Status, wait)\n\tif err := s.store.OpenGap(ctx, t.Track,", to: "starting a new one in %s\", info.Status, wait)\n\tif err := s.store.OpenGap(ctx, \"TR_none\",",
 		pkg: "./internal/server", test: "TestARefusedStartIsRetriedAndADeadEgressIsReplacedWithAGapUntilAudioFlows", want: `no "segment" event`},
-	{name: "gap: never closed when audio flows", file: trans, from: "if closed, _ := s.store.CloseGap(ctx, t.Track, b); closed {", to: "if closed := false; closed {",
+	{name: "gap: never closed when audio flows", file: trans, from: "s.store.CloseGap(ctx, t.Track, b)\n", to: "_ = b\n",
 		pkg: "./internal/server", test: "TestARefusedStartIsRetriedAndADeadEgressIsReplacedWithAGapUntilAudioFlows", want: "no \"segment\" event"},
 
 	// ---- 3a: whose audio, and who sees the lines ----
@@ -726,10 +726,26 @@ var mutants = []mutant{
 		pkg:  "./internal/server", test: "TestTheTranscriptIsTheOwnersAlone", want: "another person"},
 	{name: "panel: a line's text parsed as HTML", file: callJS, from: "text.textContent = g.text;", to: "text.innerHTML = g.text;",
 		pkg: "./internal/server", test: "TestTheAppPageCarriesNoInlineScript", want: "uses innerHTML"},
-	{name: "export: a guest's newline starts a line (txt)", file: tscript, from: "oneLine(g.Speaker), oneLine(g.Text))", to: "oneLine(g.Speaker), g.Text)",
+	{name: "export: a guest's newline starts a line (txt)", file: tscript, from: "speakerTag(g), oneLine(g.Text))", to: "speakerTag(g), g.Text)",
 		pkg: "./internal/server", test: "TestTheExportsFenceGuestSpeech", want: "txt ="},
 	{name: "export: WebVTT markup not escaped", file: tscript, from: `strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(oneLine(v))`, to: "oneLine(v)",
 		pkg: "./internal/server", test: "TestTheExportsFenceGuestSpeech", want: "vtt ="},
+
+	// ---- 3a round 1: restart backoff, the speaker's fence, the notice ----
+	{name: "egress restart: no backoff", file: trans, from: "s.startEgressAfter(t.Track, wait)", to: "s.startEgressAfter(t.Track, 0)",
+		pkg: "./internal/server", test: "TestADyingEgressIsRestartedOnTheBackoffAndAHealthyStreamResetsIt", want: "the restarts waited"},
+	{name: "egress restart: the backoff never resets", file: trans, from: "s.tr.restarts[track] = 0\n", to: "_ = at\n",
+		pkg: "./internal/server", test: "TestADyingEgressIsRestartedOnTheBackoffAndAHealthyStreamResetsIt", want: "the restarts waited"},
+	{name: "egress restart: any stream resets the backoff", file: trans, from: "ok && s.cfg.Now().Sub(at) >= HealthyStream {", to: "ok && !at.IsZero() {",
+		pkg: "./internal/server", test: "TestADyingEgressIsRestartedOnTheBackoffAndAHealthyStreamResetsIt", want: "the restarts waited"},
+	{name: "export: the speaker's name unfenced (txt)", file: tscript, from: `tag := "«" + name + "»"`, to: `tag := name`,
+		pkg: "./internal/server", test: "TestTheExportsFenceGuestSpeech", want: "txt ="},
+	{name: "export: a fence mark in a name not escaped (txt)", file: tscript, from: "name = strings.NewReplacer(`\\`, `\\\\`, \"«\", `\\«`, \"»\", `\\»`).Replace(oneLine(name))", to: "name = oneLine(name)",
+		pkg: "./internal/server", test: "TestTheExportsFenceGuestSpeech", want: "txt ="},
+	{name: "notice: transcribed without an engine", file: trans, from: "return lobby.NoticeWith(record, ai, s.Transcribing())", to: "return lobby.NoticeFor(record, ai)",
+		pkg: "./internal/server", test: "TestTheNoticeSaysTranscribedOnlyWithAnEngine", want: "engine false"},
+	{name: "notice: a knock's transcribed answer not checked", file: guest, from: "if in.Notice.Transcribed == nil || *in.Notice.Transcribed != s.Transcribing() {", to: "if false {",
+		pkg: "./internal/server", test: "TestTheNoticeSaysTranscribedOnlyWithAnEngine", want: "want 409 with the current notice"},
 
 	// ---- 3a: the engines ----
 	{name: "utterance: no in-flight cap", file: utt, from: "sem: make(chan struct{}, MaxInFlight)", to: "sem: make(chan struct{}, 64)",

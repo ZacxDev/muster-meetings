@@ -15,7 +15,7 @@
   <p id="message">{{.Message}}</p>
 </main>
 {{- else}}
-<main id="guest" data-state="start" data-owner="{{.OwnerName}}" data-record="{{.Notice.Record}}" data-ai="{{.Notice.AI}}">
+<main id="guest" data-state="start" data-owner="{{.OwnerName}}" data-record="{{.Notice.Record}}" data-ai="{{.Notice.AI}}" data-transcribed="{{.Notice.Transcribed}}">
   <section id="join-view" class="join">
     <h1 id="whose">{{if .OwnerName}}{{.OwnerName}}’s meeting{{else}}Join the meeting{{end}}</h1>
     <div id="notice" class="notice-box" role="note">

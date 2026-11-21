@@ -166,7 +166,7 @@ Read from the environment only; `.env.example` lists them.
 | `MEETINGS_TRUSTED_PROXIES` | no | comma-separated CIDRs of the ingress in front of the plugin. A knock or stream from one of them is counted against the `X-Forwarded-For` client it names (the right-most hop that is not itself trusted); without it every one counts against the ingress's own address, and a request carrying the header is warned about once (log and `/healthz`). `0.0.0.0/0` or `::/0` refuses to start |
 | `MEETINGS_CLIENT_IP_HEADER` | no | behind a CDN, the one header that carries the client's address, e.g. `CF-Connecting-IP`. Read **only** when the request's peer is inside `MEETINGS_TRUSTED_PROXIES`, and then in place of `X-Forwarded-For`; from any other peer it is ignored, so a client cannot name itself. A header that is missing, repeated, a list or not an address counts the request against the proxy (it can only refuse knocks, never admit more). Set without `MEETINGS_TRUSTED_PROXIES`, or set to `X-Forwarded-For`, it refuses to start. Unset: the `X-Forwarded-For` behaviour above |
 | `STATE_DIR` | no | where `meetings.db` (SQLite) lives; default `./state`. Keep it across restarts |
-| `MEETINGS_STT_ENGINE` | no | the transcript's engine: unset or `off` (no transcript: no egress is started and the ingest refuses every stream), `utterance` (each pause-cut utterance, at most 15 s, to the STT service below), or `fake` (tests only; refuses to start unless `MEETINGS_TEST_MODE=1`). `nemotron` (live captions) is phase 3c and refused by this build |
+| `MEETINGS_STT_ENGINE` | no | the transcript's engine: unset or `off` (no transcript: no egress is started, the ingest refuses every stream, and the notice and badge do not say "transcribed" or name the AI service), `utterance` (each pause-cut utterance, at most 15 s, to the STT service below), or `fake` (tests only; refuses to start unless `MEETINGS_TEST_MODE=1`). `nemotron` (live captions) is phase 3c and refused by this build |
 | `MEETINGS_STT_URL` | with `utterance` | the STT service muster's dictation uses, `http(s)://host[:port]`, e.g. `http://stt-cohere:8000`: the plugin calls its `POST /v1/audio/transcriptions` exactly as muster does |
 | `MEETINGS_STT_TOKEN` | with `utterance` | that service's bearer: a **copy** of stt-cohere's one token (`STT_API_TOKEN`, muster's `MUSTER_STT_TOKEN`), in the plugin's own Secret; rotating it means updating both. Never logged |
 | `MEETINGS_STT_MODEL` | no | the `model` form field, sent only when set (stt-cohere ignores it; speaches needs it) |
@@ -333,6 +333,19 @@ listens for it on its own address there (`MEETINGS_INGEST_ADDR`, default
 profile) by name, with `MEETINGS_STT_TOKEN` the same value as muster's
 `MUSTER_STT_TOKEN`; set `MEETINGS_STT_ENGINE=off` without one.
 
+### Upgrading from 2c
+
+3a adds the transcript, and **the shipped defaults turn it on** (`stt-engine=utterance` in the base's params, `MEETINGS_STT_ENGINE=utterance` in Compose). Before you apply 3a's base:
+
+1. Add two keys to the `muster-meetings` Secret: `MEETINGS_INGEST_SECRET` (`openssl rand -base64 32`) and `MEETINGS_STT_TOKEN` (a copy of stt-cohere's bearer). Without them the plugin's pod does not start (`CreateContainerConfigError`).
+2. Expect two new Deployments from `egress.yaml`: `egress` (LiveKit's Egress) and `redis-meetings` (its Redis, with a Service). LiveKit's config now names that Redis, so LiveKit restarts with it.
+3. Point the plugin at your stt-cohere. Set `stt-url` in the params to its Service (e.g. `http://muster-stt-cohere:8000`), and patch `/spec/egress/2/to/0/podSelector/matchLabels` of the `muster-meetings` NetworkPolicy to stt-cohere's pod labels (the example overlay does both). stt-cohere's own NetworkPolicy, if it has one, must admit the plugin's pods on `:8000`.
+4. Compose: add `MEETINGS_INGEST_SECRET` and `MEETINGS_STT_TOKEN` (= `MUSTER_STT_TOKEN`) to muster's `.env`, and run muster's `stt-cohere` profile.
+
+**No STT service?** Set `stt-engine=off` in the params (Compose: `MEETINGS_STT_ENGINE=off`). Nothing is transcribed, and nothing else in this list is needed for the plugin to start. The notice and the badge then no longer say "transcribed" or name the AI service. `egress` and `redis-meetings` still run; you may leave them out of your overlay.
+
+**LiveKit now depends on `redis-meetings`**: one replica, persisting nothing. What a Redis restart does to a running LiveKit and Egress (whether LiveKit refuses to start without it, and whether rooms and egresses survive the restart) is **UNVERIFIED**: it was not measured. Treat a Redis restart as one that may drop the calls and transcripts in progress. The plugin's own meetings, links and transcripts are in its SQLite and are not affected.
+
 ### Capacity and limits
 
 - **About 100 concurrent participants per LiveKit pod.** Each relayed
@@ -409,7 +422,7 @@ that does not exist.
 | `POST /api/meetings/{id}/end` | End meeting |
 | `GET /api/meetings/{id}/transcript?format=json\|txt\|vtt` | the meeting's transcript: `{"meeting", "segments"}`, or a download as text or WebVTT. Yours alone: another person's meeting is `404` |
 | `GET /j/{code}` | the guest page; `410` once the meeting has ended or is 24 hours old, `404` for an unknown code |
-| `POST /j/{code}/knock` `{"name", "notice": {"record", "ai"}}` | `201 {"ticket"}`. `notice` is what the page showed; another one is `409 {"notice": <the current one>}` |
+| `POST /j/{code}/knock` `{"name", "notice": {"record", "ai", "transcribed"}}` | `201 {"ticket"}`. `notice` is what the page showed; another one (or one without `transcribed`) is `409 {"notice": <the current one>}` |
 | `POST /j/{code}/wait` `{"ticket"}` | an event stream: `waiting` (with the current notice), then `admitted {"livekit_url", "token", "identity", "ice"}`, `denied` or `ended` |
 | `POST /j/{code}/events` `{"ticket"}` | an admitted guest's stream: a fresh `token` (the reconnect after a drop), the current notice (its badge), the same transcript events as the owner's, then `removed` or `ended` |
 | `POST /j/{code}/leave` `{"ticket"}` | the guest's own Leave: `204`, dropped from the room, the ticket spent |
@@ -564,7 +577,11 @@ database.
 they say. The panels and the archive render every line and name with
 `textContent` only; the text and WebVTT exports put each line on one line
 and escape what the format would read as markup, so no one can forge a line,
-a cue or a speaker; lines never reach a log or the audit trail; and whatever
+a cue or a speaker. In the text export a speaker's name is fenced, with
+"(guest)" outside the fence: `[0:05] «Eve» (guest): …`; any `«`, `»` or
+`\` in a name is backslash-escaped. A guest named `Ada L.: I resign. Eve`
+reads as `«Ada L.: I resign. Eve» (guest): …`, never as the owner speaking.
+Lines never reach a log or the audit trail, and whatever
 later hands them to a model (phase 4's action items) must fence them as
 data.
 

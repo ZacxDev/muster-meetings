@@ -11,6 +11,7 @@ import (
 
 	"github.com/ZacxDev/muster-meetings/internal/ingest"
 	"github.com/ZacxDev/muster-meetings/internal/livekit"
+	"github.com/ZacxDev/muster-meetings/internal/lobby"
 	"github.com/ZacxDev/muster-meetings/internal/store"
 	"github.com/ZacxDev/muster-meetings/internal/stt"
 )
@@ -56,8 +57,16 @@ type transcriber struct {
 	partials map[string]map[string]partial // meeting → track → the partial
 	paused   map[string]bool               // track → the engine dropped audio, until its next final
 	meetings map[string]string             // track → meeting, for paused
+	// restarts counts a track's egress restarts since its last healthy
+	// stretch; audioAt is when its current stream's audio began.
+	restarts map[string]int
+	audioAt  map[string]time.Time
 	textOnce atomic.Bool
 }
+
+// HealthyStream is how long a track's stream must have carried audio for
+// its egress-restart backoff to start again from the first step.
+const HealthyStream = 60 * time.Second
 
 type run struct{ cancel context.CancelFunc }
 
@@ -69,11 +78,19 @@ type partial struct {
 
 func newTranscriber() *transcriber {
 	return &transcriber{runs: map[string]*run{}, conns: map[string]*ingest.Conn{},
-		partials: map[string]map[string]partial{}, paused: map[string]bool{}, meetings: map[string]string{}}
+		partials: map[string]map[string]partial{}, paused: map[string]bool{}, meetings: map[string]string{},
+		restarts: map[string]int{}, audioAt: map[string]time.Time{}}
 }
 
 // Transcribing says the plugin has an engine.
 func (s *Server) Transcribing() bool { return s.cfg.Engine != nil }
+
+// noticeFor is the consent notice for a meeting's switches on this plugin:
+// the "transcribed" clause and the Transcribing badge only while it has an
+// engine (lobby.NoticeWith). Every page and stream takes its notice here.
+func (s *Server) noticeFor(record, ai bool) lobby.Notice {
+	return lobby.NoticeWith(record, ai, s.Transcribing())
+}
 
 // sinceStart is now in meeting time (ms from start), never negative.
 func (s *Server) sinceStart(start time.Time) int64 {
@@ -135,6 +152,7 @@ func (s *Server) onTrackUnpublished(ctx context.Context, tr livekit.TrackInfo) {
 		return
 	}
 	s.cancelRun(t.Track)
+	s.forgetTrack(t.MeetingID, t.Track)
 	if err := s.store.EndTrack(ctx, t.Track); err != nil {
 		s.cfg.Log.Printf("transcript: ending a track: %v", err)
 	}
@@ -148,6 +166,11 @@ func (s *Server) onTrackUnpublished(ctx context.Context, tr livekit.TrackInfo) {
 // egress whose track is still published and whose meeting is live is a gap
 // until a new one streams. An egress that is not a track's CURRENT one (an
 // older one, or not the plugin's) changes nothing.
+//
+// 🔴 A restart waits on the same backoff as a refused start (1, 2, 4 … 30 s),
+// counted per track, so an egress that keeps dying is not restarted in a
+// tight loop. The count starts again once a stream has carried audio for
+// HealthyStream.
 func (s *Server) onEgressEnded(ctx context.Context, info livekit.EgressInfo) {
 	if !s.Transcribing() {
 		return
@@ -156,11 +179,53 @@ func (s *Server) onEgressEnded(ctx context.Context, info livekit.EgressInfo) {
 	if err != nil || t.State != store.TrackActive || !t.MeetingLive {
 		return
 	}
-	s.cfg.Log.Printf("transcript: a track's egress ended (%s); starting a new one", info.Status)
+	wait := s.restartWait(t.Track)
+	s.cfg.Log.Printf("transcript: a track's egress ended (%s); starting a new one in %s", info.Status, wait)
 	if err := s.store.OpenGap(ctx, t.Track, s.sinceStart(t.MeetingStart), s.cfg.Engine.Name()); err == nil {
 		s.hub.Changed(t.MeetingID)
 	}
-	s.startEgress(t.Track)
+	s.startEgressAfter(t.Track, wait)
+}
+
+// restartWait is how long track's next egress restart waits: the backoff's
+// step for the restarts since its last healthy stretch (a stream that
+// carried audio for HealthyStream resets the count).
+func (s *Server) restartWait(track string) time.Duration {
+	s.tr.mu.Lock()
+	defer s.tr.mu.Unlock()
+	if at, ok := s.tr.audioAt[track]; ok && s.cfg.Now().Sub(at) >= HealthyStream {
+		s.tr.restarts[track] = 0
+	}
+	delete(s.tr.audioAt, track)
+	n := s.tr.restarts[track]
+	s.tr.restarts[track] = n + 1
+	b := s.cfg.EgressBackoff
+	return b[min(n, len(b)-1)]
+}
+
+// forgetTrack drops the in-memory state of a track that is no longer
+// transcribed, and the meeting's partials map once it is empty.
+func (s *Server) forgetTrack(meetingID, track string) {
+	s.tr.mu.Lock()
+	defer s.tr.mu.Unlock()
+	delete(s.tr.paused, track)
+	delete(s.tr.meetings, track)
+	delete(s.tr.restarts, track)
+	delete(s.tr.audioAt, track)
+	if m := s.tr.partials[meetingID]; m != nil {
+		delete(m, track)
+		if len(m) == 0 {
+			delete(s.tr.partials, meetingID)
+		}
+	}
+}
+
+// after is the clock's timer (Config.After, else time.After).
+func (s *Server) after(d time.Duration) <-chan time.Time {
+	if s.cfg.After != nil {
+		return s.cfg.After(d)
+	}
+	return time.After(d)
 }
 
 // ---- starting a track egress ----
@@ -175,7 +240,10 @@ func (s *Server) cancelRun(track string) {
 }
 
 // startEgress runs track's start loop, replacing one already running.
-func (s *Server) startEgress(track string) {
+func (s *Server) startEgress(track string) { s.startEgressAfter(track, 0) }
+
+// startEgressAfter is startEgress after a wait (cancelled with the loop).
+func (s *Server) startEgressAfter(track string, wait time.Duration) {
 	ctx, cancel := context.WithCancel(s.bg)
 	me := &run{cancel: cancel}
 	s.tr.mu.Lock()
@@ -185,7 +253,15 @@ func (s *Server) startEgress(track string) {
 	s.tr.runs[track] = me
 	s.tr.mu.Unlock()
 	go func() {
-		s.egressLoop(ctx, track)
+		if wait > 0 {
+			select {
+			case <-ctx.Done():
+			case <-s.after(wait):
+			}
+		}
+		if ctx.Err() == nil {
+			s.egressLoop(ctx, track)
+		}
 		cancel()
 		s.tr.mu.Lock()
 		// Only this loop's own entry is removed: a newer loop may have
@@ -245,7 +321,7 @@ func (s *Server) egressLoop(ctx context.Context, track string) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(wait):
+		case <-s.after(wait):
 		}
 	}
 }
@@ -282,6 +358,7 @@ func (s *Server) stopTranscription(ctx context.Context, meetingID string) {
 	for _, t := range ts {
 		s.cancelRun(t.Track)
 		s.closeConn(t.Track, ingest.CloseNormal, "the meeting ended")
+		s.forgetTrack(meetingID, t.Track)
 		if t.EgressID != "" {
 			if err := s.cfg.LiveKit.StopEgress(ctx, t.EgressID); err != nil {
 				s.cfg.Log.Printf("transcript: stopping an egress: %s", lkKind(err))
@@ -402,8 +479,16 @@ func (s *Server) serveIngest(conn *ingest.Conn, t store.Track) {
 		}
 		if m := s.tr.partials[t.MeetingID]; m != nil {
 			delete(m, t.Track)
+			if len(m) == 0 {
+				delete(s.tr.partials, t.MeetingID)
+			}
 		}
 		s.tr.mu.Unlock()
+		// The track or its meeting is over (not merely this egress
+		// replaced): nothing of it is kept in memory.
+		if cur, err := s.store.TrackByID(context.Background(), t.Track, s.cfg.Now()); err != nil || cur.State != store.TrackActive || !cur.MeetingLive {
+			s.forgetTrack(t.MeetingID, t.Track)
+		}
 		s.hub.Changed(t.MeetingID)
 		conn.Close(ingest.CloseNormal, "")
 	}()
@@ -447,6 +532,7 @@ func (s *Server) serveIngest(conn *ingest.Conn, t store.Track) {
 	}()
 
 	dec := ingest.NewDecoder()
+read:
 	for {
 		msg, err := conn.ReadMessage()
 		if err != nil {
@@ -461,9 +547,14 @@ func (s *Server) serveIngest(conn *ingest.Conn, t store.Track) {
 		if base.Load() < 0 {
 			b := s.sinceStart(t.MeetingStart)
 			base.Store(b)
-			if closed, _ := s.store.CloseGap(ctx, t.Track, b); closed {
-				s.hub.Changed(t.MeetingID)
-			}
+			// Audio flows again: the gap closes, the panel's "Transcript
+			// paused" clears, and the stream's healthy stretch starts.
+			s.tr.mu.Lock()
+			delete(s.tr.paused, t.Track)
+			s.tr.audioAt[t.Track] = s.cfg.Now()
+			s.tr.mu.Unlock()
+			s.store.CloseGap(ctx, t.Track, b)
+			s.hub.Changed(t.MeetingID)
 		}
 		chunks, err := dec.Push(msg.Data)
 		if err != nil {
@@ -473,7 +564,9 @@ func (s *Server) serveIngest(conn *ingest.Conn, t store.Track) {
 		}
 		for _, c := range chunks {
 			if err := stream.Write(c); err != nil {
-				break
+				// The engine's stream is over: stop reading this one.
+				conn.Close(ingest.CloseGoingAway, "the transcription stream ended")
+				break read
 			}
 		}
 	}

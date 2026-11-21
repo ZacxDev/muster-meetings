@@ -235,7 +235,9 @@ const (
 type Segment struct {
 	ID      int64  `json:"id"`
 	Speaker string `json:"speaker"` // a name: render as text only
-	Kind    string `json:"kind"`    // text, gap
+	// Guest says the speaker is a guest (Speaker then ends in " (guest)").
+	Guest   bool   `json:"guest"`
+	Kind    string `json:"kind"` // text, gap
 	StartMS int64  `json:"start_ms"`
 	// EndMS is null for a gap still open.
 	EndMS *int64 `json:"end_ms"`
@@ -263,7 +265,7 @@ func (s *Store) AddSegment(ctx context.Context, track, kind string, startMS, end
 	return r.LastInsertId()
 }
 
-const segCols = `s.id, s.speaker, s.kind, s.start_ms, s.end_ms, s.text`
+const segCols = `s.id, s.speaker, s.identity != '` + OwnerIdentity + `', s.kind, s.start_ms, s.end_ms, s.text`
 
 func scanSegments(rows *sql.Rows) ([]Segment, error) {
 	defer rows.Close()
@@ -271,7 +273,7 @@ func scanSegments(rows *sql.Rows) ([]Segment, error) {
 	for rows.Next() {
 		var g Segment
 		var end sql.NullInt64
-		if err := rows.Scan(&g.ID, &g.Speaker, &g.Kind, &g.StartMS, &end, &g.Text); err != nil {
+		if err := rows.Scan(&g.ID, &g.Speaker, &g.Guest, &g.Kind, &g.StartMS, &end, &g.Text); err != nil {
 			return nil, err
 		}
 		if end.Valid {

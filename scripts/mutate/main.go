@@ -734,7 +734,7 @@ var mutants = []mutant{
 	// ---- 3a: the engines ----
 	{name: "utterance: no in-flight cap", file: utt, from: "sem: make(chan struct{}, MaxInFlight)", to: "sem: make(chan struct{}, 64)",
 		pkg: "./internal/stt", test: "TestAtMostFourUtterancesAreInFlight", want: "want exactly 4"},
-	{name: "utterance: a full queue never drops", file: utt, from: "s.queued+int64(len(u.PCM)) > limit", to: "false",
+	{name: "utterance: a full queue never drops", file: utt, from: "s.queued+int64(len(u.PCM)) > limit", to: "s.queued+int64(len(u.PCM)) > limit*100",
 		pkg: "./internal/stt", test: "TestAFullQueueDropsTheOldestWithAGapMarker", want: `want "final gap final final final"`},
 	{name: "vad: no DC removal", file: vad, from: "y := x - e.px + highPassR*e.py", to: "y := x",
 		pkg: "./internal/stt", test: "TestAPauseEndsTheUtteranceAbout700msIntoTheSilenceEvenWithADCOffset", want: "dc 6000"},

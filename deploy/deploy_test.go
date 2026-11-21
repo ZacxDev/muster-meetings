@@ -412,12 +412,21 @@ func TestKubernetesPlugin(t *testing.T) {
 			t.Errorf("%s = %v, want %q", name, e, want)
 		}
 	}
-	for name, key := range map[string]string{"MEETINGS_INGEST_SECRET": "MEETINGS_INGEST_SECRET", "MEETINGS_STT_TOKEN": "MEETINGS_STT_TOKEN"} {
+	for name, key := range map[string]string{"MEETINGS_INGEST_SECRET": "MEETINGS_INGEST_SECRET", "MEETINGS_STT_TOKEN": "MEETINGS_STT_TOKEN",
+		"MEETINGS_STREAM_STT_TOKEN": "MEETINGS_STREAM_STT_TOKEN"} {
 		if e, _ := envEntry(c, name); dig(e, "valueFrom", "secretKeyRef", "key") != key || dig(e, "value") != nil {
 			t.Errorf("%s = %v, want it from a Secret", name, e)
 		}
 	}
-	for name, key := range map[string]string{"MEETINGS_STT_ENGINE": "stt-engine", "MEETINGS_STT_URL": "stt-url"} {
+	// 🔴 The stream token is optional in the Secret: a deployment from
+	// before phase 3c (no such key) must still boot its utterance engine.
+	// The other two are required.
+	for name, want := range map[string]any{"MEETINGS_STREAM_STT_TOKEN": true, "MEETINGS_STT_TOKEN": nil, "MEETINGS_INGEST_SECRET": nil} {
+		if e, _ := envEntry(c, name); dig(e, "valueFrom", "secretKeyRef", "optional") != want {
+			t.Errorf("%s: secretKeyRef.optional = %v, want %v", name, dig(e, "valueFrom", "secretKeyRef", "optional"), want)
+		}
+	}
+	for name, key := range map[string]string{"MEETINGS_STT_ENGINE": "stt-engine", "MEETINGS_STT_URL": "stt-url", "MEETINGS_STREAM_STT_URL": "stream-stt-url"} {
 		if e, _ := envEntry(c, name); dig(e, "valueFrom", "configMapKeyRef", "key") != key {
 			t.Errorf("%s = %v, want the params ConfigMap's %s", name, e, key)
 		}
@@ -568,7 +577,7 @@ func TestKubernetesNetworkPolicies(t *testing.T) {
 }
 
 // pluginEgress is the plugin's whole egress: muster's pods (its API),
-// LiveKit's API, the STT service and DNS.
+// LiveKit's API, the STT service, DNS, and the Nemotron server (last).
 const pluginEgress = `
 - to: [{podSelector: {matchLabels: {app.kubernetes.io/name: muster}}}]
   ports: [{protocol: TCP, port: 8105}]
@@ -578,6 +587,8 @@ const pluginEgress = `
   ports: [{protocol: TCP, port: 8000}]
 - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}, podSelector: {matchLabels: {k8s-app: kube-dns}}}]
   ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+- to: [{podSelector: {matchLabels: {app.kubernetes.io/name: stt-nemotron}}}]
+  ports: [{protocol: TCP, port: 8000}]
 `
 
 // liveKitEgress is LiveKit's whole egress: the plugin's internal port (the

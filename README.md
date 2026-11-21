@@ -166,9 +166,11 @@ Read from the environment only; `.env.example` lists them.
 | `MEETINGS_TRUSTED_PROXIES` | no | comma-separated CIDRs of the ingress in front of the plugin. A knock or stream from one of them is counted against the `X-Forwarded-For` client it names (the right-most hop that is not itself trusted); without it every one counts against the ingress's own address, and a request carrying the header is warned about once (log and `/healthz`). `0.0.0.0/0` or `::/0` refuses to start |
 | `MEETINGS_CLIENT_IP_HEADER` | no | behind a CDN, the one header that carries the client's address, e.g. `CF-Connecting-IP`. Read **only** when the request's peer is inside `MEETINGS_TRUSTED_PROXIES`, and then in place of `X-Forwarded-For`; from any other peer it is ignored, so a client cannot name itself. A header that is missing, repeated, a list or not an address counts the request against the proxy (it can only refuse knocks, never admit more). Set without `MEETINGS_TRUSTED_PROXIES`, or set to `X-Forwarded-For`, it refuses to start. Unset: the `X-Forwarded-For` behaviour above |
 | `STATE_DIR` | no | where `meetings.db` (SQLite) lives; default `./state`. Keep it across restarts |
-| `MEETINGS_STT_ENGINE` | no | the transcript's engine: unset or `off` (no transcript: no egress is started, the ingest refuses every stream, and the notice and badge do not say "transcribed" or name the AI service), `utterance` (each pause-cut utterance, at most 15 s, to the STT service below), or `fake` (tests only; refuses to start unless `MEETINGS_TEST_MODE=1`). `nemotron` (live captions) is phase 3c and refused by this build |
-| `MEETINGS_STT_URL` | with `utterance` | the STT service muster's dictation uses, `http(s)://host[:port]`, e.g. `http://stt-cohere:8000`: the plugin calls its `POST /v1/audio/transcriptions` exactly as muster does |
-| `MEETINGS_STT_TOKEN` | with `utterance` | that service's bearer: a **copy** of stt-cohere's one token (`STT_API_TOKEN`, muster's `MUSTER_STT_TOKEN`), in the plugin's own Secret; rotating it means updating both. Never logged |
+| `MEETINGS_STT_ENGINE` | no | the transcript's engine: unset or `off` (no transcript: no egress is started, the ingest refuses every stream, and the notice and badge do not say "transcribed" or name the AI service), `utterance` (each pause-cut utterance, at most 15 s, to the STT service below), `nemotron` (live captions from muster's `stt-nemotron` server, falling back per participant to `utterance`; [the transcript](#the-transcript)), or `fake` (tests only; refuses to start unless `MEETINGS_TEST_MODE=1`) |
+| `MEETINGS_STT_URL` | with `utterance` or `nemotron` (its fallback) | the STT service muster's dictation uses, `http(s)://host[:port]`, e.g. `http://stt-cohere:8000`: the plugin calls its `POST /v1/audio/transcriptions` exactly as muster does |
+| `MEETINGS_STT_TOKEN` | with `utterance` or `nemotron` | that service's bearer: a **copy** of stt-cohere's one token (`STT_API_TOKEN`, muster's `MUSTER_STT_TOKEN`), in the plugin's own Secret; rotating it means updating both. Never logged |
+| `MEETINGS_STREAM_STT_URL` | with `nemotron` | the Nemotron server's stream endpoint, `wss://host[:port]/v1/stream` (`ws://` inside the cluster, e.g. `ws://stt-nemotron:8000/v1/stream`; the path may be left off). No user, query or fragment |
+| `MEETINGS_STREAM_STT_TOKEN` | with `nemotron` | the Nemotron server's bearer: a **copy** of `stt-nemotron`'s `STT_API_TOKEN`. Visible ASCII only. Never logged. 🔴 `nemotron` needs **all four** of `MEETINGS_STREAM_STT_URL`, `MEETINGS_STREAM_STT_TOKEN`, `MEETINGS_STT_URL` and `MEETINGS_STT_TOKEN`, or the plugin refuses to boot |
 | `MEETINGS_STT_MODEL` | no | the `model` form field, sent only when set (stt-cohere ignores it; speaches needs it) |
 | `MEETINGS_INGEST_SECRET` | with an engine | 32 or more random bytes, base64 (`openssl rand -base64 32`): the key of every ingest URL's token (below). Never logged |
 | `MEETINGS_INGEST_URL` | with an engine | the ingest listener as **Egress** reaches it, e.g. `ws://muster-meetings:8082`; each track egress streams to `<this>/stt/ingest/<track>/<token>` |
@@ -226,6 +228,7 @@ settings (or give the cluster a pull secret).
 | | `MEETINGS_LINK_KEY` | `openssl rand -base64 32` |
 | | `MEETINGS_INGEST_SECRET` | `openssl rand -base64 32` (the ingest URL tokens' key) |
 | | `MEETINGS_STT_TOKEN` | a copy of stt-cohere's bearer (`STT_API_TOKEN`) |
+| | `MEETINGS_STREAM_STT_TOKEN` | the `nemotron` engine only (optional otherwise): a copy of stt-nemotron's bearer (`STT_API_TOKEN`) |
 | `livekit-keys` | `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | your choice (`livekit-server generate-keys`); the plugin and LiveKit read the same Secret |
 | `meetings-turn-tls` | `tls.crt`, `tls.key` (type `kubernetes.io/tls`) | a **publicly trusted** certificate for the TURN host; browsers refuse TURN/TLS with a self-signed one. Nothing serves port 80 for that name, so issue it with a DNS-01 challenge, and renew it (LiveKit reads it at start: restart LiveKit after a renewal) |
 
@@ -277,7 +280,8 @@ tenant overlay sets every value. `deploy/example-overlay` sets each one with
 - NetworkPolicies: every pod denies by default. The plugin admits `:8080`
   from the ingress controller's namespace, `:8081` from LiveKit alone and
   `:8082` (the ingest) from Egress alone, and reaches muster's pods,
-  LiveKit's `:7880`, stt-cohere's `:8000` and DNS. LiveKit admits `:7880`
+  LiveKit's `:7880`, stt-cohere's `:8000`, DNS and stt-nemotron's `:8000`
+  (the `nemotron` engine's; the last egress rule). LiveKit admits `:7880`
   and `:5349` from anywhere (both come through the NodePort, and both
   authenticate every client) and Egress's media (`7881/tcp`, the ICE range)
   from Egress alone, and reaches the plugin's `:8081`, its Redis, Egress's
@@ -290,13 +294,13 @@ What an overlay sets:
 
 | knob | how |
 |---|---|
-| hostnames, muster's address and origin, trusted proxies, the client-IP header, the transcript | `configMapGenerator` `muster-meetings-params`, `behavior: merge`: `muster-url` (`http://<muster svc>.<ns>.svc.cluster.local.:<port>`, the trailing dot included), `cluster-domain`, `muster-origin`, `public-url`, `livekit-url`, `turn-domain`, `trusted-proxies`, `client-ip-header`, `stt-engine` (`utterance`, or `off`), `stt-url` (stt-cohere's Service) |
+| hostnames, muster's address and origin, trusted proxies, the client-IP header, the transcript | `configMapGenerator` `muster-meetings-params`, `behavior: merge`: `muster-url` (`http://<muster svc>.<ns>.svc.cluster.local.:<port>`, the trailing dot included), `cluster-domain`, `muster-origin`, `public-url`, `livekit-url`, `turn-domain`, `trusted-proxies`, `client-ip-header`, `stt-engine` (`utterance`, `nemotron`, or `off`), `stt-url` (stt-cohere's Service), `stream-stt-url` (stt-nemotron's, `ws://<svc>:8000/v1/stream`; read only by `nemotron`) |
 | namespace | `namespace:` |
 | the plugin's image | `images:` (pin a digest) |
 | NodePorts | a patch on `livekit-nodeport` (`/spec/ports/0/nodePort` signalling, `/spec/ports/1/nodePort` TURN) |
 | the PVC's StorageClass | a patch on `muster-meetings-state` |
 | a Secret's name | a patch on the Deployment's `secretKeyRef` or volume |
-| the ingress controller's namespace, muster's pod labels and port, stt-cohere's pod labels and port | a patch on the `muster-meetings` NetworkPolicy (`/spec/egress/0` muster, `/spec/egress/2` stt-cohere) |
+| the ingress controller's namespace, muster's pod labels and port, stt-cohere's and stt-nemotron's pod labels and port | a patch on the `muster-meetings` NetworkPolicy (`/spec/egress/0` muster, `/spec/egress/2` stt-cohere, `/spec/egress/4` stt-nemotron) |
 | `rtc.node_ip`, if not the pod's address | a patch on `livekit`'s `LIVEKIT_NODE_IP` env entry |
 
 ```sh
@@ -343,6 +347,18 @@ profile) by name, with `MEETINGS_STT_TOKEN` the same value as muster's
 4. Compose: add `MEETINGS_INGEST_SECRET` and `MEETINGS_STT_TOKEN` (= `MUSTER_STT_TOKEN`) to muster's `.env`, and run muster's `stt-cohere` profile.
 
 **No STT service?** Set `stt-engine=off` in the params (Compose: `MEETINGS_STT_ENGINE=off`). Nothing is transcribed, and nothing else in this list is needed for the plugin to start. The notice and the badge then no longer say "transcribed" or name the AI service. `egress` and `redis-meetings` still run; you may leave them out of your overlay.
+
+### Upgrading from 3a
+
+3c adds the `nemotron` engine. **The default engine is unchanged** (`stt-engine=utterance`), so applying 3c's base to a 3a deployment changes nothing it runs: the new `stream-stt-url` param has a default, `MEETINGS_STREAM_STT_TOKEN` is an **optional** key of the Secret (a Secret without it still starts the pod), and the new NetworkPolicy rule (stt-nemotron's `:8000`) is appended **last**, so an overlay's patches by index (`/spec/egress/2` for stt-cohere, `/spec/egress/3` for DNS) keep their targets. To turn live captions on:
+
+1. Run muster's `stt-nemotron` image (its README) beside stt-cohere, with its own `STT_API_TOKEN`.
+2. Add `MEETINGS_STREAM_STT_TOKEN` (a copy of that token) to the `muster-meetings` Secret.
+3. Set `stt-engine=nemotron` and `stream-stt-url` (its Service, `ws://<svc>:8000/v1/stream`) in the params; keep `stt-url` and `MEETINGS_STT_TOKEN`: stt-cohere is the per-participant fallback, and without it the plugin refuses to boot.
+4. Patch `/spec/egress/4/to/0/podSelector/matchLabels` of the `muster-meetings` NetworkPolicy to stt-nemotron's pod labels; its own NetworkPolicy, if any, must admit the plugin's pods on `:8000`.
+5. Size its `STT_MAX_STREAMS` to at least 8 × the meetings you want captioned at once; a participant over it is on the fallback ("Captions delayed"), never queued.
+
+Compose: set `MEETINGS_STT_ENGINE=nemotron`, `MEETINGS_STREAM_STT_URL` and `MEETINGS_STREAM_STT_TOKEN` (this stack runs no stt-nemotron of its own).
 
 **LiveKit now depends on `redis-meetings`**: one replica, persisting nothing. What a Redis restart does to a running LiveKit and Egress (whether LiveKit refuses to start without it, and whether rooms and egresses survive the restart) is **UNVERIFIED**: it was not measured. Treat a Redis restart as one that may drop the calls and transcripts in progress. The plugin's own meetings, links and transcripts are in its SQLite and are not affected.
 
@@ -575,7 +591,37 @@ database.
    utterance, a gap marker is stored and the panel says "Transcript
    paused"; the gap closes when audio flows again. The archive shows where
    text is missing rather than looking complete.
-6. Lines reach the owner's event stream and every **admitted** guest's
+6. **The `nemotron` engine** (live captions; design: "Serving Nemotron").
+   Each microphone track gets one websocket to muster's `stt-nemotron`
+   server (its README is the protocol): every 80 ms chunk, **silence
+   included**, goes as a 2560-byte frame (the server's clock is the samples
+   it received, so a frame left out would move every later time); the
+   endpointer's end of an utterance sends `flush`, and the server answers
+   with that utterance's `final`; when the track ends, the last frame is
+   zero-padded and `end` carries the **true** sample count. The server's
+   `partial`s are the panel's live captions (in italics, replaced by the
+   line when its final comes) and are **never stored**; finals are stored.
+   When Egress itself stops delivering for 20 s (under the server's 30 s
+   idle close), the plugin ends the stream cleanly rather than invent
+   silence, and the next audio opens a new one at its own place in the
+   track. **Per participant, when the server is full or down:** a refusal
+   (`401`, `503`, `503` + `Retry-After`) or a failed connect at open sends
+   that participant to the `utterance` engine at once, and the panel says
+   **"Captions delayed"**; Nemotron is retried after `max(30 s,
+   Retry-After)`, and the participant moves back (the status clears) when a
+   stream opens. A stream that drops after it opened (a cut connection, or
+   an error close such as `bad_frame`, logged by its code) is reconnected up
+   to 3 times, at 1, 2 and 4 s, with a gap marker over the audio no engine
+   took; a reconnect answered `503` goes to the fallback at once. When the
+   fallback is also full, its own caps apply and the panel says
+   **"Transcript paused"**, which wins over "Captions delayed". Lines the
+   fallback took are stored as the `utterance` engine's.
+   **The silent-start check:** a track with 20 s of speech energy (the
+   endpointer's) and no word back from any engine, or 20 s of one constant
+   non-zero level (a stuck capture, which the DC filter makes look silent),
+   is logged by its track id and counted on `/healthz`; digital silence
+   (a muted microphone) is not. Nothing is stored or shown for it.
+7. Lines reach the owner's event stream and every **admitted** guest's
    (`segment`, `partials`, `transcript`), never a waiting, denied or removed
    ticket's. Ending the meeting closes the streams and stops the egresses.
 
@@ -626,7 +672,9 @@ does the same for everyone.
 
 None. The plugin talks only to the muster at `MUSTER_URL`, to your
 LiveKit, and (with the transcript on) to your own STT service at
-`MEETINGS_STT_URL`, which gets each utterance's audio. Audio and video go
+`MEETINGS_STT_URL`, which gets each utterance's audio, and (with the
+`nemotron` engine) your own Nemotron server at `MEETINGS_STREAM_STT_URL`,
+which gets each microphone's audio as it is spoken. Audio and video go
 between browsers and your LiveKit; only the microphones' audio reaches the
 plugin, from your Egress, and it is not stored. Later phases send transcript **text** (never audio) to an AI
 service for action items, on by default and off per meeting, as the notice
@@ -658,7 +706,10 @@ microphones (streaming Egress's own PCM format to the ingest), and checks
 that the owner's panel and the guest's show the same four lines of the
 **fake** engine under the right names, that a scripted line that looks like
 markup stays text, and that the archive and its text download hold them
-after End meeting.
+after End meeting. A fifth and sixth (`captions.spec.ts`, at 390×844 and
+1280×800) run the plugin's real `nemotron` engine against the fake
+Nemotron server (`scripts/e2e-harness -stt=nemotron`): a partial caption
+appears in the panel and is then replaced by the final line.
 
 **Against a real LiveKit:** `internal/server/livekit_integration_test.go`
 starts `livekit-server` and joins with LiveKit's CLI (`lk room join`): the
@@ -708,7 +759,14 @@ a ticket as an owner bearer, a deny that admits, `roomAdmin` or
 `participant_joined` check, an unverified webhook, an End that keeps the
 room, a knock that ignores its notice, a switch that turns back on, a bidi
 name, a name rendered as markup, each knock limit, a knock pushed while the
-owner watches, the reconcile loop, …), runs the one test named to catch it, and requires that
+owner watches, the reconcile loop, …; and for 3c: each of the `nemotron`
+boot checks, `end.samples` counting the padding, an unpadded last frame,
+silence left out, no `flush`, no DC removal, no fallback, never retrying,
+ignoring `Retry-After` or the 30 s floor, reconnecting without the waits,
+falling back too early or never, no gap marker, a reconnected stream's
+times from zero, the token in a refusal's error, each half of the
+silent-start check, a partial stored, "Captions delayed" never shown or
+never cleared, the stream token made required), runs the one test named to catch it, and requires that
 test to fail **with its expected message**; a mutant that fails to build or
 trips another assertion is reported, not counted. Each sweep also runs a
 known-caught mutant and a no-op edit that must survive. CI runs gitleaks,
@@ -734,7 +792,8 @@ phase 2d's click path, with TURN, after 2c deploys it.
 | `internal/livekit` | LiveKit: access tokens and their grants, the RoomService API, webhook verification |
 | `internal/livekittest` | a fake LiveKit for tests (`httptest`): rooms, participants, tracks, and Egress (it streams PCM to the ingest) |
 | `internal/ingest` | the ingest: the websocket server that never pings, Egress's PCM parser and resampler, the URL token |
-| `internal/stt` | the `Engine` interface, the endpointer, the `utterance` engine and its client for muster's STT service, the `fake` engine |
+| `internal/stt` | the `Engine` interface, the endpointer, the `utterance` engine and its client for muster's STT service, the `nemotron` engine and its websocket client, the `fake` engine |
+| `internal/stttest` | a fake Nemotron server for tests: the exact protocol, scripted text, every refusal and error close, drops |
 | `internal/egresstest` | a fake Egress client and Egress-format PCM fixtures |
 | `internal/lobby` | the guest name, the notice's words, the change hub, the knock limit and the knock notifier |
 | `internal/mustertest` | a fake muster for tests (`httptest`), server-installed apps included |

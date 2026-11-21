@@ -6,7 +6,10 @@
 #                    MEETINGS_LINK_KEY (openssl rand -base64 32),
 #                    MEETINGS_INGEST_SECRET (openssl rand -base64 32: the ingest
 #                    URL tokens' key), MEETINGS_STT_TOKEN (a COPY of
-#                    stt-cohere's one bearer: rotating it means updating both)
+#                    stt-cohere's one bearer: rotating it means updating both),
+#                    and for the nemotron engine only MEETINGS_STREAM_STT_TOKEN
+#                    (a COPY of stt-nemotron's STT_API_TOKEN; optional, so a
+#                    Secret without it still boots the utterance engine)
 #   livekit-keys     LIVEKIT_API_KEY, LIVEKIT_API_SECRET (shared with LiveKit)
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -85,11 +88,15 @@ spec:
               value: /state
             # The transcript (phase 3a): the engine, the STT service the
             # utterance engine calls (stt-cohere, as dictation does), and the
-            # ingest Egress streams to.
+            # ingest Egress streams to. Phase 3c: the Nemotron server the
+            # nemotron engine streams to (read only when stt-engine is
+            # nemotron).
             - name: MEETINGS_STT_ENGINE
               valueFrom: {configMapKeyRef: {name: muster-meetings-params, key: stt-engine}}
             - name: MEETINGS_STT_URL
               valueFrom: {configMapKeyRef: {name: muster-meetings-params, key: stt-url}}
+            - name: MEETINGS_STREAM_STT_URL
+              valueFrom: {configMapKeyRef: {name: muster-meetings-params, key: stream-stt-url}}
             - name: MEETINGS_INGEST_LISTEN
               value: ":8082"
             - name: MEETINGS_INGEST_URL
@@ -102,6 +109,8 @@ spec:
               valueFrom: {secretKeyRef: {name: muster-meetings, key: MEETINGS_INGEST_SECRET}}
             - name: MEETINGS_STT_TOKEN
               valueFrom: {secretKeyRef: {name: muster-meetings, key: MEETINGS_STT_TOKEN}}
+            - name: MEETINGS_STREAM_STT_TOKEN
+              valueFrom: {secretKeyRef: {name: muster-meetings, key: MEETINGS_STREAM_STT_TOKEN, optional: true}}
             - name: LIVEKIT_API_KEY
               valueFrom: {secretKeyRef: {name: livekit-keys, key: LIVEKIT_API_KEY}}
             - name: LIVEKIT_API_SECRET

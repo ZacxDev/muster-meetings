@@ -830,6 +830,13 @@ var mutants = []mutant{
 		pkg: "./internal/server", test: "TestNemotronPartialsAreCaptionsNeverStoredAndFinalsAre", want: "the panel's lines"},
 	{name: "captions delayed: never shown", file: trans, from: "s.tr.delayed[t.Track] = true", to: "s.tr.delayed[t.Track] = false",
 		pkg: "./internal/server", test: "TestCaptionsDelayedShowsExactlyWhileOnTheFallback", want: `no "transcript" event`},
+	{name: "deploy: the stream token required in the Secret (an older deployment no longer boots)", file: kPlugin, from: "key: MEETINGS_STREAM_STT_TOKEN, optional: true}", to: "key: MEETINGS_STREAM_STT_TOKEN}",
+		pkg: "./deploy", test: "TestKubernetesPlugin", want: "MEETINGS_STREAM_STT_TOKEN: secretKeyRef.optional = <nil>, want true"},
+	{name: "deploy: the plugin may not reach the Nemotron server", file: kNetPol, from: "              app.kubernetes.io/name: stt-nemotron\n", to: "              app.kubernetes.io/name: stt-nemotron-none\n",
+		pkg: "./deploy", test: "TestKubernetesNetworkPolicies", want: "the muster-meetings pods' egress is"},
+	{name: "captions delayed: left behind by an ended stream", file: trans, from: "if cur := s.tr.conns[t.Track]; cur == lc || cur == nil {", to: "if cur := s.tr.conns[t.Track]; cur == lc {",
+		more: []edit{{trans, "\t// A new engine stream starts on the configured engine; it says so if it\n\t// falls back (stt.EngineSwitch).\n\tdelete(s.tr.delayed, t.Track)\n", ""}},
+		pkg:  "./internal/server", test: "TestARestartedStreamOnNemotronIsNotLeftCaptionsDelayed", want: `no "transcript" event`},
 	{name: "captions delayed: never cleared", file: trans, from: "\t\t} else {\n\t\t\tdelete(s.tr.delayed, t.Track)\n\t\t}\n", to: "\t\t}\n",
 		pkg: "./internal/server", test: "TestCaptionsDelayedShowsExactlyWhileOnTheFallback", want: `no "transcript" event`},
 

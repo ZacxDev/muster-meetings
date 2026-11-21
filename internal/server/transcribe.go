@@ -582,15 +582,20 @@ func (s *Server) serveIngest(conn *ingest.Conn, t store.Track) {
 	}
 	s.tr.conns[t.Track] = lc
 	s.tr.meetings[t.Track] = t.MeetingID
+	// A new engine stream starts on the configured engine; it says so if it
+	// falls back (stt.EngineSwitch).
+	delete(s.tr.delayed, t.Track)
 	s.tr.mu.Unlock()
 	ctx, cancel := context.WithCancel(s.bg)
 	defer func() {
 		cancel()
 		s.tr.mu.Lock()
-		if s.tr.conns[t.Track] == lc {
+		if cur := s.tr.conns[t.Track]; cur == lc || cur == nil {
 			delete(s.tr.conns, t.Track)
-			// The engine's stream ended with it: the next starts on the
-			// configured engine, and says so if it falls back.
+			// The engine's stream ended with it (streamEnded may already
+			// have deregistered it): the next starts on the configured
+			// engine, and says so if it falls back. A newer stream's own
+			// state is left alone.
 			delete(s.tr.delayed, t.Track)
 		}
 		if m := s.tr.partials[t.MeetingID]; m != nil {

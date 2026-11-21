@@ -193,6 +193,46 @@ func TestCaptionsDelayedShowsExactlyWhileOnTheFallback(t *testing.T) {
 	}
 }
 
+// A track's egress restarted while it was on the fallback: the new stream
+// opens on Nemotron (the server has room again), so "Captions delayed" must
+// clear with the old stream. It is per STREAM state, never left behind by
+// one that ended.
+func TestARestartedStreamOnNemotronIsNotLeftCaptionsDelayed(t *testing.T) {
+	e, srv := newNemEnv(t)
+	srv.Set(func(s *stttest.Server) { s.Refuse, s.RetryAfter = 503, 1 })
+	e.lk.EgressAudio = func(room, identity, track string) []byte {
+		ms := make([]int, 30)
+		for i := range ms {
+			ms[i] = 1000
+		}
+		return egresstest.Script(1000, ms...)
+	}
+	e.lk.EgressPace = 2 * time.Millisecond
+	c := e.meeting(ada)
+	e.started(c)
+	owner := e.open("GET", "/api/meetings/"+c.ID+"/events", c.Sess, nil)
+	tr := e.publish(c, store.OwnerIdentity, "MICROPHONE")
+	wantStatus := func(want string) {
+		t.Helper()
+		for {
+			ev := owner.want("transcript")
+			var s statusEvent
+			json.Unmarshal([]byte(ev.Data), &s)
+			if s.Status == want {
+				return
+			}
+		}
+	}
+	wantStatus(server.CaptionsDelayed)
+	// Room again, and the egress dies: a new egress, a new stream, on
+	// Nemotron at once (no retry is due: the clock has not moved).
+	srv.Set(func(s *stttest.Server) { s.Refuse = 0 })
+	e.lk.KillEgress(e.egressOf(tr, 1).ID)
+	e.egressOf(tr, 2)
+	eventually(t, 5*time.Second, "the new stream on Nemotron", func() bool { return srv.Upgrades() == 1 })
+	wantStatus("")
+}
+
 // The silent-start flag is telemetry: a log line naming the track (never a
 // speaker or text) and /healthz's warning; nothing is stored or shown.
 func TestASilentStartFlagIsLoggedAndCountedNotStored(t *testing.T) {

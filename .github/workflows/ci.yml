@@ -116,11 +116,12 @@ jobs:
       # connects to the fake LiveKit with a guest token, and Retry reconnects
       # without a knock), a second owner device against a real LiveKit, and
       # the transcript in the owner's and a guest's panels (the fake LiveKit
-      # as Egress, the fake STT engine).
+      # as Egress, the fake STT engine), and live captions at 390x844 and
+      # 1280x800 (the nemotron engine against the fake Nemotron server).
       # Count the passes: `playwright test` exits 0 when everything skipped.
       - name: playwright test
         working-directory: e2e
         run: |
           set -o pipefail
           npx playwright test 2>&1 | tee /tmp/e2e.log
-          grep -qE '^\s+4 passed \(' /tmp/e2e.log
+          grep -qE '^\s+6 passed \(' /tmp/e2e.log

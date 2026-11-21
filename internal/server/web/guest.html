@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex">
+<title>Join a meeting</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+{{- if .Message}}
+<main class="notice">
+  <h1>Meetings</h1>
+  <p id="message">{{.Message}}</p>
+</main>
+{{- else}}
+<main id="guest" data-state="start" data-owner="{{.OwnerName}}" data-record="{{.Notice.Record}}" data-ai="{{.Notice.AI}}">
+  <section id="join-view" class="join">
+    <h1 id="whose">{{if .OwnerName}}{{.OwnerName}}’s meeting{{else}}Join the meeting{{end}}</h1>
+    <div id="notice" class="notice-box" role="note">
+      {{- range .Notice.Text}}
+      <p>{{.}}</p>
+      {{- end}}
+    </div>
+    <div class="preview">
+      <video id="preview" autoplay muted playsinline></video>
+      <button id="btn-preview" type="button">Turn on camera and microphone</button>
+    </div>
+    <form id="knock-form" class="knock" novalidate>
+      <label for="name">Your name</label>
+      <input id="name" name="name" type="text" maxlength="40" autocomplete="name" required>
+      <button id="ask" type="submit" class="primary">Ask to join</button>
+    </form>
+    <p id="guest-status" class="status" role="status" aria-live="polite"></p>
+  </section>
+
+  <section id="call-view" class="call" hidden aria-label="Meeting">
+    <div class="call-top">
+      <p id="badge" class="badge" role="status"></p>
+      <p id="call-status" class="status" role="status" aria-live="polite"></p>
+    </div>
+    <div class="stage-wrap">
+      <div id="stage" class="stage"></div>
+      <div id="strip" class="strip"></div>
+    </div>
+    <!-- The transcript and action items arrive here in later phases: the same
+         panels as the owner's, without Make task or Dismiss. -->
+    <aside id="panels" class="panels" hidden></aside>
+    <div id="audio" hidden></div>
+    <nav class="controls" aria-label="Call controls">
+      <button id="btn-mic" type="button" aria-pressed="true">Mute</button>
+      <button id="btn-cam" type="button" aria-pressed="true">Camera off</button>
+      <button id="btn-share" type="button" aria-pressed="false">Share screen</button>
+      <button id="btn-leave" type="button" class="danger">Leave</button>
+    </nav>
+  </section>
+  <noscript><p>Joining a meeting needs JavaScript.</p></noscript>
+</main>
+<script src="/static/vendor/livekit-client-2.25.0.umd.js"></script>
+<script src="/static/call.js"></script>
+<script src="/static/guest.js"></script>
+{{- end}}
+</body>
+</html>

@@ -561,8 +561,14 @@ func (r *OwnerRepo) End(ctx context.Context, id string, now time.Time) (string, 
 	err = tx.QueryRowContext(ctx, `UPDATE meetings SET state = 'ended', ended_at = ? WHERE id = ? AND subject = ? AND state = 'open' RETURNING room`,
 		ms(now), id, r.subject).Scan(&room)
 	if errors.Is(err, sql.ErrNoRows) {
-		if _, err := r.Meeting(ctx, id); err != nil {
+		// Not open: ended already, or not this owner's. Asked on the
+		// transaction's own connection (the store has one).
+		var n int
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM meetings WHERE id = ? AND subject = ?`, id, r.subject).Scan(&n); err != nil {
 			return "", err
+		}
+		if n == 0 {
+			return "", ErrNotFound
 		}
 		return "", ErrGone
 	}

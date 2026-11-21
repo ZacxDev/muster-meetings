@@ -43,6 +43,7 @@ type Knocker struct {
 	mu      sync.Mutex
 	state   map[string]*knockState
 	pending map[string]bool
+	busy    int // kicks queued or being decided
 	queue   chan string
 }
 
@@ -75,6 +76,7 @@ func (k *Knocker) Kick(meetingID string) {
 	select {
 	case k.queue <- meetingID:
 		k.pending[meetingID] = true
+		k.busy++
 	default:
 		k.log.Printf("knock: the queue is full; a lobby change is not notified")
 	}
@@ -91,7 +93,29 @@ func (k *Knocker) Run(ctx context.Context) {
 			delete(k.pending, id)
 			k.mu.Unlock()
 			k.decide(ctx, id)
+			k.mu.Lock()
+			k.busy--
+			k.mu.Unlock()
 		}
+	}
+}
+
+// Settle waits until every kick made so far has been decided, or timeout
+// passes; it says which. A retry scheduled for later is not waited for. For
+// tests: a "no knock was sent" is only a claim once the knocker has looked.
+func (k *Knocker) Settle(timeout time.Duration) bool {
+	end := time.Now().Add(timeout)
+	for {
+		k.mu.Lock()
+		idle := k.busy == 0
+		k.mu.Unlock()
+		if idle {
+			return true
+		}
+		if time.Now().After(end) {
+			return false
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
 }
 

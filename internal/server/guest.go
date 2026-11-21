@@ -222,18 +222,19 @@ func (s *Server) handleWait(w http.ResponseWriter, r *http.Request) {
 		if !cur.MeetingLive || cur.State == store.StEnded {
 			return true, sse(w, f, "ended", map[string]any{"message": GuestEnded})
 		}
-		switch cur.State {
-		case store.StDenied:
+		if cur.State == store.StDenied {
 			return true, sse(w, f, "denied", map[string]any{"message": "You weren't admitted."})
-		case store.StAdmitted:
-			tok, ok, err := s.guestToken(r.Context(), cur)
-			if err != nil {
-				return true, err
-			}
-			if ok {
-				return true, sse(w, f, "admitted", tok)
-			}
-		case store.StWaiting:
+		}
+		// The token's only gate is guestToken's admission predicate: this
+		// handler does not decide who is admitted.
+		tok, ok, err := s.guestToken(r.Context(), cur)
+		if err != nil {
+			return true, err
+		}
+		if ok {
+			return true, sse(w, f, "admitted", tok)
+		}
+		if cur.State == store.StWaiting {
 			n := lobby.NoticeFor(cur.Notice.Record, cur.Notice.AI)
 			if b, _ := json.Marshal(n); string(b) != lastNotice {
 				lastNotice = string(b)

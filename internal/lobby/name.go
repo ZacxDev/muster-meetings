@@ -18,21 +18,15 @@ const MaxNameRunes = 40
 // page says.
 var ErrName = errors.New("Type a name of 1 to 40 characters, without control or text-direction characters.")
 
-// bidi are the Unicode text-direction controls: embeddings, overrides,
-// isolates and marks. A name holding one could reorder the owner's lobby row
-// ("Ada (guest)" rendered backwards, or a fake "(owner)").
-var bidi = map[rune]bool{
-	'؜': true, '‎': true, '‏': true,
-	'‪': true, '‫': true, '‬': true, '‭': true, '‮': true,
-	'⁦': true, '⁧': true, '⁨': true, '⁩': true,
-}
-
 // CleanName checks a guest's typed name and returns it trimmed: valid UTF-8,
 // trimmed of white space, 1 to MaxNameRunes characters, and no control
-// characters (Cc), no format characters (Cf, which include the bidi
-// controls and zero-width characters) except the zero-width joiner that emoji
-// sequences use, no line or paragraph separators, and none of the bidi
-// controls. Anything else is ErrName. The name is never interpreted: every
+// characters (Cc), no format characters (Cf) except the zero-width joiner
+// that emoji sequences use, and no line or paragraph separators. Cf holds
+// every Unicode text-direction control (the embeddings, overrides and
+// isolates U+202A–202E and U+2066–2069, and the marks U+200E, U+200F and
+// U+061C), which could otherwise reorder the owner's lobby row ("Ada
+// (guest)" drawn backwards, or a fake "(owner)"), and the zero-width
+// characters. Anything else is ErrName. The name is never interpreted: every
 // page renders it as text.
 func CleanName(s string) (string, error) {
 	if !utf8.ValidString(s) {
@@ -45,11 +39,9 @@ func CleanName(s string) (string, error) {
 	}
 	for _, r := range s {
 		switch {
-		case bidi[r]:
-			return "", ErrName
 		case unicode.Is(unicode.Cc, r), unicode.Is(unicode.Zl, r), unicode.Is(unicode.Zp, r):
 			return "", ErrName
-		case unicode.Is(unicode.Cf, r) && r != '‍':
+		case unicode.Is(unicode.Cf, r) && r != '\u200D':
 			return "", ErrName
 		}
 	}

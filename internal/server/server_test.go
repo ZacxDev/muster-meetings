@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -118,6 +119,9 @@ func newEnv(t *testing.T) *env {
 	lkc.Now = e.clock.Now
 	e.server = server.New(server.Config{PublicURL: publicURL, MusterOrigin: musterOrigin, Now: e.clock.Now, Log: lg,
 		LiveKit: lkc, LiveKitURL: e.lk.WSURL(), ICE: "relay",
+		// The test client is the "ingress": a knock's address comes from
+		// X-Forwarded-For, so a test can knock from many addresses.
+		TrustedProxies: []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128")},
 		// The streams re-read the database often and send no heartbeat a
 		// test waits on; the reconcile loop runs only when a test calls it.
 		StreamRecheck: 50 * time.Millisecond, ReconcileEvery: time.Hour, Heartbeat: time.Hour}, st, e.app)
@@ -1298,21 +1302,35 @@ func TestTheAppPageCarriesNoInlineScript(t *testing.T) {
 	if !sessionAttr.Match(body) {
 		t.Fatalf("not the app page: %s", body)
 	}
-	for _, m := range regexp.MustCompile(`<script[^>]*>`).FindAll(body, -1) {
-		if !bytes.Contains(m, []byte(`src="/static/app.js"`)) {
-			t.Errorf("inline script %s: the CSP would block it", m)
-		}
+	c := e.meeting(bea)
+	_, guest := e.do("GET", "/j/"+c.Code, "", nil)
+	if !bytes.Contains(guest, []byte(`id="knock-form"`)) {
+		t.Fatalf("not the guest page: %s", guest)
 	}
-	if regexp.MustCompile(`\son[a-z]+=`).Match(body) {
-		t.Error("an inline event handler: the CSP would block it")
+	for name, page := range map[string][]byte{"app": body, "guest": guest} {
+		scripts := regexp.MustCompile(`<script[^>]*>([^<]*)</script>`).FindAllSubmatch(page, -1)
+		if len(scripts) != 3 {
+			t.Errorf("%s page: %d scripts, want the LiveKit client, call.js and its own", name, len(scripts))
+		}
+		for _, m := range scripts {
+			if !regexp.MustCompile(`^<script src="/static/[a-z0-9./-]+\.js">$`).Match(m[0][:len(m[0])-len(m[1])-len("</script>")]) || len(bytes.TrimSpace(m[1])) != 0 {
+				t.Errorf("%s page: script %s is not a file on this origin with no inline body: the CSP would block it", name, m[0])
+			}
+		}
+		if regexp.MustCompile(`\son[a-z]+=`).Match(page) {
+			t.Errorf("%s page: an inline event handler: the CSP would block it", name)
+		}
 	}
 	resp, js := e.do("GET", "/static/app.js", "", nil)
 	if resp.StatusCode != 200 || !bytes.Contains(js, []byte("removeAttribute('data-session')")) || !bytes.Contains(js, []byte("history.replaceState")) {
 		t.Fatalf("app.js = %d", resp.StatusCode)
 	}
-	for _, bad := range []string{"localStorage", "sessionStorage", "document.cookie", "innerHTML"} {
-		if bytes.Contains(js, []byte(bad)) {
-			t.Errorf("app.js uses %s", bad)
+	for _, f := range []string{"/static/app.js", "/static/guest.js", "/static/call.js"} {
+		_, js := e.do("GET", f, "", nil)
+		for _, bad := range []string{"localStorage", "sessionStorage", "document.cookie", "innerHTML"} {
+			if bytes.Contains(js, []byte(bad)) {
+				t.Errorf("%s uses %s", f, bad)
+			}
 		}
 	}
 }

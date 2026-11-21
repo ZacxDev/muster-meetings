@@ -28,6 +28,9 @@ configMapGenerator:
       # Behind a CDN: the ingress's pod CIDR, and the CDN's client header.
       - trusted-proxies=192.0.2.0/24
       - client-ip-header=CF-Connecting-IP
+      # muster's stt-cohere Service, as dictation reaches it.
+      - stt-engine=utterance
+      - stt-url=http://muster-stt-cohere:8000
 
 patches:
   # The NodePorts the outside route targets.
@@ -57,6 +60,10 @@ patches:
       - op: replace
         path: /spec/egress/0/ports/0/port
         value: 8105
+      # stt-cohere's pods and port.
+      - op: replace
+        path: /spec/egress/2/to/0/podSelector/matchLabels
+        value: {app: muster-stt-cohere}
   # A Secret under another name (here, the TURN certificate's).
   - target: {kind: Deployment, name: livekit}
     patch: |-

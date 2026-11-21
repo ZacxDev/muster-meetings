@@ -14,6 +14,11 @@
 //	GET /redeems               how many redeems the fake muster has answered
 //	GET /apps/<id>[?code=…]    muster's page: frames /enter with that code, or a fresh one
 //	GET /livekit-joins         every token a browser presented to the fake LiveKit, verified
+//	GET /publish?room=&identity=  the identity publishes a microphone in the fake LiveKit: its
+//	                           track_published webhook reaches the plugin, which starts a track
+//	                           egress; the fake LiveKit, acting as Egress, streams two
+//	                           utterances of PCM to the plugin's ingest, and the fake STT
+//	                           engine turns each into a line of its script (MEETINGS_FAKE_STT_SCRIPT's)
 //
 // With -livekit=real it starts a real livekit-server instead (the binary in
 // MEETINGS_LIVEKIT_SERVER, or on PATH) and says "real_livekit": true; with
@@ -45,6 +50,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ZacxDev/muster-meetings/internal/egresstest"
 	"github.com/ZacxDev/muster-meetings/internal/livekit"
 	"github.com/ZacxDev/muster-meetings/internal/livekittest"
 	"github.com/ZacxDev/muster-meetings/internal/muster"
@@ -52,6 +58,7 @@ import (
 	"github.com/ZacxDev/muster-meetings/internal/owners"
 	"github.com/ZacxDev/muster-meetings/internal/server"
 	"github.com/ZacxDev/muster-meetings/internal/store"
+	"github.com/ZacxDev/muster-meetings/internal/stt"
 )
 
 var (
@@ -60,6 +67,10 @@ var (
 )
 
 var lkMode = flag.String("livekit", "fake", "fake, or real (a livekit-server binary)")
+
+// script is the fake STT engine's lines: one per utterance, in order, for
+// each track. The second looks like markup, to show it is rendered as text.
+var script = []string{"Ada opens the meeting.", "<b>Not bold</b> & <i>not italic</i>"}
 
 func main() {
 	flag.Parse()
@@ -116,6 +127,14 @@ func run(logger *log.Logger) error {
 	if err != nil {
 		return err
 	}
+	ingestLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return err
+	}
+	// The fake LiveKit is also Egress: each track egress streams two
+	// utterances (1 s of speech, 1 s of silence, twice) in real time.
+	lk.WebhookURL = "http://" + internalLn.Addr().String() + "/livekit/webhook"
+	lk.EgressAudio = func(room, identity, track string) []byte { return egresstest.Script(1000, 1000, 1000) }
 	real := false
 	if *lkMode == "real" {
 		if api, stop, err := startLiveKit(logger, "http://"+internalLn.Addr().String()); err != nil {
@@ -130,7 +149,10 @@ func run(logger *log.Logger) error {
 		return err
 	}
 	srv := server.New(server.Config{PublicURL: pluginURL, MusterOrigin: parentOrigin, Log: logger,
-		LiveKit: lkc, LiveKitURL: lkWS, ICE: "all"}, st, a)
+		LiveKit: lkc, LiveKitURL: lkWS, ICE: "all",
+		// The fake engine (MEETINGS_TEST_MODE's), and the ingest listener
+		// the fake Egress streams to.
+		Engine: stt.NewFake(script), IngestURL: "ws://" + ingestLn.Addr().String(), IngestKey: []byte("e2e harness ingest key 0123456789ab")}, st, a)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go srv.Run(ctx)
@@ -138,6 +160,8 @@ func run(logger *log.Logger) error {
 	go plugin.Serve(pluginLn)
 	internal := &http.Server{Handler: srv.Internal()}
 	go internal.Serve(internalLn)
+	ingestSrv := &http.Server{Handler: srv.Ingest()}
+	go ingestSrv.Serve(ingestLn)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /mint", func(w http.ResponseWriter, r *http.Request) {
@@ -149,6 +173,18 @@ func run(logger *log.Logger) error {
 	mux.HandleFunc("GET /livekit-joins", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(lk.RTCs())
+	})
+	mux.HandleFunc("GET /publish", func(w http.ResponseWriter, r *http.Request) {
+		if real {
+			http.Error(w, "the fake LiveKit's Egress only", http.StatusConflict)
+			return
+		}
+		sid, code, err := lk.Publish(r.URL.Query().Get("room"), r.URL.Query().Get("identity"), "MICROPHONE")
+		if err != nil || code != http.StatusOK {
+			http.Error(w, fmt.Sprintf("the webhook answered %d: %v", code, err), http.StatusBadGateway)
+			return
+		}
+		io.WriteString(w, sid)
 	})
 	mux.HandleFunc("GET /apps/{id}", func(w http.ResponseWriter, r *http.Request) {
 		code := r.URL.Query().Get("code")
@@ -186,6 +222,7 @@ func run(logger *log.Logger) error {
 	plugin.Shutdown(sctx)
 	parent.Shutdown(sctx)
 	internal.Shutdown(sctx)
+	ingestSrv.Close()
 	return nil
 }
 

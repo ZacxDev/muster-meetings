@@ -255,9 +255,10 @@ func (s *Server) handleWait(w http.ResponseWriter, r *http.Request) {
 // handleGuestEvents is an admitted guest's event stream: "meeting" with the
 // CURRENT notice (never the one cached at knock time, design: "the admitted
 // page shows the current state from the meeting's event stream"), at once
-// and on every change; then "removed" or "ended". Later phases add the live
-// transcript and action items here. A ticket that is not admitted gets no
-// stream (403).
+// and on every change; the live transcript (segment, partials, transcript:
+// transcript.go); then "removed" or "ended". Phase 4 adds the action items
+// here. A ticket that is not admitted gets no stream (403), and a stream
+// whose ticket stops being admitted ends before it sends anything more.
 func (s *Server) handleGuestEvents(w http.ResponseWriter, r *http.Request) {
 	g, ok := s.ticketOf(w, r)
 	if !ok {
@@ -278,6 +279,7 @@ func (s *Server) handleGuestEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	var last string
 	minted := false
+	tc := newTCursor()
 	s.stream(ctx, w, f, g.MeetingID, false, func() (bool, error) {
 		cur, err := s.store.GuestByParticipant(r.Context(), g.ParticipantID, s.cfg.Now())
 		if err != nil {
@@ -308,9 +310,16 @@ func (s *Server) handleGuestEvents(w http.ResponseWriter, r *http.Request) {
 		snap := map[string]any{"notice": lobby.NoticeFor(cur.Notice.Record, cur.Notice.AI)}
 		if b, _ := json.Marshal(snap); string(b) != last {
 			last = string(b)
-			return false, sse(w, f, "meeting", snap)
+			if err := sse(w, f, "meeting", snap); err != nil {
+				return true, err
+			}
 		}
-		return false, nil
+		// The live transcript (decision 6: guests see what the owner sees),
+		// of this ticket's own meeting only, and only while admitted (checked
+		// above, on every send).
+		return false, s.sendTranscript(r.Context(), w, f, cur.MeetingID, tc, func(after int64) ([]store.Segment, error) {
+			return s.store.SegmentsAfter(r.Context(), cur.MeetingID, after, store.MaxSegmentsPage)
+		})
 	})
 }
 

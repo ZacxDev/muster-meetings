@@ -149,6 +149,43 @@ var migrations = []string{
 		left_at       INTEGER
 	) STRICT;
 	CREATE INDEX participants_meeting ON participants (meeting_id, knocked_at, id);`,
+
+	// 4: phase 3a, the transcript (design: "Segments", "Media: LiveKit,
+	// TURN, Egress"). tracks is one row per microphone track the plugin
+	// transcribes: the track egress feeding it (egress_id) and that egress's
+	// nonce, which the ingest URL's token must carry (internal/ingest), and
+	// the open gap marker while no audio flows. segments is the stored
+	// transcript: finals and gap markers (partials are never stored), in
+	// meeting time (ms from the meeting's start). speaker is the name shown
+	// for the line when it was said (the owner's display name, or what the
+	// guest typed and "(guest)"): text a stranger typed, rendered as text.
+	// text is what was SAID: untrusted, never logged, never audited.
+	`CREATE TABLE tracks (
+		track        TEXT    PRIMARY KEY,
+		meeting_id   TEXT    NOT NULL REFERENCES meetings (id),
+		identity     TEXT    NOT NULL,
+		speaker      TEXT    NOT NULL,
+		state        TEXT    NOT NULL CHECK (state IN ('active', 'ended')),
+		nonce        TEXT    NOT NULL DEFAULT '',
+		egress_id    TEXT    NOT NULL DEFAULT '',
+		gap_segment  INTEGER,
+		published_at INTEGER NOT NULL
+	) STRICT;
+	CREATE INDEX tracks_meeting ON tracks (meeting_id, state);
+	CREATE INDEX tracks_egress ON tracks (egress_id) WHERE egress_id != '';
+	CREATE TABLE segments (
+		id         INTEGER PRIMARY KEY,
+		meeting_id TEXT    NOT NULL REFERENCES meetings (id),
+		identity   TEXT    NOT NULL,
+		speaker    TEXT    NOT NULL,
+		kind       TEXT    NOT NULL CHECK (kind IN ('text', 'gap')),
+		start_ms   INTEGER NOT NULL,
+		end_ms     INTEGER,             -- NULL only for a gap still open
+		text       TEXT    NOT NULL DEFAULT '',
+		engine     TEXT    NOT NULL,
+		pass       TEXT    NOT NULL DEFAULT 'live' CHECK (pass IN ('live', 'final'))
+	) STRICT;
+	CREATE INDEX segments_meeting ON segments (meeting_id, id);`,
 }
 
 // ErrNeedsSubjectMap is a phase-2a database that holds owners or meetings:

@@ -1,0 +1,171 @@
+# LiveKit Egress and its Redis, phase 3a (design: "Media: LiveKit, TURN,
+# Egress"). Egress streams each microphone track's raw PCM to the plugin's
+# ingest listener (ws://muster-meetings:8082/stt/ingest/<track>/<token>);
+# phase 5 adds the room composite recording to the same Egress.
+#
+# Egress talks to LiveKit through a Redis of its OWN (redis-meetings, never
+# muster's): LiveKit's config names it too (livekit.yaml). Nothing is
+# persisted in it, and only LiveKit and Egress may reach it
+# (networkpolicy.yaml).
+#
+# cpu_cost (design, spike S3): LiveKit's defaults (a track egress 0.5 CPU, a
+# room composite 4) refused 7 of 8 track starts at a meeting's start and a
+# second recording outright on a 6-CPU node, though the measured costs were
+# about 0.02 per track (peak 0.07) and 1.14 per composite (peak 1.57). The
+# deployment sets 0.1 and 2; the plugin retries a refused track start with
+# backoff. Sizing: (1.7 × concurrent recordings + 0.1 × concurrent
+# microphones) / 0.8 CPUs.
+#
+# Secrets it reads: livekit-keys (LIVEKIT_API_KEY, LIVEKIT_API_SECRET).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: egress
+  labels:
+    app.kubernetes.io/name: egress
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: egress
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: egress
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        # The image's own user `egress` (uid 1001, primary group root), read
+        # from v1.15.0's /etc/passwd.
+        runAsUser: 1001
+        runAsGroup: 0
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: egress
+          # v1.15.0, pinned by the multi-arch index digest.
+          image: docker.io/livekit/egress:v1.15.0@sha256:ac244a40268ce1dd1510fbff6eb529609ec68aceff1602343f79be8ca08c355b
+          ports:
+            - name: health
+              containerPort: 8080
+          env:
+            - name: LIVEKIT_API_KEY
+              valueFrom: {secretKeyRef: {name: livekit-keys, key: LIVEKIT_API_KEY}}
+            - name: LIVEKIT_API_SECRET
+              valueFrom: {secretKeyRef: {name: livekit-keys, key: LIVEKIT_API_SECRET}}
+            - name: EGRESS_CONFIG_BODY
+              value: |
+                log_level: info
+                api_key: $(LIVEKIT_API_KEY)
+                api_secret: $(LIVEKIT_API_SECRET)
+                ws_url: ws://livekit:7880
+                redis:
+                  address: redis-meetings:6379
+                health_port: 8080
+                cpu_cost:
+                  track_cpu_cost: 0.1
+                  room_composite_cpu_cost: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            # The ONE container that writes its root filesystem: Egress's
+            # entrypoint deletes and recreates PulseAudio's state
+            # (/var/run/pulse, /var/lib/pulse, ~/.config/pulse) and cleans
+            # ~/tmp at every start, and a delete under a read-only root, or
+            # of a mount point, stops the container (`set -e`).
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              memory: 2Gi
+          readinessProbe:
+            httpGet: {path: /, port: health}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /, port: health}
+            periodSeconds: 20
+            failureThreshold: 6
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-meetings
+  labels:
+    app.kubernetes.io/name: redis-meetings
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redis-meetings
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: redis-meetings
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        # The image's redis user.
+        runAsUser: 999
+        runAsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: redis
+          # 7.2.17 (the last BSD-licensed line), pinned by the multi-arch
+          # index digest.
+          image: docker.io/library/redis:7.2.17-alpine3.22@sha256:2f66de68111e64c3927859f158f8e666066dae2b97d9f82770a6f37a5aa1c335
+          # Nothing is persisted: LiveKit's and Egress's state is transient.
+          args: ["redis-server", "--save", "", "--appendonly", "no", "--port", "6379", "--maxmemory", "96mb", "--maxmemory-policy", "noeviction"]
+          ports:
+            - name: redis
+              containerPort: 6379
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          readinessProbe:
+            tcpSocket: {port: redis}
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: {port: redis}
+            periodSeconds: 20
+      volumes:
+        - name: data
+          emptyDir:
+            sizeLimit: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-meetings
+  labels:
+    app.kubernetes.io/name: redis-meetings
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: redis-meetings
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis

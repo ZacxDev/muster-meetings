@@ -6,7 +6,9 @@
 // 1h): an admin installs it once, and every person on the muster gets the
 // tab. Phase 2b adds the call: LiveKit rooms and tokens, the guest page and
 // lobby (admit, deny, remove), End meeting, LiveKit's webhook and a reconcile
-// loop, screen share, the consent notice, and the knock notification.
+// loop, screen share, the consent notice, and the knock notification. Phase
+// 3a adds the live transcript, for the owner and admitted guests, and its
+// archive.
 //
 // Configuration is read from the environment only (see .env.example):
 //
@@ -27,6 +29,18 @@
 //	MEETINGS_LIVEKIT_ICE      relay (default: TURN over TLS is the only media path) or all (a local LiveKit)
 //	MEETINGS_TRUSTED_PROXIES  comma-separated CIDRs of the ingress in front of the plugin (for the per-address knock limit)
 //	MEETINGS_CLIENT_IP_HEADER one header holding the client's address (e.g. CF-Connecting-IP), believed only from a trusted proxy
+//
+// Phase 3a adds the transcript: a track Egress per microphone streams raw PCM
+// to the ingest listener, and an engine turns it into lines.
+//
+//	MEETINGS_STT_ENGINE       off (the default: no transcript), utterance, or fake (tests only); nemotron is phase 3c
+//	MEETINGS_STT_URL          utterance: the STT service muster's dictation uses (stt-cohere), http(s)://host[:port]
+//	MEETINGS_STT_TOKEN        utterance: its bearer (a copy of stt-cohere's one token)
+//	MEETINGS_STT_MODEL        utterance: the model form field (optional; stt-cohere ignores it)
+//	MEETINGS_TEST_MODE        1 allows the fake engine; MEETINGS_FAKE_STT_SCRIPT its lines, separated by |
+//	MEETINGS_INGEST_SECRET    32+ random bytes, base64: the HMAC key of every ingest URL's token
+//	MEETINGS_INGEST_URL       the ingest listener as Egress reaches it, e.g. ws://muster-meetings:8082
+//	MEETINGS_INGEST_LISTEN    the ingest listener (default :8082): internal only, Egress's alone
 package main
 
 import (
@@ -46,11 +60,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ZacxDev/muster-meetings/internal/ingest"
 	"github.com/ZacxDev/muster-meetings/internal/livekit"
 	"github.com/ZacxDev/muster-meetings/internal/muster"
 	"github.com/ZacxDev/muster-meetings/internal/owners"
 	"github.com/ZacxDev/muster-meetings/internal/server"
 	"github.com/ZacxDev/muster-meetings/internal/store"
+	"github.com/ZacxDev/muster-meetings/internal/stt"
 )
 
 func main() {
@@ -77,7 +93,25 @@ type Config struct {
 	ICE            string
 	TrustedProxies []netip.Prefix
 	ClientIPHeader string
+
+	// The transcript (phase 3a). Engine is "" when it is off.
+	Engine       string
+	STTURL       string
+	STTToken     string
+	STTModel     string
+	FakeScript   []string
+	IngestKey    []byte
+	IngestURL    string
+	IngestListen string
 }
+
+// The engines MEETINGS_STT_ENGINE names.
+const (
+	EngineOff       = "off"
+	EngineUtterance = "utterance"
+	EngineFake      = "fake"
+	EngineNemotron  = "nemotron"
+)
 
 // LoadConfig reads and checks the environment through getenv.
 func LoadConfig(getenv func(string) string) (Config, error) {
@@ -166,7 +200,68 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	if c.ClientIPHeader, err = checkClientIPHeader(getenv("MEETINGS_CLIENT_IP_HEADER"), len(c.TrustedProxies) > 0); err != nil {
 		return Config{}, err
 	}
+	if err := c.loadTranscript(getenv); err != nil {
+		return Config{}, err
+	}
 	return c, nil
+}
+
+// loadTranscript reads the transcript's settings (design: "Three engines,
+// one interface"). Unset or "off" is no transcript, and needs nothing else.
+// Any engine needs the ingest's secret and URL; utterance needs the STT
+// service; fake refuses to start unless MEETINGS_TEST_MODE=1.
+func (c *Config) loadTranscript(getenv func(string) string) error {
+	c.IngestListen = ":8082"
+	if v := strings.TrimSpace(getenv("MEETINGS_INGEST_LISTEN")); v != "" {
+		c.IngestListen = v
+	}
+	switch e := strings.TrimSpace(getenv("MEETINGS_STT_ENGINE")); e {
+	case "", EngineOff:
+		return nil
+	case EngineUtterance:
+		c.Engine = e
+		c.STTURL, c.STTToken, c.STTModel = strings.TrimSpace(getenv("MEETINGS_STT_URL")), strings.TrimSpace(getenv("MEETINGS_STT_TOKEN")), strings.TrimSpace(getenv("MEETINGS_STT_MODEL"))
+		if _, err := stt.NewClient(c.STTURL, c.STTToken, c.STTModel, 0); err != nil {
+			return fmt.Errorf("MEETINGS_STT_ENGINE=utterance: %w", err)
+		}
+	case EngineFake:
+		if strings.TrimSpace(getenv("MEETINGS_TEST_MODE")) != "1" {
+			return errors.New("MEETINGS_STT_ENGINE=fake is for tests only: it refuses to start unless MEETINGS_TEST_MODE=1")
+		}
+		c.Engine = e
+		if v := getenv("MEETINGS_FAKE_STT_SCRIPT"); v != "" {
+			c.FakeScript = strings.Split(v, "|")
+		}
+	case EngineNemotron:
+		return errors.New("MEETINGS_STT_ENGINE=nemotron is not in this build (design: phase 3c); use utterance")
+	default:
+		return errors.New("MEETINGS_STT_ENGINE is off, utterance or fake")
+	}
+	var err error
+	if c.IngestKey, err = ingest.ParseSecret(getenv("MEETINGS_INGEST_SECRET")); err != nil {
+		return err
+	}
+	// Egress reaches the ingest inside the cluster (or Compose's internal
+	// network): plain ws, to any host.
+	if c.IngestURL, err = checkURL("MEETINGS_INGEST_URL", getenv("MEETINGS_INGEST_URL"), "wss", "ws", true); err != nil {
+		return err
+	}
+	return nil
+}
+
+// engine builds the configured engine; nil when transcription is off.
+func (cfg Config) engine() (stt.Engine, error) {
+	switch cfg.Engine {
+	case EngineUtterance:
+		cl, err := stt.NewClient(cfg.STTURL, cfg.STTToken, cfg.STTModel, stt.CallTimeout)
+		if err != nil {
+			return nil, err
+		}
+		return stt.NewUtterance(cl), nil
+	case EngineFake:
+		return stt.NewFake(cfg.FakeScript), nil
+	}
+	return nil, nil
 }
 
 // httpAllow reads where plain http to muster is allowed besides loopback:
@@ -273,7 +368,13 @@ func run(logger *log.Logger) error {
 	if err != nil {
 		return err
 	}
-	srv := server.New(cfg.serverConfig(logger, lk), st, app)
+	eng, err := cfg.engine()
+	if err != nil {
+		return err
+	}
+	sc := cfg.serverConfig(logger, lk)
+	sc.Engine = eng
+	srv := server.New(sc, st, app)
 
 	go app.Run(ctx, owners.PollInterval)
 	go sweep(ctx, st, logger)
@@ -284,9 +385,17 @@ func run(logger *log.Logger) error {
 		BaseContext: func(net.Listener) context.Context { return ctx }}
 	internal := &http.Server{Addr: cfg.InternalListen, Handler: srv.Internal(), ReadHeaderTimeout: 5 * time.Second,
 		BaseContext: func(net.Listener) context.Context { return ctx }}
-	errc := make(chan error, 2)
+	// The ingest listener: Egress's websocket streams, and nothing else. No
+	// read or write timeout: a stream lives as long as the track (and the
+	// server never pings it; internal/ingest).
+	ingestSrv := &http.Server{Addr: cfg.IngestListen, Handler: srv.Ingest(), ReadHeaderTimeout: 5 * time.Second, MaxHeaderBytes: 8 << 10,
+		BaseContext: func(net.Listener) context.Context { return ctx }}
+	errc := make(chan error, 3)
 	go func() { errc <- pub.ListenAndServe() }()
 	go func() { errc <- internal.ListenAndServe() }()
+	if eng != nil {
+		go func() { errc <- ingestSrv.ListenAndServe() }()
+	}
 	select {
 	case <-ctx.Done():
 	case err := <-errc:
@@ -298,6 +407,7 @@ func run(logger *log.Logger) error {
 	shut, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = internal.Shutdown(shut)
+	_ = ingestSrv.Shutdown(shut)
 	return pub.Shutdown(shut)
 }
 
@@ -305,7 +415,7 @@ func run(logger *log.Logger) error {
 func (cfg Config) serverConfig(logger *log.Logger, lk *livekit.Client) server.Config {
 	return server.Config{PublicURL: cfg.PublicURL, MusterOrigin: cfg.MusterOrigin, Log: logger,
 		LiveKit: lk, LiveKitURL: cfg.LiveKitURL, ICE: cfg.ICE, TrustedProxies: cfg.TrustedProxies,
-		ClientIPHeader: cfg.ClientIPHeader}
+		ClientIPHeader: cfg.ClientIPHeader, IngestURL: cfg.IngestURL, IngestKey: cfg.IngestKey}
 }
 
 // sweep ends meetings past the 24 h cap and drops expired sessions, every
@@ -334,7 +444,16 @@ func startupLine(cfg Config, name string, pluginID int64, tasks bool) string {
 	if tasks {
 		files = "with"
 	}
-	return fmt.Sprintf("muster-meetings: talking to %s as server app %q (plugin %d, %s Files tasks); serving %s on %s (internal %s), framed by %s; LiveKit %s (API %s, ICE %s)",
+	line := fmt.Sprintf("muster-meetings: talking to %s as server app %q (plugin %d, %s Files tasks); serving %s on %s (internal %s), framed by %s; LiveKit %s (API %s, ICE %s)",
 		muster.Redact(cfg.URL), name, pluginID, files, cfg.PublicURL, cfg.Listen, cfg.InternalListen, cfg.MusterOrigin,
 		muster.Redact(cfg.LiveKitURL), muster.Redact(cfg.LiveKitAPI), cfg.ICE)
+	switch cfg.Engine {
+	case "":
+		line += "; transcript off"
+	case EngineUtterance:
+		line += fmt.Sprintf("; transcript: utterance engine via %s, ingest %s (Egress streams to %s)", muster.Redact(cfg.STTURL), cfg.IngestListen, muster.Redact(cfg.IngestURL))
+	default:
+		line += fmt.Sprintf("; transcript: %s engine, ingest %s (Egress streams to %s)", cfg.Engine, cfg.IngestListen, muster.Redact(cfg.IngestURL))
+	}
+	return line
 }

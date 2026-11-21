@@ -60,7 +60,18 @@ button.danger { background: #c62828; color: #fff; border-color: #c62828; }
 .controls { display: flex; gap: .4rem; justify-content: center; flex-wrap: wrap; padding: .5rem max(.5rem, env(safe-area-inset-left)) max(.5rem, env(safe-area-inset-bottom));
   border-top: 1px solid var(--line); background: var(--bg); }
 .controls button { min-width: 44px; min-height: 44px; padding: 0 .7rem; }
-.panels { display: none; }
+.panels { flex: 0 0 auto; max-height: 30vh; display: flex; flex-direction: column; border-top: 1px solid var(--line); padding: .25rem max(.75rem, env(safe-area-inset-left)) .25rem; }
+.panels[hidden] { display: none; }
+.panel-title { margin: .1rem 0 .25rem; font-size: .85rem; color: var(--muted); }
+.tstatus { margin-left: .5rem; color: #c62828; font-weight: 600; }
+.transcript { list-style: none; margin: 0; padding: 0; overflow-y: auto; min-height: 0; font-size: .95rem; }
+.transcript li { padding: .15rem 0; overflow-wrap: anywhere; }
+.transcript .when { color: var(--muted); font-size: .8rem; margin-right: .4rem; font-variant-numeric: tabular-nums; }
+.transcript .who { font-weight: 600; margin-right: .4rem; }
+.transcript .who::after { content: ":"; }
+.transcript .partial { color: var(--muted); font-style: italic; }
+.transcript .gap { color: var(--muted); font-style: italic; }
+.archive .transcript { max-height: none; overflow: visible; margin-top: 1rem; }
 @media (min-width: 40rem) {
   .stage-wrap { flex-direction: row; }
   .strip { flex-direction: column; overflow-x: hidden; overflow-y: auto; width: 12rem; }

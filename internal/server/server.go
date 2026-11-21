@@ -40,11 +40,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ZacxDev/muster-meetings/internal/ingest"
 	"github.com/ZacxDev/muster-meetings/internal/livekit"
 	"github.com/ZacxDev/muster-meetings/internal/lobby"
 	"github.com/ZacxDev/muster-meetings/internal/muster"
 	"github.com/ZacxDev/muster-meetings/internal/owners"
 	"github.com/ZacxDev/muster-meetings/internal/store"
+	"github.com/ZacxDev/muster-meetings/internal/stt"
 )
 
 //go:embed web
@@ -101,6 +103,21 @@ type Config struct {
 	// DefaultMaxStreams.
 	StreamsPerAddress int
 	MaxStreams        int
+
+	// Engine transcribes each microphone track (stt.UtteranceEngine,
+	// stt.FakeEngine); nil is transcription off: no egress is started and
+	// the ingest refuses every stream (transcribe.go).
+	Engine stt.Engine
+	// IngestURL is the ingest listener as Egress reaches it, e.g.
+	// ws://muster-meetings:8082: each track egress streams to
+	// <IngestURL>/stt/ingest/<track>/<token>.
+	IngestURL string
+	// IngestKey is MEETINGS_INGEST_SECRET: the HMAC key of every ingest
+	// token.
+	IngestKey []byte
+	// EgressBackoff is the wait before each retry of a refused track egress
+	// start; default DefaultEgressBackoff.
+	EgressBackoff []time.Duration
 }
 
 // Server is the plugin's public handler.
@@ -119,6 +136,11 @@ type Server struct {
 	// xffUntrusted: a request carried X-Forwarded-For with no trusted
 	// proxies configured (clientAddr).
 	xffUntrusted atomic.Bool
+	// tr is the transcript's in-memory side (transcribe.go); bg the context
+	// its goroutines run under, cancelled when Run returns.
+	tr     *transcriber
+	bg     context.Context
+	bgStop context.CancelFunc
 }
 
 // New builds the handler.
@@ -147,8 +169,12 @@ func New(cfg Config, st *store.Store, app *owners.App) *Server {
 	if cfg.Log == nil {
 		cfg.Log = log.New(io.Discard, "", 0)
 	}
+	if len(cfg.EgressBackoff) == 0 {
+		cfg.EgressBackoff = DefaultEgressBackoff
+	}
 	s := &Server{cfg: cfg, store: st, app: app, mux: http.NewServeMux(), hub: lobby.NewHub(), limiter: lobby.NewLimiter(),
-		rtcOrigins: RTCOrigins(cfg.LiveKitURL), streams: newStreamReg()}
+		rtcOrigins: RTCOrigins(cfg.LiveKitURL), streams: newStreamReg(), tr: newTranscriber()}
+	s.bg, s.bgStop = context.WithCancel(context.Background())
 	s.knocker = lobby.NewKnocker(app.Client, s.hub, st.LobbyCount, cfg.Log, cfg.Now)
 	static, err := fs.Sub(webFS, "web/static")
 	if err != nil {
@@ -167,6 +193,7 @@ func New(cfg Config, st *store.Store, app *owners.App) *Server {
 	s.mux.HandleFunc("POST /api/meetings/{id}/lobby/{pid}/deny", s.owner(s.handleMove(store.EvDeny)))
 	s.mux.HandleFunc("DELETE /api/meetings/{id}/participants/{pid}", s.owner(s.handleMove(store.EvRemove)))
 	s.mux.HandleFunc("POST /api/meetings/{id}/end", s.owner(s.handleEnd))
+	s.mux.HandleFunc("GET /api/meetings/{id}/transcript", s.owner(s.handleTranscript))
 	s.mux.HandleFunc("GET /j/{code}", s.handleGuestPage)
 	s.mux.HandleFunc("POST /j/{code}/knock", s.handleKnock)
 	s.mux.HandleFunc("POST /j/{code}/wait", s.handleWait)
@@ -241,8 +268,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 type statusWriter struct {
 	http.ResponseWriter
-	status int
-	wrote  bool
+	status   int
+	wrote    bool
+	hijacked bool
 }
 
 func (w *statusWriter) WriteHeader(code int) {
@@ -257,6 +285,10 @@ func (w *statusWriter) Write(b []byte) (int, error) {
 	return w.ResponseWriter.Write(b)
 }
 
+// Unwrap lets http.ResponseController reach the connection (the ingest's
+// websocket upgrade hijacks it).
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 func (w *statusWriter) Flush() {
 	if f, ok := w.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
@@ -267,9 +299,16 @@ func (w *statusWriter) Flush() {
 // link's code never reaches a log line. A path whose cleaned form is
 // `/j/<code>…` (so `//j/…`, `/./j/…` and `/x/../j/…` too, which the router
 // would redirect there) logs as `/j/{code}…`, and any other path holding a
-// `/j/` segment anywhere logs as `/{redacted}`.
+// `/j/` segment anywhere logs as `/{redacted}`. An ingest path
+// (`/stt/ingest/<track>/<token>`, which the public listener does not serve)
+// logs its track only.
 func RedactPath(p string) string {
 	c := path.Clean("/" + p)
+	// An ingest URL's last segment is its token: on the public listener it
+	// is a 404, and its token still never reaches the log.
+	if strings.HasPrefix(c, "/stt/ingest/") || strings.Contains(p, "/stt/ingest/") {
+		return ingest.LogPath(c)
+	}
 	if rest, ok := strings.CutPrefix(c, "/j/"); ok {
 		if _, tail, ok := strings.Cut(rest, "/"); ok {
 			return "/j/{code}/" + tail

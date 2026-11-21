@@ -18,7 +18,7 @@ func TestTheStartupLineNamesTheHostOnly(t *testing.T) {
 		PublicURL: "https://meet.example.test", MusterOrigin: "https://example.test", Listen: ":8080", InternalListen: ":8081",
 		LiveKitURL: "wss://meet-rtc.example.test", LiveKitAPI: "http://livekit:7880", ICE: "relay",
 		LiveKitKeys: livekit.Keys{Key: "APIk3yS3cret", Secret: "lks3cretT0kenValue"}}, "meet-srv", 12, true)
-	want := `muster-meetings: talking to https://muster.example.test:8443 as server app "meet-srv" (plugin 12, with Files tasks); serving https://meet.example.test on :8080 (internal :8081), framed by https://example.test; LiveKit wss://meet-rtc.example.test (API http://livekit:7880, ICE relay)`
+	want := `muster-meetings: talking to https://muster.example.test:8443 as server app "meet-srv" (plugin 12, with Files tasks); serving https://meet.example.test on :8080 (internal :8081), framed by https://example.test; LiveKit wss://meet-rtc.example.test (API http://livekit:7880, ICE relay); transcript off`
 	if got != want {
 		t.Fatalf("startup line = %q, want %q", got, want)
 	}
@@ -200,5 +200,73 @@ func TestTheProxySettingsReachTheServer(t *testing.T) {
 	sc := c.serverConfig(nil, nil)
 	if sc.ClientIPHeader != "True-Client-Ip" || !slices.Equal(sc.TrustedProxies, []netip.Prefix{netip.MustParsePrefix("10.30.0.0/16")}) {
 		t.Fatalf("server config: header %q, proxies %v; want True-Client-Ip and 10.30.0.0/16", sc.ClientIPHeader, sc.TrustedProxies)
+	}
+}
+
+// The transcript's settings (design: "Three engines, one interface"): off by
+// default and needing nothing; utterance needs the STT service and the
+// ingest's secret and URL; fake refuses to start unless
+// MEETINGS_TEST_MODE=1; nemotron is phase 3c and refused by this build.
+func TestLoadConfigTranscript(t *testing.T) {
+	c, err := LoadConfig(env(base()))
+	if err != nil || c.Engine != "" || c.IngestListen != ":8082" || c.IngestKey != nil {
+		t.Fatalf("unset: engine %q, listen %q, key %v, %v; want off", c.Engine, c.IngestListen, c.IngestKey, err)
+	}
+	if eng, err := c.engine(); eng != nil || err != nil {
+		t.Fatalf("unset: engine() = %v, %v; want none", eng, err)
+	}
+	secret := base64.StdEncoding.EncodeToString([]byte("main fixture ingest secret 0a9b8c7d"))
+	on := func(extra map[string]string) map[string]string {
+		m := base()
+		m["MEETINGS_STT_ENGINE"], m["MEETINGS_STT_URL"], m["MEETINGS_STT_TOKEN"] = "utterance", "http://stt-cohere:8000", "s3cretT0ken-stt"
+		m["MEETINGS_INGEST_SECRET"], m["MEETINGS_INGEST_URL"] = secret, "ws://muster-meetings:8082"
+		for k, v := range extra {
+			if v == "" {
+				delete(m, k)
+			} else {
+				m[k] = v
+			}
+		}
+		return m
+	}
+	c, err = LoadConfig(env(on(map[string]string{"MEETINGS_INGEST_LISTEN": "10.1.2.3:8082"})))
+	if err != nil || c.Engine != "utterance" || c.STTURL != "http://stt-cohere:8000" || c.IngestURL != "ws://muster-meetings:8082" || c.IngestListen != "10.1.2.3:8082" || len(c.IngestKey) != 35 {
+		t.Fatalf("utterance: %+v, %v", c, err)
+	}
+	if eng, err := c.engine(); err != nil || eng == nil || eng.Name() != "utterance" {
+		t.Fatalf("utterance: engine() = %v, %v", eng, err)
+	}
+	if sc := c.serverConfig(nil, nil); sc.IngestURL != "ws://muster-meetings:8082" || len(sc.IngestKey) != 35 {
+		t.Fatalf("the ingest settings do not reach the server: %q, %d", sc.IngestURL, len(sc.IngestKey))
+	}
+	c, err = LoadConfig(env(on(map[string]string{"MEETINGS_STT_ENGINE": "fake", "MEETINGS_TEST_MODE": "1", "MEETINGS_FAKE_STT_SCRIPT": "one|two"})))
+	if err != nil || c.Engine != "fake" || !slices.Equal(c.FakeScript, []string{"one", "two"}) {
+		t.Fatalf("fake in test mode: %+v, %v", c, err)
+	}
+	if c, err := LoadConfig(env(on(map[string]string{"MEETINGS_STT_ENGINE": "off"}))); err != nil || c.Engine != "" {
+		t.Fatalf("off: %q, %v", c.Engine, err)
+	}
+	for name, extra := range map[string]map[string]string{
+		"fake without test mode":    {"MEETINGS_STT_ENGINE": "fake"},
+		"fake with test mode 0":     {"MEETINGS_STT_ENGINE": "fake", "MEETINGS_TEST_MODE": "0"},
+		"nemotron (phase 3c)":       {"MEETINGS_STT_ENGINE": "nemotron"},
+		"an unknown engine":         {"MEETINGS_STT_ENGINE": "whisper"},
+		"utterance without a URL":   {"MEETINGS_STT_URL": ""},
+		"utterance with a path":     {"MEETINGS_STT_URL": "http://stt-cohere:8000/v1"},
+		"utterance without a token": {"MEETINGS_STT_TOKEN": ""},
+		"no ingest secret":          {"MEETINGS_INGEST_SECRET": ""},
+		"a short ingest secret":     {"MEETINGS_INGEST_SECRET": base64.StdEncoding.EncodeToString([]byte("s3cretT0ken 16 b"))},
+		"no ingest URL":             {"MEETINGS_INGEST_URL": ""},
+		"an http ingest URL":        {"MEETINGS_INGEST_URL": "http://muster-meetings:8082"},
+		"an ingest URL with a path": {"MEETINGS_INGEST_URL": "ws://muster-meetings:8082/stt"},
+	} {
+		_, err := LoadConfig(env(on(extra)))
+		if err == nil {
+			t.Errorf("%s: LoadConfig accepted it", name)
+			continue
+		}
+		if strings.Contains(err.Error(), "s3cretT0ken") || strings.Contains(err.Error(), "czNjcmV0VDBr") {
+			t.Errorf("%s: the refusal echoes a secret: %v", name, err)
+		}
 	}
 }

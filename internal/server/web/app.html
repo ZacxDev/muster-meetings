@@ -33,6 +33,21 @@
     </section>
   </section>
 
+  <section id="archive-view" class="archive" hidden aria-labelledby="archive-title">
+    <header class="bar">
+      <h1 id="archive-title">Transcript</h1>
+      <button id="archive-back" type="button">Back</button>
+    </header>
+    <p id="archive-meta" class="muted"></p>
+    <div class="link-row">
+      <button id="dl-txt" type="button">Download text</button>
+      <button id="dl-vtt" type="button">Download WebVTT</button>
+    </div>
+    <p id="archive-status" class="status" role="status" aria-live="polite"></p>
+    <p id="archive-empty" class="muted" hidden>Nothing was transcribed in this meeting.</p>
+    <ol id="archive-lines" class="transcript"></ol>
+  </section>
+
   <section id="call-view" class="call" hidden aria-label="Meeting" data-conn="none">
     <div class="call-top">
       <div id="lobby" class="lobby" aria-live="polite"></div>
@@ -52,8 +67,11 @@
       <div id="stage" class="stage"></div>
       <div id="strip" class="strip"></div>
     </div>
-    <!-- The transcript and action items arrive here in later phases. -->
-    <aside id="panels" class="panels" hidden></aside>
+    <!-- The live transcript; the action items join it in phase 4. -->
+    <aside id="panels" class="panels" hidden aria-label="Transcript">
+      <h2 class="panel-title">Transcript <span id="transcript-status" class="tstatus" role="status"></span></h2>
+      <ol id="transcript" class="transcript" aria-live="polite"></ol>
+    </aside>
     <div id="audio" hidden></div>
     <nav class="controls" aria-label="Call controls">
       <button id="btn-mic" type="button" aria-pressed="true">Mute</button>

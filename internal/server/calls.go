@@ -195,6 +195,7 @@ func (s *Server) handleEnd(w http.ResponseWriter, r *http.Request, repo *store.O
 	}
 	s.hub.Changed(id)
 	s.knocker.Kick(id)
+	s.stopTranscription(r.Context(), id)
 	if err := s.cfg.LiveKit.DeleteRoom(r.Context(), room); err != nil {
 		s.cfg.Log.Printf("end: LiveKit: %v (the reconcile loop retries)", err)
 	}
@@ -298,6 +299,7 @@ func (s *Server) handleOwnerEvents(w http.ResponseWriter, r *http.Request, repo 
 		return
 	}
 	var last []byte
+	tc := newTCursor()
 	s.stream(ctx, w, f, id, true, func() (bool, error) {
 		// 🔴 The session is checked again before every send, not only when
 		// the stream opened: an expired grant deletes the owner's sessions
@@ -331,6 +333,15 @@ func (s *Server) handleOwnerEvents(w http.ResponseWriter, r *http.Request, repo 
 		if string(b) != string(last) {
 			last = b
 			if err := sse(w, f, "meeting", snap); err != nil {
+				return true, err
+			}
+		}
+		if liveNow {
+			// The transcript, through the owner's repository: only this
+			// owner's meeting's lines.
+			if err := s.sendTranscript(r.Context(), w, f, id, tc, func(after int64) ([]store.Segment, error) {
+				return repo.SegmentsAfter(r.Context(), id, after, store.MaxSegmentsPage)
+			}); err != nil {
 				return true, err
 			}
 		}

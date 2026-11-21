@@ -4,8 +4,10 @@
 #
 #   docker compose -f docker-compose.yml -f compose.meetings.yml --profile meetings up -d
 #
-# Phase 2c: the plugin and LiveKit (TURN over TLS only). Egress, Redis and
-# the STT services come with the phases that use them.
+# Phase 2c: the plugin and LiveKit (TURN over TLS only). Phase 3a: Egress
+# (each microphone's raw PCM to the plugin's ingest) and its own Redis. The
+# transcript's STT is muster's own stt-cohere (its compose profile), which
+# the plugin's utterance engine calls as dictation does.
 #
 # Set in muster's .env (every value is empty unless set; the plugin refuses
 # to start on a missing one and names it):
@@ -23,6 +25,12 @@
 #                             PUBLICLY TRUSTED certificate for the TURN host,
 #                             readable by uid 65532
 #   LIVEKIT_API_KEY, LIVEKIT_API_SECRET
+#   MEETINGS_INGEST_SECRET    openssl rand -base64 32 (the ingest URL tokens' key)
+#   MEETINGS_STT_ENGINE       optional: utterance (the default) or off
+#   MEETINGS_STT_URL          optional: default http://stt-cohere:8000 (muster's
+#                             stt-cohere profile)
+#   MEETINGS_STT_TOKEN        stt-cohere's bearer: the same value as muster's
+#                             MUSTER_STT_TOKEN
 #   MEETINGS_TRUSTED_PROXIES, MEETINGS_CLIENT_IP_HEADER   (optional; see the README)
 #
 # Published on 127.0.0.1 only, for the stack's reverse proxy on this host:
@@ -31,9 +39,14 @@
 #   ${MEETINGS_TURN_PORT:-8108}  TURN/TLS: an SNI PASSTHROUGH on public 443 for
 #                                meet-turn-<x>.<domain> ends here (TLS is NOT
 #                                terminated by the proxy; LiveKit terminates it)
-# LiveKit's direct media listeners (7881/tcp, the UDP ICE range) and the
-# plugin's internal port (8081) are not published: every client, LAN clients
-# included, connects through TURN over TLS.
+# LiveKit's direct media listeners (7881/tcp, the UDP ICE range), the
+# plugin's internal port (8081) and its ingest (8082) are not published:
+# every client, LAN clients included, connects through TURN over TLS.
+#
+# The ingest is on an INTERNAL network of its own, meetings-ingest, that only
+# the plugin and Egress join, and the plugin listens for it on its address
+# there alone (MEETINGS_INGEST_ADDR): nothing else on any network reaches it.
+# Redis publishes nothing and is reached by name on the meetings network.
 #
 # LiveKit has a fixed address on its own network, because rtc.node_ip (where
 # TURN allocates relays and the SFU advertises itself) must be its own
@@ -67,12 +80,25 @@ services:
       MEETINGS_TRUSTED_PROXIES: ${MEETINGS_TRUSTED_PROXIES:-}
       MEETINGS_CLIENT_IP_HEADER: ${MEETINGS_CLIENT_IP_HEADER:-}
       STATE_DIR: /state
+      MEETINGS_STT_ENGINE: ${MEETINGS_STT_ENGINE:-utterance}
+      MEETINGS_STT_URL: ${MEETINGS_STT_URL:-http://stt-cohere:8000}
+      MEETINGS_STT_TOKEN: ${MEETINGS_STT_TOKEN:-}
+      MEETINGS_INGEST_SECRET: ${MEETINGS_INGEST_SECRET:-}
+      # The ingest listens on the plugin's address on meetings-ingest only,
+      # and Egress is sent there.
+      MEETINGS_INGEST_LISTEN: ${MEETINGS_INGEST_ADDR:-172.31.251.2}:8082
+      MEETINGS_INGEST_URL: ws://${MEETINGS_INGEST_ADDR:-172.31.251.2}:8082
     volumes:
       - meetings-state:/state
     ports:
       - "${MEETINGS_BIND:-127.0.0.1}:${MEETINGS_HTTP_PORT:-8106}:8080"
-    # default: muster's own network, where the name `muster` resolves.
-    networks: [meetings, default]
+    # default: muster's own network, where the names `muster` and
+    # `stt-cohere` resolve.
+    networks:
+      meetings: {}
+      default: {}
+      meetings-ingest:
+        ipv4_address: ${MEETINGS_INGEST_ADDR:-172.31.251.2}
     depends_on: [livekit]
 
   livekit:
@@ -113,6 +139,8 @@ services:
         webhook:
           api_key: ${LIVEKIT_API_KEY:-}
           urls: [http://muster-meetings:8081/livekit/webhook]
+        redis:
+          address: redis-meetings:6379
         logging:
           level: info
     volumes:
@@ -124,11 +152,57 @@ services:
       meetings:
         ipv4_address: ${MEETINGS_LIVEKIT_IP:-172.31.250.10}
 
+  # LiveKit's Egress (as deploy/kubernetes/egress.yaml: the same config).
+  egress:
+    profiles: [meetings]
+    # v1.15.0, pinned by the multi-arch index digest (as deploy/kubernetes).
+    image: docker.io/livekit/egress:v1.15.0@sha256:ac244a40268ce1dd1510fbff6eb529609ec68aceff1602343f79be8ca08c355b
+    restart: unless-stopped
+    # Not read_only: its entrypoint recreates PulseAudio's state at every
+    # start (deploy/kubernetes/egress.yaml says why).
+    user: "1001:0"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      EGRESS_CONFIG_BODY: |
+        log_level: info
+        api_key: ${LIVEKIT_API_KEY:-}
+        api_secret: ${LIVEKIT_API_SECRET:-}
+        ws_url: ws://livekit:7880
+        redis:
+          address: redis-meetings:6379
+        health_port: 8080
+        cpu_cost:
+          track_cpu_cost: 0.1
+          room_composite_cpu_cost: 2
+    networks: [meetings, meetings-ingest]
+    depends_on: [livekit, redis-meetings]
+
+  # Egress's channel to LiveKit: a Redis of its own, never muster's.
+  redis-meetings:
+    profiles: [meetings]
+    # 7.2.17 (the last BSD-licensed line), pinned by the multi-arch index digest.
+    image: docker.io/library/redis:7.2.17-alpine3.22@sha256:2f66de68111e64c3927859f158f8e666066dae2b97d9f82770a6f37a5aa1c335
+    restart: unless-stopped
+    read_only: true
+    user: "999:999"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--port", "6379", "--maxmemory", "96mb", "--maxmemory-policy", "noeviction"]
+    tmpfs: [/data]
+    networks: [meetings]
+
 networks:
   meetings:
     ipam:
       config:
         - subnet: ${MEETINGS_MEDIA_SUBNET:-172.31.250.0/24}
+  # The ingest's network: internal (no route out), the plugin and Egress only.
+  meetings-ingest:
+    internal: true
+    ipam:
+      config:
+        - subnet: ${MEETINGS_INGEST_SUBNET:-172.31.251.0/24}
 
 volumes:
   meetings-state:

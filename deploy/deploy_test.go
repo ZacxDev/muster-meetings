@@ -148,6 +148,16 @@ var liveKitImage = regexp.MustCompile(`^docker\.io/livekit/livekit-server:v1\.13
 // The webhook goes to the plugin's INTERNAL port, by its Service name.
 const webhookURL = "http://muster-meetings:8081/livekit/webhook"
 
+// The meetings' own Redis (LiveKit and Egress), by its Service name.
+const redisAddr = "redis-meetings:6379"
+
+// Egress pinned by the index digest of v1.15.0, in both files; Redis by
+// 7.2.17-alpine's.
+var (
+	egressImage = regexp.MustCompile(`^docker\.io/livekit/egress:v1\.15\.0@sha256:[0-9a-f]{64}$`)
+	redisImage  = regexp.MustCompile(`^docker\.io/library/redis:7\.2\.17-alpine3\.22@sha256:[0-9a-f]{64}$`)
+)
+
 // The Service's NodePort range: LiveKit's own port ranges must stay out of it.
 const nodePortLo, nodePortHi = 30000, 32767
 
@@ -234,6 +244,10 @@ func checkLiveKitConfig(t *testing.T, where, body string, want lkWant) obj {
 	if got := dig(cfg, "webhook", "api_key"); got != want.apiKey {
 		t.Errorf("%s: webhook.api_key = %v, want %q", where, got, want.apiKey)
 	}
+	// Egress's channel: its own Redis, by its Service name (phase 3a).
+	if got := dig(cfg, "redis", "address"); got != redisAddr {
+		t.Errorf("%s: redis.address = %v, want %q (the meetings' own Redis)", where, got, redisAddr)
+	}
 	// Secrets never in the config body.
 	for _, k := range []string{"keys", "key_file"} {
 		if v, ok := cfg[k]; ok {
@@ -299,9 +313,10 @@ func TestKubernetesExposesNoDirectMedia(t *testing.T) {
 		typ   string
 		ports []int
 	}{
-		"muster-meetings":  {"ClusterIP", []int{8080, 8081}},
+		"muster-meetings":  {"ClusterIP", []int{8080, 8081, 8082}},
 		"livekit":          {"ClusterIP", []int{7880}},
 		"livekit-nodeport": {"NodePort", []int{5349, 7880}},
+		"redis-meetings":   {"ClusterIP", []int{6379}},
 	}
 	svcs := ofKind(docs, "Service")
 	if len(svcs) != len(want) {
@@ -343,8 +358,18 @@ func TestKubernetesExposesNoDirectMedia(t *testing.T) {
 					t.Errorf("Deployment %v has a hostPort", dig(d, "metadata", "name"))
 				}
 			}
-			if dig(c, "securityContext", "readOnlyRootFilesystem") != true || dig(c, "securityContext", "allowPrivilegeEscalation") != false {
+			// 🔴 Egress alone writes its root filesystem (its entrypoint
+			// recreates PulseAudio's state at every start; egress.yaml), and
+			// it is named here so no other Deployment can join it.
+			ro := dig(c, "securityContext", "readOnlyRootFilesystem") == true
+			if dig(d, "metadata", "name") == "egress" {
+				ro = dig(c, "securityContext", "readOnlyRootFilesystem") == false
+			}
+			if !ro || dig(c, "securityContext", "allowPrivilegeEscalation") != false {
 				t.Errorf("Deployment %v: the container may write its root filesystem or escalate", dig(d, "metadata", "name"))
+			}
+			if caps := dig(c, "securityContext", "capabilities", "drop"); !reflect.DeepEqual(caps, []any{"ALL"}) {
+				t.Errorf("Deployment %v drops capabilities %v, want [ALL]", dig(d, "metadata", "name"), caps)
 			}
 		}
 		if dig(spec, "securityContext", "runAsNonRoot") != true {
@@ -370,6 +395,32 @@ func TestKubernetesPlugin(t *testing.T) {
 	}
 	if internal != 8081 {
 		t.Errorf("the internal port is %d, want 8081", internal)
+	}
+	ingestPort := 0
+	for _, p := range c["ports"].([]any) {
+		if dig(p, "name") == "ingest" {
+			ingestPort, _ = toInt(dig(p, "containerPort"))
+		}
+	}
+	if ingestPort != 8082 {
+		t.Errorf("the ingest port is %d, want 8082", ingestPort)
+	}
+	// The ingest: its own listener, and the URL Egress is sent to is that
+	// port on the plugin's Service.
+	for name, want := range map[string]string{"MEETINGS_INGEST_LISTEN": ":8082", "MEETINGS_INGEST_URL": "ws://muster-meetings:8082"} {
+		if e, _ := envEntry(c, name); dig(e, "value") != want {
+			t.Errorf("%s = %v, want %q", name, e, want)
+		}
+	}
+	for name, key := range map[string]string{"MEETINGS_INGEST_SECRET": "MEETINGS_INGEST_SECRET", "MEETINGS_STT_TOKEN": "MEETINGS_STT_TOKEN"} {
+		if e, _ := envEntry(c, name); dig(e, "valueFrom", "secretKeyRef", "key") != key || dig(e, "value") != nil {
+			t.Errorf("%s = %v, want it from a Secret", name, e)
+		}
+	}
+	for name, key := range map[string]string{"MEETINGS_STT_ENGINE": "stt-engine", "MEETINGS_STT_URL": "stt-url"} {
+		if e, _ := envEntry(c, name); dig(e, "valueFrom", "configMapKeyRef", "key") != key {
+			t.Errorf("%s = %v, want the params ConfigMap's %s", name, e, key)
+		}
 	}
 	for _, pr := range []string{"startupProbe", "readinessProbe", "livenessProbe"} {
 		if dig(c, pr, "httpGet", "path") != "/healthz" || dig(c, pr, "httpGet", "port") != "internal" {
@@ -421,7 +472,8 @@ func TestKubernetesParamsAreAllUsed(t *testing.T) {
 	}
 	for _, d := range ofKind(docs, "Deployment") {
 		for _, c := range dig(d, "spec", "template", "spec", "containers").([]any) {
-			for _, e := range dig(c, "env").([]any) {
+			envs, _ := dig(c, "env").([]any)
+			for _, e := range envs {
 				ref := dig(e, "valueFrom", "configMapKeyRef")
 				if ref == nil {
 					continue
@@ -442,13 +494,19 @@ func TestKubernetesParamsAreAllUsed(t *testing.T) {
 	}
 }
 
-// 🔴 NetworkPolicies: both pods default-deny both ways; the plugin's
-// internal port admits LiveKit alone, its public port the ingress
-// controller's namespace alone; LiveKit may call only the plugin's internal
-// port (and DNS).
+// 🔴 NetworkPolicies: every pod default-deny both ways, then EXACT sets in
+// and out (an added rule, a `- {}` that allows everything, or a widened one
+// fails here): the plugin's internal port admits LiveKit alone, its ingest
+// Egress alone, its public port the ingress controller's namespace alone;
+// Egress may reach LiveKit, the plugin's ingest, its Redis and DNS, and
+// nothing else; Redis is reached by LiveKit and Egress alone and reaches
+// nothing.
 func TestKubernetesNetworkPolicies(t *testing.T) {
 	docs := render(t, "kubernetes")
-	for _, n := range []string{"muster-meetings", "livekit"} {
+	if n := len(ofKind(docs, "NetworkPolicy")); n != 4 {
+		t.Errorf("%d NetworkPolicies rendered, want 4 (one per pod)", n)
+	}
+	for _, n := range []string{"muster-meetings", "livekit", "egress", "redis-meetings"} {
 		np := find(t, docs, "NetworkPolicy", n)
 		if dig(np, "spec", "podSelector", "matchLabels", "app.kubernetes.io/name") != n {
 			t.Errorf("NetworkPolicy %s selects %v", n, dig(np, "spec", "podSelector"))
@@ -477,48 +535,175 @@ func TestKubernetesNetworkPolicies(t *testing.T) {
 	if w := admits[8081]; len(w) != 1 || !strings.Contains(w[0], "app.kubernetes.io/name:livekit") || strings.Contains(w[0], "namespaceSelector") {
 		t.Errorf("the plugin's :8081 admits %v, want LiveKit's pods alone", w)
 	}
+	if w := admits[8082]; len(w) != 1 || !strings.Contains(w[0], "app.kubernetes.io/name:egress") || strings.Contains(w[0], "namespaceSelector") {
+		t.Errorf("the plugin's :8082 (the ingest) admits %v, want Egress's pods alone", w)
+	}
 	if w := admits[8080]; len(w) != 1 || !strings.Contains(w[0], "namespaceSelector") {
 		t.Errorf("the plugin's :8080 admits %v, want the ingress controller's namespace alone", w)
 	}
-	if len(admits) != 2 {
-		t.Errorf("the plugin admits ports %v, want 8080 and 8081 only", admits)
+	if len(admits) != 3 {
+		t.Errorf("the plugin admits ports %v, want 8080, 8081 and 8082 only", admits)
 	}
-	// Egress, as EXACT sets: an added rule (an empty `- {}` allows every
-	// destination and port) or a widened one fails here.
-	for name, want := range map[string]string{
-		"muster-meetings": pluginEgress,
-		"livekit":         liveKitEgress,
+	for _, c := range []struct{ name, dir, want string }{
+		{"muster-meetings", "egress", pluginEgress},
+		{"livekit", "egress", liveKitEgress},
+		{"livekit", "ingress", liveKitIngress},
+		{"egress", "egress", egressEgress},
+		{"egress", "ingress", egressIngress},
+		{"redis-meetings", "egress", "[]"},
+		{"redis-meetings", "ingress", redisIngress},
 	} {
 		var w []any
-		if err := yaml.Unmarshal([]byte(want), &w); err != nil {
+		if err := yaml.Unmarshal([]byte(c.want), &w); err != nil {
 			t.Fatal(err)
 		}
-		got := dig(find(t, docs, "NetworkPolicy", name), "spec", "egress")
+		got := dig(find(t, docs, "NetworkPolicy", c.name), "spec", c.dir)
+		if got == nil {
+			got = []any{}
+		}
 		if !reflect.DeepEqual(got, w) {
-			t.Errorf("the %s pods' egress is %v, want exactly %v", name, got, w)
+			t.Errorf("the %s pods' %s is %v, want exactly %v", c.name, c.dir, got, w)
 		}
 	}
 }
 
-// pluginEgress is the plugin's whole egress in phase 2c: muster's pods
-// (its API), LiveKit's API and DNS.
+// pluginEgress is the plugin's whole egress: muster's pods (its API),
+// LiveKit's API, the STT service and DNS.
 const pluginEgress = `
 - to: [{podSelector: {matchLabels: {app.kubernetes.io/name: muster}}}]
   ports: [{protocol: TCP, port: 8105}]
 - to: [{podSelector: {matchLabels: {app.kubernetes.io/name: livekit}}}]
   ports: [{protocol: TCP, port: 7880}]
+- to: [{podSelector: {matchLabels: {app.kubernetes.io/name: stt-cohere}}}]
+  ports: [{protocol: TCP, port: 8000}]
 - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}, podSelector: {matchLabels: {k8s-app: kube-dns}}}]
   ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
 `
 
 // liveKitEgress is LiveKit's whole egress: the plugin's internal port (the
-// webhook) and DNS.
+// webhook), its Redis, Egress's ICE (UDP), and DNS.
 const liveKitEgress = `
 - to: [{podSelector: {matchLabels: {app.kubernetes.io/name: muster-meetings}}}]
   ports: [{protocol: TCP, port: 8081}]
+- to: [{podSelector: {matchLabels: {app.kubernetes.io/name: redis-meetings}}}]
+  ports: [{protocol: TCP, port: 6379}]
+- to: [{podSelector: {matchLabels: {app.kubernetes.io/name: egress}}}]
+  ports: [{protocol: UDP}]
 - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}, podSelector: {matchLabels: {k8s-app: kube-dns}}}]
   ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
 `
+
+// liveKitIngress: signalling and TURN/TLS from anywhere (both reached
+// through the NodePort, both authenticated), and Egress's media from Egress
+// alone.
+const liveKitIngress = `
+- ports: [{protocol: TCP, port: 7880}, {protocol: TCP, port: 5349}]
+- from: [{podSelector: {matchLabels: {app.kubernetes.io/name: egress}}}]
+  ports: [{protocol: TCP, port: 7881}, {protocol: UDP, port: 50000, endPort: 50199}]
+`
+
+// egressEgress is Egress's whole egress (design: "Egress may reach LiveKit
+// … and the plugin's ingest port"): LiveKit's signalling and media, the
+// plugin's ingest, its Redis, DNS. No object store until phase 5.
+const egressEgress = `
+- to: [{podSelector: {matchLabels: {app.kubernetes.io/name: livekit}}}]
+  ports: [{protocol: TCP, port: 7880}, {protocol: TCP, port: 7881}, {protocol: UDP, port: 50000, endPort: 50199}]
+- to: [{podSelector: {matchLabels: {app.kubernetes.io/name: muster-meetings}}}]
+  ports: [{protocol: TCP, port: 8082}]
+- to: [{podSelector: {matchLabels: {app.kubernetes.io/name: redis-meetings}}}]
+  ports: [{protocol: TCP, port: 6379}]
+- to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}, podSelector: {matchLabels: {k8s-app: kube-dns}}}]
+  ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+`
+
+// egressIngress: LiveKit's ICE checks, from LiveKit alone.
+const egressIngress = `
+- from: [{podSelector: {matchLabels: {app.kubernetes.io/name: livekit}}}]
+  ports: [{protocol: UDP}]
+`
+
+// redisIngress: LiveKit and Egress alone.
+const redisIngress = `
+- from: [{podSelector: {matchLabels: {app.kubernetes.io/name: livekit}}}, {podSelector: {matchLabels: {app.kubernetes.io/name: egress}}}]
+  ports: [{protocol: TCP, port: 6379}]
+`
+
+// egressConfig reads an Egress config body as Egress parses it (YAML) and
+// pins it: LiveKit's signalling by its Service name, the meetings' own
+// Redis, and the design's CPU costs.
+func egressConfig(t *testing.T, where, body string, apiKey, apiSecret string) obj {
+	t.Helper()
+	var cfg obj
+	if err := yaml.Unmarshal([]byte(body), &cfg); err != nil {
+		t.Fatalf("%s: the Egress config is not YAML: %v", where, err)
+	}
+	if got := dig(cfg, "ws_url"); got != "ws://livekit:7880" {
+		t.Errorf("%s: ws_url = %v, want ws://livekit:7880", where, got)
+	}
+	if got := dig(cfg, "redis", "address"); got != redisAddr {
+		t.Errorf("%s: redis.address = %v, want %q", where, got, redisAddr)
+	}
+	// Spike S3: 0.1 per track (measured peak 0.07) and 2 per composite
+	// (measured 1.14 avg, 1.57 peak), not LiveKit's 0.5 and 4.
+	if got := dig(cfg, "cpu_cost", "track_cpu_cost"); got != 0.1 {
+		t.Errorf("%s: cpu_cost.track_cpu_cost = %v, want 0.1", where, got)
+	}
+	if got, _ := toInt(dig(cfg, "cpu_cost", "room_composite_cpu_cost")); got != 2 {
+		t.Errorf("%s: cpu_cost.room_composite_cpu_cost = %v, want 2", where, dig(cfg, "cpu_cost", "room_composite_cpu_cost"))
+	}
+	if dig(cfg, "api_key") != apiKey || dig(cfg, "api_secret") != apiSecret {
+		t.Errorf("%s: api_key, api_secret = %v, %v; want %q, %q", where, dig(cfg, "api_key"), dig(cfg, "api_secret"), apiKey, apiSecret)
+	}
+	if n, _ := toInt(dig(cfg, "health_port")); n != 8080 {
+		t.Errorf("%s: health_port = %v, want 8080", where, dig(cfg, "health_port"))
+	}
+	return cfg
+}
+
+// Egress and its Redis in Kubernetes: pinned images, the config pinned (and
+// every $(NAME) it uses defined by an earlier env entry), the image's own
+// non-root user, and a Redis that persists nothing.
+func TestKubernetesEgressAndRedis(t *testing.T) {
+	docs := render(t, "kubernetes")
+	dep := find(t, docs, "Deployment", "egress")
+	c := container(t, dep, "egress")
+	if img, _ := c["image"].(string); !egressImage.MatchString(img) {
+		t.Errorf("egress image = %q, want livekit/egress v1.15.0 pinned by digest", img)
+	}
+	e, i := envEntry(c, "EGRESS_CONFIG_BODY")
+	if e == nil {
+		t.Fatal("the egress container has no EGRESS_CONFIG_BODY")
+	}
+	body, _ := e["value"].(string)
+	for _, m := range kubeVar.FindAllStringSubmatch(body, -1) {
+		if _, j := envEntry(c, m[1]); j < 0 || j >= i {
+			t.Errorf("EGRESS_CONFIG_BODY uses $(%s), which is not defined before it", m[1])
+		}
+	}
+	egressConfig(t, "kubernetes", body, "$(LIVEKIT_API_KEY)", "$(LIVEKIT_API_SECRET)")
+	if n, _ := toInt(dig(dep, "spec", "replicas")); n != 1 {
+		t.Errorf("egress replicas = %v, want 1", dig(dep, "spec", "replicas"))
+	}
+	if u, _ := toInt(dig(dep, "spec", "template", "spec", "securityContext", "runAsUser")); u != 1001 {
+		t.Errorf("egress runAsUser = %v, want the image's egress user, 1001", u)
+	}
+	r := find(t, docs, "Deployment", "redis-meetings")
+	rc := container(t, r, "redis")
+	if img, _ := rc["image"].(string); !redisImage.MatchString(img) {
+		t.Errorf("redis image = %q, want redis 7.2.17-alpine3.22 pinned by digest", img)
+	}
+	args := fmt.Sprint(rc["args"])
+	if !strings.Contains(args, "--save  --appendonly no") {
+		t.Errorf("redis args %s: want no snapshot (--save \"\") and no AOF", args)
+	}
+	find(t, docs, "Service", "redis-meetings")
+	// No Service exposes Egress: nothing calls it but LiveKit, through Redis.
+	for _, s := range ofKind(docs, "Service") {
+		if dig(s, "spec", "selector", "app.kubernetes.io/name") == "egress" {
+			t.Errorf("Service %v exposes Egress", dig(s, "metadata", "name"))
+		}
+	}
+}
 
 // 🔴 The muster address each deployment ships passes the plugin's own
 // check with the settings it ships beside it: the Kubernetes base's
@@ -547,8 +732,8 @@ func TestTheShippedMusterURLsPassTheCheck(t *testing.T) {
 	if _, err := muster.CheckBaseURL(u, muster.HTTPAllow{Host: host}); err != nil {
 		t.Errorf("compose MUSTER_URL %q with MEETINGS_MUSTER_HTTP_HOST %q: %v", u, host, err)
 	}
-	if nets := dig(c, "services", "muster-meetings", "networks"); !slices.Contains(nets.([]any), any("default")) {
-		t.Errorf("compose muster-meetings networks = %v: want muster's default network, where `muster` resolves", nets)
+	if nets, _ := dig(c, "services", "muster-meetings", "networks").(obj); nets == nil || !hasKey(nets, "default") {
+		t.Errorf("compose muster-meetings networks = %v: want muster's default network, where `muster` resolves", dig(c, "services", "muster-meetings", "networks"))
 	}
 }
 
@@ -580,11 +765,17 @@ func TestTheExampleOverlaySetsEveryKnob(t *testing.T) {
 	}
 	for _, d := range ofKind(docs, "ConfigMap") {
 		data := d["data"].(obj)
-		if data["client-ip-header"] != "CF-Connecting-IP" || data["trusted-proxies"] != "192.0.2.0/24" || data["turn-domain"] != "meet-turn-muster.example.test" {
+		if data["client-ip-header"] != "CF-Connecting-IP" || data["trusted-proxies"] != "192.0.2.0/24" || data["turn-domain"] != "meet-turn-muster.example.test" ||
+			data["stt-url"] != "http://muster-stt-cohere:8000" {
 			t.Errorf("params = %v", data)
 		}
 	}
+	if got := dig(find(t, docs, "NetworkPolicy", "muster-meetings"), "spec", "egress", 2, "to", 0, "podSelector", "matchLabels"); !reflect.DeepEqual(got, obj{"app": "muster-stt-cohere"}) {
+		t.Errorf("the overlay's STT selector = %v", got)
+	}
 }
+
+func hasKey(m obj, k string) bool { _, ok := m[k]; return ok }
 
 // composeEnv expands ${NAME}, ${NAME:-default} and ${NAME-default} as
 // Compose does, from env.
@@ -633,9 +824,10 @@ func TestComposeLiveKitConfig(t *testing.T) {
 	if got := dig(lk, "networks", "meetings", "ipv4_address"); got != "172.31.250.77" {
 		t.Errorf("compose livekit ipv4_address = %v, want rtc.node_ip's 172.31.250.77", got)
 	}
-	for svc, want := range map[string][]string{"livekit": {"5349", "7880"}, "muster-meetings": {"8080"}} {
+	for svc, want := range map[string][]string{"livekit": {"5349", "7880"}, "muster-meetings": {"8080"}, "egress": nil, "redis-meetings": nil} {
 		var got []string
-		for _, p := range dig(c, "services", svc, "ports").([]any) {
+		ports, _ := dig(c, "services", svc, "ports").([]any)
+		for _, p := range ports {
 			s := fmt.Sprint(p)
 			if strings.Contains(s, "/udp") {
 				t.Errorf("compose %s publishes %s: no UDP in phase 2c", svc, s)
@@ -697,7 +889,7 @@ func TestTheDeploymentFilesNameNoRealHost(t *testing.T) {
 	ipv4 := regexp.MustCompile(`\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b`)
 	allowedNets := []netip.Prefix{
 		netip.MustParsePrefix("192.0.2.0/24"), netip.MustParsePrefix("198.51.100.0/24"), netip.MustParsePrefix("203.0.113.0/24"),
-		netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("172.31.250.0/24"), netip.MustParsePrefix("10.0.0.0/8"),
+		netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("172.31.250.0/24"), netip.MustParsePrefix("172.31.251.0/24"), netip.MustParsePrefix("10.0.0.0/8"),
 	}
 	seen := 0
 	for _, f := range files {
@@ -727,5 +919,72 @@ func TestTheDeploymentFilesNameNoRealHost(t *testing.T) {
 	}
 	if seen < 10 {
 		t.Fatalf("only %d URLs found in %d files: the scan is not reading them", seen, len(files))
+	}
+}
+
+// 🔴 Egress and Redis in Compose: the same images and Egress config as
+// Kubernetes; the ingest on an INTERNAL network only the plugin and Egress
+// join, the plugin listening for it on its own address there and sending
+// Egress to that address; nothing of either published.
+func TestComposeEgressRedisAndTheIngestNetwork(t *testing.T) {
+	fx := map[string]string{"LIVEKIT_API_KEY": "APIcomposeFixture", "LIVEKIT_API_SECRET": "compose-fixture-secret-0123456789", "MEETINGS_INGEST_ADDR": "172.31.251.77"}
+	c := readCompose(t, fx)
+	eg := dig(c, "services", "egress").(obj)
+	if img, _ := eg["image"].(string); !egressImage.MatchString(img) {
+		t.Errorf("compose egress image = %q", img)
+	}
+	body, _ := dig(eg, "environment", "EGRESS_CONFIG_BODY").(string)
+	composeCfg := egressConfig(t, "compose", body, "APIcomposeFixture", "compose-fixture-secret-0123456789")
+	// One Egress config, two files.
+	docs := render(t, "kubernetes")
+	e, _ := envEntry(container(t, find(t, docs, "Deployment", "egress"), "egress"), "EGRESS_CONFIG_BODY")
+	var kube obj
+	yaml.Unmarshal([]byte(kubeVar.ReplaceAllStringFunc(e["value"].(string), func(m string) string {
+		return map[string]string{"$(LIVEKIT_API_KEY)": "APIcomposeFixture", "$(LIVEKIT_API_SECRET)": "compose-fixture-secret-0123456789"}[m]
+	})), &kube)
+	if !reflect.DeepEqual(kube, composeCfg) {
+		t.Errorf("the Egress configs differ:\nkubernetes: %v\ncompose:    %v", kube, composeCfg)
+	}
+	if eg["user"] != "1001:0" {
+		t.Errorf("compose egress user = %v, want the image's egress user 1001:0", eg["user"])
+	}
+	r := dig(c, "services", "redis-meetings").(obj)
+	if img, _ := r["image"].(string); !redisImage.MatchString(img) {
+		t.Errorf("compose redis image = %q", img)
+	}
+	if r["read_only"] != true || !strings.Contains(fmt.Sprint(r["command"]), "--save  --appendonly no") {
+		t.Errorf("compose redis: read_only %v, command %v", r["read_only"], r["command"])
+	}
+	// The ingest network: internal, and joined by the plugin and Egress alone.
+	if dig(c, "networks", "meetings-ingest", "internal") != true {
+		t.Errorf("compose meetings-ingest internal = %v, want true (no route out)", dig(c, "networks", "meetings-ingest", "internal"))
+	}
+	var on []string
+	for name, svc := range dig(c, "services").(obj) {
+		switch n := dig(svc, "networks").(type) {
+		case []any:
+			if slices.Contains(n, any("meetings-ingest")) {
+				on = append(on, name)
+			}
+		case obj:
+			if hasKey(n, "meetings-ingest") {
+				on = append(on, name)
+			}
+		}
+	}
+	sort.Strings(on)
+	if !slices.Equal(on, []string{"egress", "muster-meetings"}) {
+		t.Errorf("meetings-ingest is joined by %v, want egress and muster-meetings alone", on)
+	}
+	env := dig(c, "services", "muster-meetings", "environment").(obj)
+	if env["MEETINGS_INGEST_LISTEN"] != "172.31.251.77:8082" || env["MEETINGS_INGEST_URL"] != "ws://172.31.251.77:8082" ||
+		dig(c, "services", "muster-meetings", "networks", "meetings-ingest", "ipv4_address") != "172.31.251.77" {
+		t.Errorf("compose ingest: listen %v, url %v, address %v; want all the plugin's own meetings-ingest address",
+			env["MEETINGS_INGEST_LISTEN"], env["MEETINGS_INGEST_URL"], dig(c, "services", "muster-meetings", "networks", "meetings-ingest"))
+	}
+	for _, svc := range []string{"egress", "redis-meetings"} {
+		if pr := dig(c, "services", svc, "profiles"); !reflect.DeepEqual(pr, []any{"meetings"}) {
+			t.Errorf("compose %s profiles = %v", svc, pr)
+		}
 	}
 }

@@ -116,10 +116,11 @@ logging:
 	if !ingest.ValidTrack(track) || speaker != "Ada L." || state != store.TrackActive {
 		t.Fatalf("the track row: %q %q %q, want a LiveKit track id, Ada L., active", track, speaker, state)
 	}
-	// With no Egress attached LiveKit refuses the start (measured on
-	// livekit-server 1.13.11: it waits 10 s for an Egress, then answers 408
-	// "canceled"): the plugin says so, retries, and the transcript shows a
-	// gap.
+	// With no Egress attached the start never completes: the plugin's own
+	// HTTP client gives up after 10 s (internal/livekit/api.go), and
+	// livekit-server then logs a 408 "request canceled" because the plugin
+	// hung up, not because it refused. The plugin says so, retries, and the
+	// transcript shows a gap.
 	eventually(t, 25*time.Second, "a refused StartTrackEgress is retried", func() bool {
 		return strings.Count(e.log.String(), "transcript: starting a track egress failed") >= 2
 	})
@@ -165,8 +166,11 @@ logging:
 	if ls[0].Speaker != "Ada L." || ls[0].Text != fakeScript[0] {
 		t.Fatalf("the line = %+v", ls[0])
 	}
+	// Invariant guard, not proof the loop ended: an attempt started at the
+	// release would log its failure only ~10 s later, after this runs. The
+	// proof is the nonce and registration check above.
 	if now := strings.Count(e.log.String(), "transcript: starting a track egress failed"); now != fails {
-		t.Fatalf("%d failed attempts logged, want %d: the loop went on after the stream connected", now, fails)
+		t.Fatalf("%d failed attempts logged, want %d", now, fails)
 	}
 
 	// The participant leaves: the real track_unpublished ends the track, and

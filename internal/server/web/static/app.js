@@ -344,6 +344,8 @@
     inviteClosed = false;
     invite(true);
     var id = call.id;
+    // Connecting from this moment: the device lookup below is part of it.
+    connState('connecting');
     MeetingsCall.usable(media).then(function (m) { if (call && call.id === id) connect(id, m); });
   }
 

@@ -186,8 +186,8 @@ for (const size of sizes) {
       await lk(f, 'endLocalShare');
       await expect(share).toHaveAttribute('aria-pressed', 'false');
       await expect(app.locator('#presenting')).toBeHidden();
+      await expect(app.locator('.tile[data-source="screen_share"]:not(.leaving)'), "the browser's Stop removed the share's tile").toHaveCount(0);
       await expect(app.locator('#call-view')).toHaveAttribute('data-layout', 'grid');
-      await expect(app.locator('.tile[data-source="screen_share"]:not(.leaving)')).toHaveCount(0);
       // Stop from the tile's own button too.
       await share.click();
       await mine.locator('.stop-share').click();

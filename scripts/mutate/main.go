@@ -928,15 +928,15 @@ var mutants = []mutant{
 	{name: "ui: presentation does not switch on a share", file: callJS, from: "return manual || (s ? 'presentation' : 'grid');", to: "return manual || 'grid';",
 		e2e: "ui-call.spec.ts", test: "1280x800 .* shared screen switches", want: "data-layout"},
 	{name: "ui: the browser's own Stop leaves the share up", file: callJS, from: "if (pub.source === 'screen_share') dropTile(", to: "if (false) dropTile(",
-		e2e: "ui-call.spec.ts", test: "1280x800 .*your own share", want: "screen_share"},
+		e2e: "ui-call.spec.ts", test: "1280x800 .*your own share", want: "the browser's Stop"},
 	{name: "ui: the quality icon ignores LiveKit's quality", file: callJS, from: "var q = QUALITY[p.connectionQuality];", to: "var q = QUALITY[p.connectionQuality] && QUALITY.excellent;",
 		e2e: "ui-call.spec.ts", test: "1280x800 .* connection indicator", want: "Connection poor"},
 	{name: "ui: an aria-label missing (a template's icon button)", file: appHTML, from: `<button id="btn-layout" type="button" class="mu-icon-btn mu-toggle" aria-label="Presentation view" `, to: `<button id="btn-layout" type="button" class="mu-icon-btn mu-toggle" `,
 		e2e: "ui-call.spec.ts", test: "1280x800 .* accessible name", want: "btn-layout"},
 	{name: "ui: an aria-label missing (a script's icon button)", file: uiJS, from: "    label(b, text);\n", to: "\n",
 		e2e: "ui-call.spec.ts", test: "1280x800 .* accessible name", want: "mu-icon-btn"},
-	{name: "ui: reduced motion ignored (a literal duration)", file: appCSS, from: ".controls .mu-icon-btn .mu-icon { transition: transform var(--mu-dur-fast) var(--mu-ease-standard); }", to: ".controls .mu-icon-btn .mu-icon { transition: transform 120ms var(--mu-ease-standard); }",
-		e2e: "ui-call.spec.ts", test: "reduced motion", want: "transition 0.12s"},
+	{name: "ui: reduced motion ignored (a literal duration)", file: appCSS, from: "opacity var(--mu-dur-base) var(--mu-ease-exit), transform", to: "opacity 200ms var(--mu-ease-exit), transform",
+		e2e: "ui-call.spec.ts", test: "reduced motion", want: "transition 0s, 0.2s, 0s"},
 	{name: "ui: reduced motion ignored (the FLIP animation)", file: uiJS, from: "    var d = dur('base');\n    var before", to: "    var d = 200;\n    var before",
 		e2e: "ui-call.spec.ts", test: "reduced motion", want: "expect(moving).toBe(0)"},
 	{name: "ui: Share drawn where getDisplayMedia is missing", file: callJS, from: "shareBtn.hidden = !(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia);", to: "shareBtn.hidden = false;",
@@ -946,7 +946,7 @@ var mutants = []mutant{
 	{name: "ui: Join before the device check", file: appJS, from: "$('btn-join').disabled = s === 'checking' || s === 'idle';", to: "$('btn-join').disabled = false;",
 		e2e: "ui-call.spec.ts", test: "1280x800 .* pre-join holds Join", want: "toBeDisabled"},
 	{name: "ui: no fallback when the kit does not load", file: uiJS, from: "  if (!cssLive) {\n", to: "  if (false) {\n",
-		e2e: "ui-kit.spec.ts", test: "kit's css,js missing", want: "--mu-bg"},
+		e2e: "ui-kit.spec.ts", test: "kit's css,js missing", want: "the fallback stylesheet was linked"},
 	{name: "ui: the kit from the wrong origin", file: appHTML, from: `<link rel="stylesheet" href="{{.Kit}}/kit.css">`, to: `<link rel="stylesheet" href="/ui-kit/v1/kit.css">`,
 		e2e: "ui-kit.spec.ts", test: "configured muster origin", want: "kit.css"},
 
@@ -1118,10 +1118,28 @@ func runE2E(m mutant) (string, string) {
 	if !regexp.MustCompile(`\b1 failed\b`).MatchString(s) {
 		return "ERROR", "failed without exactly one test failing (a broken page?): " + lastLine(s)
 	}
-	if m.want != "" && !strings.Contains(s, m.want) {
+	// want is looked for in the failure itself (from "Error:" to the code
+	// excerpt), never in the excerpt's neighbouring lines: a want that only
+	// matched the source around a different failing assertion would be a
+	// kill for the wrong reason.
+	if m.want != "" && !strings.Contains(e2eFailure(s), m.want) {
 		return "ERROR", fmt.Sprintf("the test failed, but not with %q: %s", m.want, e2eFailLine(s))
 	}
 	return "KILLED", e2eFailLine(s)
+}
+
+// e2eFailure is a Playwright failure's report: from its first "Error:" line
+// up to the code excerpt (the first "  NN |" line).
+func e2eFailure(s string) string {
+	i := strings.Index(s, "Error:")
+	if i < 0 {
+		return ""
+	}
+	s = s[i:]
+	if loc := regexp.MustCompile(`(?m)^\s*>?\s*\d+ \|`).FindStringIndex(s); loc != nil {
+		s = s[:loc[0]]
+	}
+	return s
 }
 
 func lastLine(s string) string {

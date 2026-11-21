@@ -10,9 +10,10 @@
 //     deleted and every open meeting ended, and the app refuses every owner
 //     request and every /enter from then on.
 //   - POST /plugin/v1/owners/check for every subject with a live owner
-//     session or an open meeting. 🔴 A subject absent from "live" ends that
-//     person's sessions and meetings. Only an answer ends anything: a 5xx or
-//     no answer keeps what is held.
+//     session or an open meeting. "expired" ends that person's sessions and
+//     keeps their meetings; 🔴 "revoked", any other state, or no answer for
+//     the subject ends their sessions and meetings. Only an answer ends
+//     anything: a 5xx or no answer at all keeps what is held.
 //
 // Boot does the same once, before the plugin serves anyone, so a revocation
 // it slept through is applied first.
@@ -118,15 +119,20 @@ func (a *App) Revoke(ctx context.Context, why string) {
 	a.log.Printf("owners: %s: %d sessions deleted, %d meetings ended", why, res.Sessions, res.Meetings)
 }
 
-// checkOwners asks owners/check about every held subject and ends each one
-// muster does not answer live. A 401 revokes the app and returns ErrRevoked;
-// any other failure returns it and ends nothing.
+// checkOwners asks owners/check about every held subject and acts on each
+// state: live keeps it; expired ends the person's owner sessions only, so
+// their open meetings keep running for the guests (they end by End meeting,
+// the 24 h link lifetime or the sweep, and the owner reopens the tab to see
+// them); revoked ends their sessions and open meetings. 🔴 Anything else,
+// including a subject absent from the answer, is revoked: fail closed. A
+// 401 revokes the app and returns ErrRevoked; any other failure returns it
+// and ends nothing.
 func (a *App) checkOwners(ctx context.Context) error {
 	held, err := a.store.HeldSubjects(ctx, a.now())
 	if err != nil || len(held) == 0 {
 		return err
 	}
-	live, err := a.Client.OwnersCheck(ctx, held)
+	states, err := a.Client.OwnersCheck(ctx, held)
 	if e := muster.AsError(err); e != nil && e.Kind == muster.KindAuth {
 		a.Revoke(ctx, "owners/check answered 401")
 		return ErrRevoked
@@ -134,21 +140,31 @@ func (a *App) checkOwners(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	var gone []string
+	var revoked, expired []string
 	for _, s := range held {
-		if !live[s] {
-			gone = append(gone, s)
+		switch states[s] {
+		case muster.StateLive:
+		case muster.StateExpired:
+			expired = append(expired, s)
+		default: // revoked, another state, or absent
+			revoked = append(revoked, s)
 		}
 	}
-	if len(gone) == 0 {
-		return nil
+	if len(expired) > 0 {
+		n, err := a.store.EndSessions(ctx, expired, a.now())
+		if err != nil {
+			return err
+		}
+		a.log.Printf("owners: %d of %d people's grants expired: %d sessions deleted, their meetings kept", len(expired), len(held), n)
 	}
-	res, err := a.store.EndSubjects(ctx, gone, a.now())
-	if err != nil {
-		return err
+	if len(revoked) > 0 {
+		res, err := a.store.EndSubjects(ctx, revoked, a.now())
+		if err != nil {
+			return err
+		}
+		a.log.Printf("owners: muster revoked the app for %d of %d people: %d sessions deleted, %d meetings ended",
+			len(revoked), len(held), res.Sessions, res.Meetings)
 	}
-	a.log.Printf("owners: muster no longer lets the app act for %d of %d people: %d sessions deleted, %d meetings ended",
-		len(gone), len(held), res.Sessions, res.Meetings)
 	return nil
 }
 

@@ -18,8 +18,10 @@
 //     drawn (pairwise: one per person per app); signin_at is the code's
 //     sign-in time, never now; act_until = max(act_until, now + 8 h). The
 //     answer names the subject and display name, never a user id or email.
-//   - One predicate, grantLive, decides "may this app act for this
-//     subject", and both owners/check and every act-for route ask it.
+//   - One predicate, grantState, decides "may this app act for this
+//     subject" (live, expired or revoked); owners/check answers it, and
+//     every act-for route admits only live. A subject the app never held is
+//     absent from owners/check's answer.
 //   - Act-for routes (notify, its DELETE, tasks) need exactly one
 //     Muster-Act-For header (missing or doubled: 400); an unknown, another
 //     app's, expired, hidden, disabled or signed-out subject is one 404 body.
@@ -499,12 +501,33 @@ func signedInAfterCutoff(signin time.Time, p *person) bool {
 	return p.signedOut.IsZero() || sec(signin) > sec(p.signedOut)
 }
 
-// grantLive is serverGrantLive: the ONE predicate that decides whether the
-// app may act for a person. owners/check and every act-for route call it.
-func (f *Fake) grantLive(a *app, userID int64, g *grant, now time.Time) bool {
+// grantState is serverGrantLive, with the reason when it fails: the ONE
+// predicate that decides whether the app may act for a person. owners/check
+// answers it, and every act-for route admits only "live". "expired" is a
+// grant whose only failing gate is act_until; every other failing gate is
+// "revoked".
+func (f *Fake) grantState(a *app, userID int64, g *grant, now time.Time) string {
 	p := f.people[userID]
-	return !a.revoked && g.actUntil.After(now) && !g.hidden && g.signinAt != nil &&
-		p != nil && !p.disabled && signedInAfterCutoff(*g.signinAt, p)
+	if a.revoked || g.hidden || g.signinAt == nil || p == nil || p.disabled || !signedInAfterCutoff(*g.signinAt, p) {
+		return "revoked"
+	}
+	if !g.actUntil.After(now) {
+		return "expired"
+	}
+	return "live"
+}
+
+func (f *Fake) grantLive(a *app, userID int64, g *grant, now time.Time) bool {
+	return f.grantState(a, userID, g, now) == "live"
+}
+
+// Expire ends the person's grant by its clock alone (act_until = now), as
+// 8 hours without opening the tab does, while their owner session may still
+// be live.
+func (f *Fake) Expire(pluginID, userID int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.byID[pluginID].grants[userID].actUntil = f.Now()
 }
 
 func (f *Fake) redeem(w http.ResponseWriter, r *http.Request, c caller) {
@@ -586,15 +609,16 @@ func (f *Fake) ownersCheck(w http.ResponseWriter, r *http.Request, c caller) {
 		return
 	}
 	now := f.Now()
-	live := []string{}
+	// A subject the app never held is left out of the answer.
+	states := map[string]string{}
 	for _, s := range in.Subjects {
 		for uid, g := range c.app.grants {
-			if g.subject == s && f.grantLive(c.app, uid, g, now) {
-				live = append(live, s)
+			if g.subject == s {
+				states[s] = f.grantState(c.app, uid, g, now)
 			}
 		}
 	}
-	writeJSON(w, 200, map[string]any{"live": live})
+	writeJSON(w, 200, map[string]any{"states": states})
 }
 
 // actFor resolves the Muster-Act-For header to the person it names, or

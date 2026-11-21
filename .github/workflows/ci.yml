@@ -32,3 +32,30 @@ jobs:
       - run: go test -race ./...
       - name: security-gate mutation sweep (each gate's mutant must turn its named test red)
         run: go run ./scripts/mutate
+
+  e2e:
+    name: e2e (playwright, chromium)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: npm ci
+        working-directory: e2e
+        run: npm ci
+      - name: install chromium
+        working-directory: e2e
+        run: npx playwright install --with-deps chromium
+      # The /enter frame gate in a real browser: a top-level load is refused
+      # with no redeem; the same code framed by a muster-like parent works.
+      # Count the passes: `playwright test` exits 0 when everything skipped.
+      - name: playwright test
+        working-directory: e2e
+        run: |
+          set -o pipefail
+          npx playwright test 2>&1 | tee /tmp/e2e.log
+          grep -q '1 passed' /tmp/e2e.log

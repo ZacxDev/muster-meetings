@@ -80,19 +80,16 @@ func (x *fx) knock(a mustertest.App, subject string) int {
 	return st
 }
 
-func (x *fx) live(a mustertest.App, subjects ...string) map[string]bool {
+// states is owners/check's answer: subject → live, expired or revoked.
+func (x *fx) states(a mustertest.App, subjects ...string) map[string]string {
 	x.t.Helper()
 	st, body := x.call("POST", "/plugin/v1/owners/check", a.Token, map[string]any{"subjects": subjects})
 	if st != 200 {
 		x.t.Fatalf("owners/check = %d %s", st, body)
 	}
-	var out struct{ Live []string }
+	var out struct{ States map[string]string }
 	json.Unmarshal([]byte(body), &out)
-	m := map[string]bool{}
-	for _, s := range out.Live {
-		m[s] = true
-	}
-	return m
+	return out.States
 }
 
 func TestTheRedeemAnswerNamesASubjectAndNoUserIDOrEmail(t *testing.T) {
@@ -117,26 +114,32 @@ func TestTheRedeemAnswerNamesASubjectAndNoUserIDOrEmail(t *testing.T) {
 	}
 }
 
-// One predicate, two consumers: each gate closed alone is 404 on act-for and
-// absent from owners/check; the open case is 202 and present.
+// One predicate, two consumers: each gate closed alone is 404 on act-for,
+// and owners/check names it: "expired" when act_until alone has passed,
+// "revoked" for every other gate. The open case is 202 and "live".
 func TestEveryGrantGateEndsActForAndOwnersCheckAlike(t *testing.T) {
-	cases := map[string]func(x *fx){
-		"open":                  func(x *fx) {},
-		"act_until passed":      func(x *fx) { x.now = x.now.Add(8 * time.Hour) },
-		"hidden":                func(x *fx) { x.f.Hide(app.PluginID, ada.ID) },
-		"disabled":              func(x *fx) { x.f.Disable(ada.ID) },
-		"signed out everywhere": func(x *fx) { x.now = x.now.Add(time.Second); x.f.SignOutEverywhere(ada.ID) },
+	cases := map[string]struct {
+		close func(x *fx)
+		state string
+	}{
+		"open":                  {func(x *fx) {}, "live"},
+		"act_until passed":      {func(x *fx) { x.now = x.now.Add(8 * time.Hour) }, "expired"},
+		"Expire":                {func(x *fx) { x.f.Expire(app.PluginID, ada.ID) }, "expired"},
+		"hidden":                {func(x *fx) { x.f.Hide(app.PluginID, ada.ID) }, "revoked"},
+		"disabled":              {func(x *fx) { x.f.Disable(ada.ID) }, "revoked"},
+		"signed out everywhere": {func(x *fx) { x.now = x.now.Add(time.Second); x.f.SignOutEverywhere(ada.ID) }, "revoked"},
+		// Expired AND hidden is revoked: expiry is only the clock alone.
+		"expired and hidden": {func(x *fx) { x.now = x.now.Add(9 * time.Hour); x.f.Hide(app.PluginID, ada.ID) }, "revoked"},
 	}
-	for name, close := range cases {
+	for name, c := range cases {
 		x := newFx(t)
 		sub, _ := x.redeem(app, ada)
-		close(x)
-		wantLive := name == "open"
-		if got := x.live(app, sub)[sub]; got != wantLive {
-			t.Errorf("%s: owners/check live = %v, want %v", name, got, wantLive)
+		c.close(x)
+		if got := x.states(app, sub)[sub]; got != c.state {
+			t.Errorf("%s: owners/check state = %q, want %q", name, got, c.state)
 		}
 		want := 404
-		if wantLive {
+		if c.state == "live" {
 			want = 202
 		}
 		if st := x.knock(app, sub); st != want {
@@ -147,7 +150,7 @@ func TestEveryGrantGateEndsActForAndOwnersCheckAlike(t *testing.T) {
 	x := newFx(t)
 	sub, _ := x.redeem(app, ada)
 	x.now = x.now.Add(8*time.Hour - time.Second)
-	if !x.live(app, sub)[sub] || x.knock(app, sub) != 202 {
+	if x.states(app, sub)[sub] != "live" || x.knock(app, sub) != 202 {
 		t.Fatal("at 8 h - 1 s the grant is not live")
 	}
 }
@@ -199,8 +202,12 @@ func TestHideThenShowNeedsAFreshRedeemAndKeepsTheSubject(t *testing.T) {
 	}
 	// Hide by a person who never opened the app: a row that never acts.
 	x.f.Hide(app.PluginID, bea.ID)
-	if sb := x.f.Subject(app.PluginID, bea.ID); sb == "" || x.live(app, sb)[sb] {
-		t.Fatal("a Hide-only row is live")
+	if sb := x.f.Subject(app.PluginID, bea.ID); sb == "" || x.states(app, sb)[sb] != "revoked" {
+		t.Fatal("a Hide-only row is not revoked")
+	}
+	// A subject the app never held is absent from the answer.
+	if st, ok := x.states(app, "Unkn0wnSubjectXXXXXXXX")["Unkn0wnSubjectXXXXXXXX"]; ok {
+		t.Fatalf("an unknown subject is answered %q", st)
 	}
 }
 

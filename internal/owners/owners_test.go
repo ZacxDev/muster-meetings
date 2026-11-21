@@ -211,8 +211,8 @@ func TestARotatedTokenEndsEverythingAndTheNewOneKeepsTheSubjects(t *testing.T) {
 		t.Fatal("a session survived the rotation")
 	}
 	c2, _ := muster.New(f.URL, "mpl_server_rotated_4c2e")
-	live, err := c2.OwnersCheck(ctx, []string{sa})
-	if err != nil || !live[sa] {
-		t.Fatalf("the new token's owners/check = %v, %v: the subject was lost", live, err)
+	states, err := c2.OwnersCheck(ctx, []string{sa})
+	if err != nil || states[sa] != muster.StateLive {
+		t.Fatalf("the new token's owners/check = %v, %v: the subject was lost", states, err)
 	}
 }

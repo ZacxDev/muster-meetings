@@ -59,11 +59,15 @@ tab. muster never calls the plugin; the plugin calls muster.
    `401` means the app was uninstalled or its token rotated away, and the
    plugin deletes **every** session and ends **every** open meeting. And
    `POST /plugin/v1/owners/check` with the subjects it holds a live session
-   or an open meeting for: anyone muster does not answer live (they hid the
-   app on Account → Apps, were disabled, signed out everywhere, or have not
-   opened the tab in 8 hours) loses their sessions and open meetings, and
-   nobody else does. Only an answer ends anything: a muster that is down or
-   failing ends nothing. The plugin does both before it serves anyone when
+   or an open meeting for, which muster answers `live`, `expired` or
+   `revoked` for each. **Expired** (the person has not opened the tab in 8
+   hours, and nothing else) ends their owner sessions only: their open
+   meetings keep running for the guests, and they find them still open when
+   they reopen the tab. **Revoked** (they hid the app on Account → Apps, were
+   disabled, or signed out everywhere) ends their sessions and their open
+   meetings. A subject muster does not answer at all, or answers with any
+   other state, is treated as revoked. Nobody else is touched, and only an
+   answer ends anything: a muster that is down or failing ends nothing. The plugin does both before it serves anyone when
    it starts, so what it slept through is applied first.
 
 ## Set it up
@@ -186,9 +190,10 @@ instructions.
 
 For a person, the app can only act (knock, file a task) by naming their
 subject in `Muster-Act-For`, and only for 8 hours after they last opened the
-tab. Each person can **Hide** it on Account → Apps: the tab goes, an open
-frame goes within 30 s (muster's own poll), and within 60 s the plugin ends
-that person's sessions and open meetings. **Uninstall** on `/admin/apps`
+tab; past that, their owner session ends but their open meetings keep
+running. Each person can **Hide** it on Account → Apps: the tab goes, an
+open frame goes within 30 s (muster's own poll), and within 60 s the plugin
+ends that person's sessions and open meetings. **Uninstall** on `/admin/apps`
 does the same for everyone.
 
 ## Telemetry and data leaving your network
@@ -203,7 +208,16 @@ release that adds it.
 ```sh
 go test -race ./...
 go run ./scripts/mutate   # the security-gate mutation sweep
+cd e2e && npm ci && npx playwright install chromium && npx playwright test
 ```
+
+The browser test (`e2e/`, Chromium) runs the plugin against the fake muster
+through `scripts/e2e-harness`, with a muster-like parent on another origin.
+It loads `/enter` top level and checks it is refused with no redeem, then
+frames the same code from the parent and checks the app opens and makes a
+meeting. On NixOS, set `PLAYWRIGHT_BROWSERS_PATH` to
+`nix build --print-out-paths nixpkgs#playwright-driver.browsers` (it must
+match `@playwright/test` in `e2e/package.json`).
 
 The tests run against `internal/mustertest`, a fake muster built to the
 server-installed app design: an admin's install, Rotate and Uninstall;
@@ -211,7 +225,7 @@ people who sign in, sign out everywhere, are disabled, or Hide the app;
 hand-off codes (single use, 60 s, bound to the app, carrying the minting
 session's sign-in time); the redeem's re-checks and its grant (a pairwise
 random subject, `act_until` 8 hours on); one predicate for "may this app act
-for this person", asked by both `owners/check` and the `Muster-Act-For`
+for this person" (`live`, `expired` or `revoked`), answered by `owners/check` and asked by the `Muster-Act-For`
 routes (notify, its withdrawal, and tasks through the app's own ledger). It
 has its own tests for those rules.
 
@@ -240,6 +254,7 @@ that core change exists. Not yet run against a live muster.
 | `internal/store` | SQLite: schema, sessions, the owner-scoped repository, random codes |
 | `internal/server` | the HTTP routes, headers and the owner page (`web/`) |
 | `scripts/mutate` | the security-gate mutation sweep |
+| `scripts/e2e-harness`, `e2e/` | the browser test of the `/enter` frame gate |
 
 ## Licence
 

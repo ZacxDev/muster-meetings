@@ -171,12 +171,21 @@ var mutants = []mutant{
 		pkg: "./internal/server", test: "TestALivenessPollThatFailsEndsNoOne", want: "/self 503: Ada's session = 401"},
 
 	// ---- owners/check: a subject muster no longer answers live ----
-	{name: "owners/check: ignore an absence", file: own, from: "if !live[s] {", to: "if false && !live[s] {",
+	{name: "owners/check: ignore a revoked answer", file: own, from: "revoked = append(revoked, s)", to: "_ = s",
 		pkg: "./internal/server", test: "TestAPersonMusterNoLongerAnswersLiveLosesTheirSessionsAndMeetingsAndNoOneElse", want: "hidden: Ada's session after the poll = 200"},
+	{name: "owners/check: revoked treated as expired", file: own, from: "revoked = append(revoked, s)", to: "expired = append(expired, s)",
+		pkg: "./internal/server", test: "TestAPersonMusterNoLongerAnswersLiveLosesTheirSessionsAndMeetingsAndNoOneElse", want: `hidden: Ada's meeting after the poll = "open"`},
+	{name: "owners/check: expired treated as revoked", file: own, from: "expired = append(expired, s)", to: "revoked = append(revoked, s)",
+		pkg: "./internal/server", test: "TestAnExpiredGrantEndsOnlyTheOwnersSessionsAndKeepsTheirMeetingsOpen", want: `expired: Ada's meeting after the poll = "ended"`},
+	{name: "owners/check: expired ends no session", file: st, from: "`DELETE FROM owner_sessions WHERE subject IN (SELECT j.value FROM json_each(?) AS j)`",
+		to:  "`DELETE FROM owner_sessions WHERE subject IN (SELECT j.value FROM json_each(?) AS j) AND 0`",
+		pkg: "./internal/server", test: "TestAnExpiredGrantEndsOnlyTheOwnersSessionsAndKeepsTheirMeetingsOpen", want: "expired: Ada's session after the poll = 200"},
+	{name: "owners/check: an absent or unknown state is live", file: client, from: "default:\n\t\t\t\tst = StateRevoked", to: "default:\n\t\t\t\tst = StateLive",
+		pkg: "./internal/server", test: "TestASubjectOwnersCheckDoesNotAnswerIsTreatedAsRevoked", want: `absent: the meeting after the poll = "open"`},
 	{name: "owners/check: the poll never asks", file: own, from: "if err := a.checkOwners(ctx); err != nil && !errors.Is(err, ErrRevoked) {",
 		to:  "if err := error(nil); err != nil && !errors.Is(err, ErrRevoked) {",
 		pkg: "./internal/server", test: "TestAPersonMusterNoLongerAnswersLiveLosesTheirSessionsAndMeetingsAndNoOneElse", want: "hidden: Ada's session after the poll = 200"},
-	{name: "owners/check: a failed check ends everyone held", file: own, from: "\tif err != nil {\n\t\treturn err\n\t}\n\tvar gone []string", to: "\tvar gone []string",
+	{name: "owners/check: a failed check ends everyone held", file: own, from: "\tif err != nil {\n\t\treturn err\n\t}\n\tvar revoked, expired []string", to: "\tvar revoked, expired []string",
 		pkg: "./internal/server", test: "TestALivenessPollThatFailsEndsNoOne", want: "owners/check 503: Ada's session = 401"},
 	{name: "owners/check: one person's end deletes everyone's sessions", file: st,
 		from: "`DELETE FROM owner_sessions WHERE subject IN (SELECT value FROM json_each(?))`", to: "`DELETE FROM owner_sessions WHERE ? IS NOT NULL`",
@@ -186,7 +195,7 @@ var mutants = []mutant{
 		pkg: "./internal/server", test: "TestAPersonMusterNoLongerAnswersLiveLosesTheirSessionsAndMeetingsAndNoOneElse", want: `Bea's meeting after Ada's end = "ended"`},
 	{name: "owners/check: batches of 201", file: client, from: "const MaxCheckSubjects = 200", to: "const MaxCheckSubjects = 201",
 		pkg: "./internal/muster", test: "TestOwnersCheckAnswersOnlyTheLiveSubsetItWasAsked", want: "450 subjects:"},
-	{name: "owners/check: trust a subject that was not asked", file: client, from: "if asked[s] {", to: "if true {",
+	{name: "owners/check: trust a subject that was not asked", file: client, from: "\t\t\tstates[s] = st\n\t\t}\n", to: "\t\t\tstates[s] = st\n\t\t}\n\t\tfor s, st := range out.States {\n\t\t\tstates[s] = st\n\t\t}\n",
 		pkg: "./internal/muster", test: "TestOwnersCheckAnswersOnlyTheLiveSubsetItWasAsked", want: "an answer naming a subject that was not asked"},
 
 	// ---- boot ----

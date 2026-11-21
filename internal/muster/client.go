@@ -229,35 +229,50 @@ func ValidSubject(s string) bool { return subjectRE.MatchString(s) }
 // never goes out without its Muster-Act-For header.
 var ErrBadSubject = errors.New("muster: not a subject (22 base64url characters)")
 
-// OwnersCheck is POST /plugin/v1/owners/check: which of subjects still hold
-// a live grant. It answers a subset of what it was given (anything else
-// muster named is dropped here), in batches of MaxCheckSubjects. A subject
-// absent from the answer may no longer be acted for: hidden, disabled,
-// signed out everywhere, or its 8 hours passed.
-func (c *Client) OwnersCheck(ctx context.Context, subjects []string) (map[string]bool, error) {
-	asked := make(map[string]bool, len(subjects))
+// The states owners/check answers a subject with.
+const (
+	// StateLive: the app may act for the person.
+	StateLive = "live"
+	// StateExpired: the person's 8 hours since they last opened the tab ran
+	// out, and nothing else ended it. Their owner sessions end; their open
+	// meetings keep running for the guests.
+	StateExpired = "expired"
+	// StateRevoked: the person hid the app, was disabled, or signed out
+	// everywhere. Their sessions and open meetings end.
+	StateRevoked = "revoked"
+)
+
+// OwnersCheck is POST /plugin/v1/owners/check: the state of each subject's
+// grant, {"states": {"<subject>": "live"|"expired"|"revoked"}}. 🔴 It fails
+// closed: a subject asked about but absent from the answer, or answered
+// with any other state, is StateRevoked, and a subject the answer names but
+// that was not asked is dropped. It sends batches of MaxCheckSubjects.
+func (c *Client) OwnersCheck(ctx context.Context, subjects []string) (map[string]string, error) {
 	for _, s := range subjects {
 		if !ValidSubject(s) {
 			return nil, ErrBadSubject
 		}
-		asked[s] = true
 	}
-	live := map[string]bool{}
+	states := make(map[string]string, len(subjects))
 	for i := 0; i < len(subjects); i += MaxCheckSubjects {
 		batch := subjects[i:min(i+MaxCheckSubjects, len(subjects))]
 		var out struct {
-			Live []string `json:"live"`
+			States map[string]string `json:"states"`
 		}
 		if _, err := c.do(ctx, http.MethodPost, "/plugin/v1/owners/check", nil, map[string]any{"subjects": batch}, &out); err != nil {
 			return nil, err
 		}
-		for _, s := range out.Live {
-			if asked[s] {
-				live[s] = true
+		for _, s := range batch {
+			st := out.States[s]
+			switch st {
+			case StateLive, StateExpired:
+			default:
+				st = StateRevoked
 			}
+			states[s] = st
 		}
 	}
-	return live, nil
+	return states, nil
 }
 
 // ActForHeader names the person a server token acts for on notify and

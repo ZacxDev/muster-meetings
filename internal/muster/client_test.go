@@ -199,36 +199,48 @@ func TestSelfReadsAServerAppAndNoPerson(t *testing.T) {
 	}
 }
 
-// owners/check answers a subset of what it was asked. More than 200 subjects
-// go in batches of at most 200 (the fake refuses 201), and a subject the
-// answer names but the plugin did not ask about is dropped.
+// owners/check answers each subject it was asked with live, expired or
+// revoked. 🔴 It fails closed: a subject absent from the answer, or given a
+// state the client does not know, is revoked; a subject the answer names but
+// the plugin did not ask about is dropped. More than 200 subjects go in
+// batches of at most 200 (the fake refuses 201).
 func TestOwnersCheckAnswersOnlyTheLiveSubsetItWasAsked(t *testing.T) {
 	f, c := fakeWithPeople(t)
 	sa, sb := redeemed(t, f, c, ada), redeemed(t, f, c, bea)
 	f.Hide(mustertest.DefaultApp.PluginID, bea.ID)
 	asked := []string{sa, sb}
-	for i := 0; len(asked) < 450; i++ { // subjects muster never gave: not live
+	for i := 0; len(asked) < 450; i++ { // subjects muster never gave: absent
 		asked = append(asked, ("Nv" + strconv.Itoa(100000+i) + "xxxxxxxxxxxxxxx")[:22])
 	}
-	live, err := c.OwnersCheck(context.Background(), asked)
+	states, err := c.OwnersCheck(context.Background(), asked)
 	if err != nil {
 		t.Fatalf("450 subjects: %v", err)
 	}
-	if len(live) != 1 || !live[sa] {
-		t.Fatalf("450 subjects: live = %v, want Ada's alone", live)
+	if len(states) != 450 || states[sa] != muster.StateLive || states[sb] != muster.StateRevoked || states[asked[449]] != muster.StateRevoked {
+		t.Fatalf("450 subjects: Ada %q, Bea %q, an absent one %q (%d answered); want live, revoked, revoked (450)",
+			states[sa], states[sb], states[asked[449]], len(states))
 	}
 	if n := f.CountCalls("POST", "/plugin/v1/owners/check"); n != 3 {
 		t.Fatalf("450 subjects took %d calls, want 3", n)
 	}
-	// A muster that names more than it was asked.
+	// A muster that names more than it was asked, and states the client
+	// does not know.
 	extra := "Ex7raSubjectNotAsked00"
+	odd := "OddStateSubject0000000"
+	exp := "ExpiredSubject00000000"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"live": []string{sa, extra}})
+		json.NewEncoder(w).Encode(map[string]any{"states": map[string]string{sa: "live", extra: "live", odd: "paused", exp: "expired"}})
 	}))
 	defer srv.Close()
-	live, err = client(t, srv.URL).OwnersCheck(context.Background(), []string{sa})
-	if err != nil || len(live) != 1 || !live[sa] || live[extra] {
-		t.Fatalf("an answer naming a subject that was not asked: live = %v, %v", live, err)
+	states, err = client(t, srv.URL).OwnersCheck(context.Background(), []string{sa, odd, exp})
+	if err != nil || len(states) != 3 || states[sa] != muster.StateLive || states[exp] != muster.StateExpired {
+		t.Fatalf("an answer naming a subject that was not asked: states = %v, %v", states, err)
+	}
+	if _, ok := states[extra]; ok {
+		t.Fatalf("an answer naming a subject that was not asked: states = %v", states)
+	}
+	if states[odd] != muster.StateRevoked {
+		t.Fatalf("an unknown state %q = %q, want revoked", "paused", states[odd])
 	}
 	if _, err := c.OwnersCheck(context.Background(), []string{"4093716825"}); err != muster.ErrBadSubject {
 		t.Fatalf("a user id as a subject = %v, want ErrBadSubject", err)

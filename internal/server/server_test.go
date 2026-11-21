@@ -634,21 +634,19 @@ func TestUninstallEndsEverySessionAndMeeting(t *testing.T) {
 	}
 }
 
-// 🔴 A person muster no longer answers live in owners/check (each reason
-// alone) loses their sessions and open meetings within one poll; the other
-// person keeps theirs.
+// 🔴 A person owners/check answers "revoked" (each reason alone) loses their
+// sessions and open meetings within one poll; the other person keeps theirs.
 func TestAPersonMusterNoLongerAnswersLiveLosesTheirSessionsAndMeetingsAndNoOneElse(t *testing.T) {
 	for name, end := range map[string]func(e *env){
 		"hidden":                func(e *env) { e.fake.Hide(app.PluginID, ada.ID) },
 		"disabled":              func(e *env) { e.fake.Disable(ada.ID) },
 		"signed out everywhere": func(e *env) { e.clock.Add(3 * time.Second); e.fake.SignOutEverywhere(ada.ID) },
-		// Ada's grant (and her session) end at t0 + 8 h; Bea's a minute later.
-		"the 8 h grant ran out":   func(e *env) { e.clock.Add(8*time.Hour - time.Minute) },
-		"the app was uninstalled": nil, // a separate case: TestUninstallEndsEverySessionAndMeeting
+		// Expired and then hidden: muster answers revoked, so both end.
+		"expired, then hidden": func(e *env) { e.fake.Expire(app.PluginID, ada.ID); e.fake.Hide(app.PluginID, ada.ID) },
+		// An expired grant alone keeps the meetings:
+		// TestAnExpiredGrantEndsOnlyTheOwnersSessionsAndKeepsTheirMeetingsOpen.
+		// The app uninstalled: TestUninstallEndsEverySessionAndMeeting.
 	} {
-		if end == nil {
-			continue
-		}
 		e := newEnv(t)
 		sa := e.enter(ada)
 		ma := e.create(sa)
@@ -674,6 +672,66 @@ func TestAPersonMusterNoLongerAnswersLiveLosesTheirSessionsAndMeetingsAndNoOneEl
 		if !e.app.Live() {
 			t.Errorf("%s: one person's end revoked the app", name)
 		}
+	}
+}
+
+// "expired" (8 hours since the person last opened the tab, nothing else)
+// ends only their owner sessions: their open meeting keeps running for the
+// guests, and when they reopen the tab they find it still open, with its
+// link. The other person is untouched.
+func TestAnExpiredGrantEndsOnlyTheOwnersSessionsAndKeepsTheirMeetingsOpen(t *testing.T) {
+	e := newEnv(t)
+	sa, sb := e.enter(ada), e.enter(bea)
+	ma, mb := e.create(sa), e.create(sb)
+	e.fake.Expire(app.PluginID, ada.ID)
+	e.app.PollOnce(context.Background())
+
+	if resp, _ := e.do("GET", "/api/meetings", sa, nil); resp.StatusCode != 401 {
+		t.Errorf("expired: Ada's session after the poll = %d, want 401", resp.StatusCode)
+	}
+	if st := e.meetingState(e.subject(ada), ma.ID); st != "open" {
+		t.Errorf("expired: Ada's meeting after the poll = %q, want open", st)
+	}
+	if resp, _ := e.do("GET", "/api/meetings", sb, nil); resp.StatusCode != 200 {
+		t.Errorf("expired: Bea's session after Ada's expiry = %d, want 200", resp.StatusCode)
+	}
+	if st := e.meetingState(e.subject(bea), mb.ID); st != "open" {
+		t.Errorf("expired: Bea's meeting = %q", st)
+	}
+	// Ada reopens the tab: a fresh session, and the meeting is still open
+	// with its link; the next poll keeps it.
+	sa = e.enter(ada)
+	e.app.PollOnce(context.Background())
+	if st, link, body := e.meetingLink(sa, ma.ID); st != 200 || link == nil || *link != ma.JoinURL || !strings.Contains(body, `"state":"open"`) {
+		t.Fatalf("expired: Ada reopening the tab = %d %s; want her open meeting and its link", st, body)
+	}
+}
+
+// 🔴 A held subject owners/check does not answer at all (one muster never
+// gave this app, say) is treated as revoked: fail closed.
+func TestASubjectOwnersCheckDoesNotAnswerIsTreatedAsRevoked(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	gone := "Gq3Ws8Ed1Rf6Tg0Yh5Uj2k" // never drawn by the fake
+	tok, _, err := e.store.CreateSession(ctx, gone, "Old", t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, _ := e.store.LookupSession(ctx, tok, t0)
+	m, err := e.store.ForSession(sess).CreateMeeting(ctx, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sa := e.enter(ada)
+	e.app.PollOnce(ctx)
+	if st := e.meetingState(gone, m.Meeting.ID); st != "ended" {
+		t.Errorf("absent: the meeting after the poll = %q, want ended", st)
+	}
+	if resp, _ := e.do("GET", "/api/meetings", tok, nil); resp.StatusCode != 401 {
+		t.Errorf("absent: the session after the poll = %d, want 401", resp.StatusCode)
+	}
+	if resp, _ := e.do("GET", "/api/meetings", sa, nil); resp.StatusCode != 200 {
+		t.Errorf("absent: Ada (live) after the poll = %d, want 200", resp.StatusCode)
 	}
 }
 
@@ -1057,7 +1115,7 @@ func TestTheLogCarriesNoCodeTokenOrQuery(t *testing.T) {
 	// Positive controls: the lines are there to be searched. Each is
 	// independent of the redaction under test, so a broken redaction fails
 	// below, on the secret, not here.
-	for _, want := range []string{"http GET /enter", "http POST /api/meetings 201", "http GET /j/", "/wait 404", "enter: refused 403", "no longer lets the app act for 1 of 1"} {
+	for _, want := range []string{"http GET /enter", "http POST /api/meetings 201", "http GET /j/", "/wait 404", "enter: refused 403", "muster revoked the app for 1 of 1"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("the log lacks %q (so this scan proves nothing):\n%s", want, got)
 		}

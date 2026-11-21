@@ -398,6 +398,29 @@ func (s *Store) EndSubjects(ctx context.Context, subjects []string, now time.Tim
 	return out, tx.Commit()
 }
 
+// EndSessions acts on muster's word that these people's grants expired:
+// every owner session of theirs is deleted, and their open meetings are
+// left running for the guests. It returns the sessions deleted.
+func (s *Store) EndSessions(ctx context.Context, subjects []string, now time.Time) (int64, error) {
+	if len(subjects) == 0 {
+		return 0, nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	r, err := tx.ExecContext(ctx, `DELETE FROM owner_sessions WHERE subject IN (SELECT j.value FROM json_each(?) AS j)`, jsonStrings(subjects))
+	if err != nil {
+		return 0, err
+	}
+	n, _ := r.RowsAffected()
+	if err := audit(ctx, tx, now, "", "", "grants.expired", fmt.Sprintf("%d people, %d sessions deleted", len(subjects), n)); err != nil {
+		return 0, err
+	}
+	return n, tx.Commit()
+}
+
 // HeldSubjects is every person the plugin holds something live for: an
 // unexpired owner session or an open meeting. They are the subjects the
 // owners/check poll asks muster about.

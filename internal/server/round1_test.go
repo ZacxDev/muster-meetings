@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ZacxDev/muster-meetings/internal/egresstest"
+	"github.com/ZacxDev/muster-meetings/internal/ingest"
 	"github.com/ZacxDev/muster-meetings/internal/server"
 	"github.com/ZacxDev/muster-meetings/internal/store"
 )
@@ -133,4 +134,60 @@ func TestTheNoticeSaysTranscribedOnlyWithAnEngine(t *testing.T) {
 			t.Fatalf("engine %v: the knock with the current notice = %d %s, want 201", on, resp.StatusCode, raw)
 		}
 	}
+}
+
+// 🔴 A start that LiveKit refuses can still have started an Egress (LiveKit
+// times the start out; the Egress connects anyway). Once a stream for the
+// track is connected the plugin makes no further attempt: a new attempt's
+// nonce would cut the live stream off (CI saw exactly that against a real
+// LiveKit). And when that stream, whose egress the plugin never learned,
+// ends while the track is published, the plugin starts again.
+func TestAConnectedStreamStopsTheStartRetries(t *testing.T) {
+	e := newEnv(t)
+	c := e.meeting(ada)
+	e.started(c)
+	owner := e.open("GET", "/api/meetings/"+c.ID+"/events", c.Sess, nil)
+	e.lk.RefuseEgress(1 << 20) // LiveKit refuses every start, as with no Egress attached
+	a := e.publish(c, store.OwnerIdentity, "MICROPHONE")
+	eventually(t, 5*time.Second, "starts are refused and retried", func() bool { return e.lk.CountCalls("StartTrackEgress") >= 2 })
+	var meetingCreated int64
+	e.dbQuery(`SELECT created_at FROM meetings WHERE id = ?`, c.ID).Scan(&meetingCreated)
+	// The Egress of some attempt connects with that attempt's token: try the
+	// current nonce until the ingest takes it.
+	var cl *egresstest.Client
+	eventually(t, 5*time.Second, "an Egress connects with a current attempt's token", func() bool {
+		var nonce string
+		e.dbQuery(`SELECT nonce FROM tracks WHERE track = ?`, a).Scan(&nonce)
+		tok := ingest.Token(ingestKey, c.ID, a, nonce, time.UnixMilli(meetingCreated).Add(store.LinkLifetime))
+		code, got := dialStatus(t, "ws"+strings.TrimPrefix(e.ingest.URL, "http")+ingest.Path(a, tok))
+		cl = got
+		return code == 101
+	})
+	if err := cl.Stream(egresstest.Silence(100), 0); err != nil {
+		t.Fatal(err)
+	}
+	// No more attempts once it is connected (one may have been in flight).
+	time.Sleep(100 * time.Millisecond)
+	n := e.lk.CountCalls("StartTrackEgress")
+	// Well past the backoff (20, 40, 80 ms), audio still flowing.
+	for i := 0; i < 10; i++ {
+		if err := cl.Stream(egresstest.Silence(50), 0); err != nil {
+			t.Fatalf("the connected stream was cut off: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if err := cl.Stream(speech, 0); err != nil {
+		t.Fatalf("the connected stream was cut off: %v", err)
+	}
+	if ls := segmentsOf(t, owner, 1); ls[0].Text != fakeScript[0] {
+		t.Fatalf("the line = %+v", ls[0])
+	}
+	if m := e.lk.CountCalls("StartTrackEgress"); m != n {
+		t.Fatalf("%d more starts while a stream was connected, want none", m-n)
+	}
+	// The stream (of an egress the plugin never learned) ends: a new start.
+	cl.Drop()
+	eventually(t, 5*time.Second, "a new start once the unknown egress's stream ended", func() bool {
+		return e.lk.CountCalls("StartTrackEgress") > n
+	})
 }

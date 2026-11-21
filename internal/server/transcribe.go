@@ -179,6 +179,10 @@ func (s *Server) onEgressEnded(ctx context.Context, info livekit.EgressInfo) {
 	if err != nil || t.State != store.TrackActive || !t.MeetingLive {
 		return
 	}
+	// Its stream is dead with it, even if the ingest has not yet seen the
+	// socket close (the webhook can come first): it is closed here, so it
+	// neither stops the new start (egressLoop) nor counts as a second death.
+	s.closeConn(t.Track, ingest.CloseGoingAway, "its egress ended")
 	wait := s.restartWait(t.Track)
 	s.cfg.Log.Printf("transcript: a track's egress ended (%s); starting a new one in %s", info.Status, wait)
 	if err := s.store.OpenGap(ctx, t.Track, s.sinceStart(t.MeetingStart), s.cfg.Engine.Name()); err == nil {
@@ -274,9 +278,16 @@ func (s *Server) startEgressAfter(track string, wait time.Duration) {
 }
 
 // egressLoop starts a track egress for track, retrying a refusal with
-// backoff until it is accepted, the track is unpublished or ended, or its
-// meeting is no longer live. Each attempt draws a new nonce, so the token of
-// any earlier attempt opens nothing.
+// backoff until it is accepted, the track is unpublished or ended, its
+// meeting is no longer live, or an egress is already streaming the track.
+// Each attempt draws a new nonce, so the token of any earlier attempt opens
+// nothing.
+//
+// 🔴 A connected stream ends the retries. A start can fail at LiveKit (it
+// waits for an Egress to answer, then times out) while the Egress it asked
+// does start and connect; a further attempt would draw a new nonce and cut
+// that live stream off. So once the track has a stream, no attempt is made,
+// and a failed attempt does not mark a gap or wait to retry.
 func (s *Server) egressLoop(ctx context.Context, track string) {
 	backoff := s.cfg.EgressBackoff
 	for attempt := 0; ; attempt++ {
@@ -284,7 +295,7 @@ func (s *Server) egressLoop(ctx context.Context, track string) {
 			return
 		}
 		t, err := s.store.TrackByID(ctx, track, s.cfg.Now())
-		if err != nil || t.State != store.TrackActive || !t.MeetingLive {
+		if err != nil || t.State != store.TrackActive || !t.MeetingLive || s.streaming(track) {
 			return
 		}
 		room := store.RoomName(t.MeetingID)
@@ -308,7 +319,7 @@ func (s *Server) egressLoop(ctx context.Context, track string) {
 				}
 			}
 		}
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || s.streaming(track) {
 			return
 		}
 		wait := backoff[min(attempt, len(backoff)-1)]
@@ -365,6 +376,13 @@ func (s *Server) stopTranscription(ctx context.Context, meetingID string) {
 			}
 		}
 	}
+}
+
+// streaming says track has an ingest stream connected.
+func (s *Server) streaming(track string) bool {
+	s.tr.mu.Lock()
+	defer s.tr.mu.Unlock()
+	return s.tr.conns[track] != nil
 }
 
 func (s *Server) closeConn(track string, code int, why string) {
@@ -474,7 +492,8 @@ func (s *Server) serveIngest(conn *ingest.Conn, t store.Track) {
 	defer func() {
 		cancel()
 		s.tr.mu.Lock()
-		if s.tr.conns[t.Track] == conn {
+		current := s.tr.conns[t.Track] == conn
+		if current {
 			delete(s.tr.conns, t.Track)
 		}
 		if m := s.tr.partials[t.MeetingID]; m != nil {
@@ -486,8 +505,22 @@ func (s *Server) serveIngest(conn *ingest.Conn, t store.Track) {
 		s.tr.mu.Unlock()
 		// The track or its meeting is over (not merely this egress
 		// replaced): nothing of it is kept in memory.
-		if cur, err := s.store.TrackByID(context.Background(), t.Track, s.cfg.Now()); err != nil || cur.State != store.TrackActive || !cur.MeetingLive {
+		cur, err := s.store.TrackByID(context.Background(), t.Track, s.cfg.Now())
+		if err != nil || cur.State != store.TrackActive || !cur.MeetingLive {
 			s.forgetTrack(t.MeetingID, t.Track)
+		} else if current && cur.Nonce == t.Nonce && cur.EgressID == "" {
+			// A stream whose egress the plugin never learned (its start
+			// timed out at LiveKit, yet the egress ran: so the start loop
+			// stopped when this stream connected, egressLoop) has ended
+			// while the track is still transcribed. No egress_ended will name
+			// it, so its end is the egress's death: a gap, and a restart on
+			// the backoff.
+			wait := s.restartWait(t.Track)
+			s.cfg.Log.Printf("transcript: a stream of an unknown egress ended; starting a new egress in %s", wait)
+			if err := s.store.OpenGap(context.Background(), t.Track, s.sinceStart(t.MeetingStart), s.cfg.Engine.Name()); err == nil {
+				s.hub.Changed(t.MeetingID)
+			}
+			s.startEgressAfter(t.Track, wait)
 		}
 		s.hub.Changed(t.MeetingID)
 		conn.Close(ingest.CloseNormal, "")

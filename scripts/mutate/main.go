@@ -732,7 +732,7 @@ var mutants = []mutant{
 		pkg: "./internal/server", test: "TestTheExportsFenceGuestSpeech", want: "vtt ="},
 
 	// ---- 3a round 1: restart backoff, the speaker's fence, the notice ----
-	{name: "egress restart: no backoff", file: trans, from: "s.startEgressAfter(t.Track, wait)", to: "s.startEgressAfter(t.Track, 0)",
+	{name: "egress restart: no backoff", file: trans, from: "\t}\n\ts.startEgressAfter(t.Track, wait)\n}", to: "\t}\n\ts.startEgressAfter(t.Track, 0)\n}",
 		pkg: "./internal/server", test: "TestADyingEgressIsRestartedOnTheBackoffAndAHealthyStreamResetsIt", want: "the restarts waited"},
 	{name: "egress restart: the backoff never resets", file: trans, from: "s.tr.restarts[track] = 0\n", to: "_ = at\n",
 		pkg: "./internal/server", test: "TestADyingEgressIsRestartedOnTheBackoffAndAHealthyStreamResetsIt", want: "the restarts waited"},
@@ -746,6 +746,13 @@ var mutants = []mutant{
 		pkg: "./internal/server", test: "TestTheNoticeSaysTranscribedOnlyWithAnEngine", want: "engine false"},
 	{name: "notice: a knock's transcribed answer not checked", file: guest, from: "if in.Notice.Transcribed == nil || *in.Notice.Transcribed != s.Transcribing() {", to: "if false {",
 		pkg: "./internal/server", test: "TestTheNoticeSaysTranscribedOnlyWithAnEngine", want: "want 409 with the current notice"},
+
+	// ---- 3a: a connected stream ends the start retries (CI, real LiveKit) ----
+	{name: "egress retry: a retry supersedes a connected stream", file: trans, from: "|| !t.MeetingLive || s.streaming(track) {", to: "|| !t.MeetingLive {",
+		more: []edit{{trans, "if ctx.Err() != nil || s.streaming(track) {", "if ctx.Err() != nil {"}},
+		pkg:  "./internal/server", test: "TestAConnectedStreamStopsTheStartRetries", want: "the connected stream was cut off"},
+	{name: "egress retry: an unknown egress's ended stream is not restarted", file: trans, from: `} else if current && cur.Nonce == t.Nonce && cur.EgressID == "" {`, to: `} else if false && current {`,
+		pkg: "./internal/server", test: "TestAConnectedStreamStopsTheStartRetries", want: "a new start once the unknown egress's stream ended"},
 
 	// ---- 3a: the engines ----
 	{name: "utterance: no in-flight cap", file: utt, from: "sem: make(chan struct{}, MaxInFlight)", to: "sem: make(chan struct{}, 64)",

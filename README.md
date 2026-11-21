@@ -562,6 +562,12 @@ database.
    participant's queue holds 30 s of audio, and past it the oldest is
    dropped and stored as a gap. A constant signal (silence, a stuck level)
    is never sent.
+   **A connected stream ends the retries:** LiveKit can time a start out
+   while the Egress it asked does start and connect (measured with no Egress
+   attached: the start fails after about 7–10 s). Once the track has a
+   stream, no further attempt is made, since a new attempt's token would cut
+   that stream off; if that stream (whose egress the plugin never learned)
+   ends while the track is published, the plugin starts again on the backoff.
 5. **Gaps are stored, not hidden.** When a start is refused (retried after 1,
    2, 4 … 30 s), when an egress dies (`egress_ended` while the track is still
    published: a new egress is started, since Egress never reconnects), when

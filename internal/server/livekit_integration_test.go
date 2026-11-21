@@ -80,18 +80,19 @@ func (s *syncBuffer) Write(p []byte) (int, error) {
 }
 func (s *syncBuffer) String() string { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }
 
-// started kills a process this test started, by its own handle, when the
+// started starts a process and waits for it in ONE goroutine of its own
+// (two callers of cmd.Wait race), and kills it, by its own handle, when the
 // test ends.
 func started(t *testing.T, cmd *exec.Cmd) {
 	t.Helper()
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+	done := make(chan struct{})
+	go func() { cmd.Wait(); close(done) }()
 	t.Cleanup(func() {
-		if cmd.ProcessState == nil {
-			cmd.Process.Kill()
-			cmd.Wait()
-		}
+		cmd.Process.Kill()
+		<-done
 	})
 }
 
@@ -177,7 +178,6 @@ logging:
 		cmd.Env = append(os.Environ(), "LIVEKIT_URL="+ws, "LIVEKIT_API_KEY="+keys.Key, "LIVEKIT_API_SECRET="+keys.Secret, "LK_NO_SKILLS_PROMPT=1")
 		cmd.Stdout, cmd.Stderr = out, out
 		started(t, cmd)
-		go cmd.Wait()
 		return joined{out, cmd}
 	}
 	join := func(room, identity string) *syncBuffer { return joinCmd(room, identity).out }

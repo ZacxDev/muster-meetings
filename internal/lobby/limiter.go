@@ -65,10 +65,20 @@ func (l *Limiter) prune(now time.Time) {
 
 // ClientAddr is the address a request came from. With no trusted proxies it
 // is the connection's peer. When the peer is one of trusted (the ingress in
-// front of the plugin), it is the right-most X-Forwarded-For entry that is
-// not itself trusted: the first hop a trusted proxy saw. An IPv6 address is
-// cut to its /64, so one host cannot spread its knocks over its own prefix.
-func ClientAddr(r *http.Request, trusted []netip.Prefix) netip.Addr {
+// front of the plugin):
+//
+//   - with header empty, it is the right-most X-Forwarded-For entry that is
+//     not itself trusted: the first hop a trusted proxy saw;
+//   - with header set (MEETINGS_CLIENT_IP_HEADER, e.g. CF-Connecting-IP), it
+//     is that header's one address, and X-Forwarded-For is not read. A header
+//     that is missing, repeated, a list, or not an address leaves the peer:
+//     every such request shares the proxy's count, which can only refuse
+//     knocks, never let one through.
+//
+// A header from a peer that is not trusted is never read, whatever its name.
+// An IPv6 address is cut to its /64, so one host cannot spread its knocks
+// over its own prefix.
+func ClientAddr(r *http.Request, trusted []netip.Prefix, header string) netip.Addr {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
@@ -79,24 +89,39 @@ func ClientAddr(r *http.Request, trusted []netip.Prefix) netip.Addr {
 	}
 	addr := peer.Unmap()
 	if inAny(addr, trusted) {
-		var hops []string
-		for _, v := range r.Header.Values("X-Forwarded-For") {
-			hops = append(hops, strings.Split(v, ",")...)
-		}
-		for i := len(hops) - 1; i >= 0; i-- {
-			a, err := netip.ParseAddr(strings.TrimSpace(hops[i]))
-			if err != nil {
-				break
+		if header != "" {
+			if vs := r.Header.Values(header); len(vs) == 1 {
+				if a, err := netip.ParseAddr(strings.TrimSpace(vs[0])); err == nil {
+					addr = a.Unmap()
+				}
 			}
-			addr = a.Unmap()
-			if !inAny(addr, trusted) {
-				break
-			}
+		} else {
+			addr = forwardedFor(r, addr, trusted)
 		}
 	}
 	if addr.Is6() {
 		p, _ := addr.Prefix(64)
 		return p.Addr()
+	}
+	return addr
+}
+
+// forwardedFor walks X-Forwarded-For from the right, past every trusted hop,
+// starting from the trusted peer addr.
+func forwardedFor(r *http.Request, addr netip.Addr, trusted []netip.Prefix) netip.Addr {
+	var hops []string
+	for _, v := range r.Header.Values("X-Forwarded-For") {
+		hops = append(hops, strings.Split(v, ",")...)
+	}
+	for i := len(hops) - 1; i >= 0; i-- {
+		a, err := netip.ParseAddr(strings.TrimSpace(hops[i]))
+		if err != nil {
+			break
+		}
+		addr = a.Unmap()
+		if !inAny(addr, trusted) {
+			break
+		}
 	}
 	return addr
 }

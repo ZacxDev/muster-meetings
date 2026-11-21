@@ -89,9 +89,12 @@ func AsError(err error) *Error {
 }
 
 // CheckBaseURL validates muster's address: https, except plain http to a
-// loopback host; no user, path, query or fragment (a trailing "/" is fine). A
-// plugin token can act for people, so it never crosses a network in clear text,
-// and a token pasted into the URL is refused rather than sent on every call.
+// loopback host or to a Kubernetes Service name (ClusterInternal); no user,
+// path, query or fragment (a trailing "/" is fine). A plugin token can act
+// for people, so it never crosses a network it does not stay inside in clear
+// text: http is allowed only where the call cannot leave the host or the
+// cluster, and a token pasted into the URL is refused rather than sent on
+// every call.
 func CheckBaseURL(raw string) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.Host == "" {
@@ -100,8 +103,8 @@ func CheckBaseURL(raw string) (string, error) {
 	}
 	h := u.Hostname()
 	loopback := h == "localhost" || h == "127.0.0.1" || h == "::1"
-	if u.Scheme != "https" && !(u.Scheme == "http" && loopback) {
-		return "", fmt.Errorf("MUSTER_URL must be https:// (http:// only for localhost, 127.0.0.1 or [::1])")
+	if u.Scheme != "https" && !(u.Scheme == "http" && (loopback || ClusterInternal(h))) {
+		return "", fmt.Errorf("MUSTER_URL must be https:// (http:// only for localhost, 127.0.0.1, [::1] or a cluster Service name ending .svc or .svc.cluster.local)")
 	}
 	if u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
 		return "", fmt.Errorf("MUSTER_URL must carry no user, query or fragment")
@@ -110,6 +113,35 @@ func CheckBaseURL(raw string) (string, error) {
 		return "", fmt.Errorf("MUSTER_URL must be muster's address alone, with no path (e.g. https://muster.example.com)")
 	}
 	return u.Scheme + "://" + u.Host, nil
+}
+
+// clusterLabel is one DNS label of a Service name.
+var clusterLabel = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+
+// ClusterInternal says host is a Kubernetes Service name: one or more DNS
+// labels followed by exactly ".svc" or ".svc.cluster.local" (case does not
+// matter). Such a name resolves only through the cluster's own DNS, so a call
+// to it stays on the cluster network. A trailing dot, an empty label, or
+// ".svc" anywhere but the end (muster.svc.example.test) is not one: every
+// label before the suffix must be a DNS label, so ".svc" alone and "a..svc"
+// are refused.
+func ClusterInternal(host string) bool {
+	h := strings.ToLower(host)
+	var rest string
+	switch {
+	case strings.HasSuffix(h, ".svc.cluster.local"):
+		rest = strings.TrimSuffix(h, ".svc.cluster.local")
+	case strings.HasSuffix(h, ".svc"):
+		rest = strings.TrimSuffix(h, ".svc")
+	default:
+		return false
+	}
+	for _, l := range strings.Split(rest, ".") {
+		if !clusterLabel.MatchString(l) {
+			return false
+		}
+	}
+	return true
 }
 
 // Redact is a URL cut to its scheme and host, for a log line or an error: a

@@ -119,3 +119,55 @@ func TestLoadConfig(t *testing.T) {
 		}
 	}
 }
+
+// 🔴 MEETINGS_CLIENT_IP_HEADER: unset changes nothing; set, it needs
+// MEETINGS_TRUSTED_PROXIES (it is believed only from a trusted proxy, so
+// without one it could never bind) and must name one header that is not
+// X-Forwarded-For.
+func TestLoadConfigClientIPHeader(t *testing.T) {
+	c, err := LoadConfig(env(base()))
+	if err != nil || c.ClientIPHeader != "" {
+		t.Fatalf("unset: ClientIPHeader = %q, %v; want empty", c.ClientIPHeader, err)
+	}
+	m := base()
+	m["MEETINGS_CLIENT_IP_HEADER"], m["MEETINGS_TRUSTED_PROXIES"] = " cf-connecting-ip ", "10.20.0.0/16"
+	if c, err = LoadConfig(env(m)); err != nil || c.ClientIPHeader != "Cf-Connecting-Ip" {
+		t.Fatalf("with trusted proxies: ClientIPHeader = %q, %v; want Cf-Connecting-Ip", c.ClientIPHeader, err)
+	}
+	m = base()
+	m["MEETINGS_CLIENT_IP_HEADER"] = "True-Client-IP"
+	if _, err = LoadConfig(env(m)); err == nil || !strings.Contains(err.Error(), "MEETINGS_TRUSTED_PROXIES is not") {
+		t.Fatalf("set without trusted proxies: LoadConfig = %v, want the refusal", err)
+	}
+	for _, bad := range []string{"X-Forwarded-For", "x-forwarded-for", "CF-Connecting-IP, X-Real-IP", "CF Connecting IP", "-X"} {
+		m = base()
+		m["MEETINGS_CLIENT_IP_HEADER"], m["MEETINGS_TRUSTED_PROXIES"] = bad, "10.20.0.0/16"
+		if c, err = LoadConfig(env(m)); err == nil {
+			t.Errorf("MEETINGS_CLIENT_IP_HEADER=%q: LoadConfig accepted it as %q", bad, c.ClientIPHeader)
+		}
+	}
+}
+
+// MUSTER_URL may be plain http to muster's in-cluster Service.
+func TestLoadConfigAcceptsMustersClusterService(t *testing.T) {
+	m := base()
+	m["MUSTER_URL"] = "http://muster-web.tenant-b.svc.cluster.local:8105"
+	if c, err := LoadConfig(env(m)); err != nil || c.URL != "http://muster-web.tenant-b.svc.cluster.local:8105" {
+		t.Fatalf("in-cluster MUSTER_URL: %q, %v", c.URL, err)
+	}
+}
+
+// The proxy settings reach the server: a header read by LoadConfig but
+// dropped on the way would leave the knock limit counting the proxy.
+func TestTheProxySettingsReachTheServer(t *testing.T) {
+	m := base()
+	m["MEETINGS_CLIENT_IP_HEADER"], m["MEETINGS_TRUSTED_PROXIES"] = "True-Client-IP", "10.30.0.0/16"
+	c, err := LoadConfig(env(m))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := c.serverConfig(nil, nil)
+	if sc.ClientIPHeader != "True-Client-Ip" || !slices.Equal(sc.TrustedProxies, []netip.Prefix{netip.MustParsePrefix("10.30.0.0/16")}) {
+		t.Fatalf("server config: header %q, proxies %v; want True-Client-Ip and 10.30.0.0/16", sc.ClientIPHeader, sc.TrustedProxies)
+	}
+}

@@ -543,6 +543,34 @@ var mutants = []mutant{
 	{name: "knock push: a fall is not tracked (2 → 1 → 2 is silent)", file: knocker, from: "if waiting > 0 && waiting < s.sent {", to: "if false {",
 		pkg: "./internal/server", test: "TestAKnockCountThatFallsAndRisesIsPushedAgain", want: "2 → 1 → 2 did not push again"},
 
+	// ---- 🔴 phase 2c: plain http to muster only inside the cluster ----
+	{name: "in-cluster http: allowed to any host", file: client, from: "(loopback || ClusterInternal(h))", to: "(loopback || true)",
+		pkg: "./internal/muster", test: "TestCheckBaseURLAllowsHTTPOnlyInsideTheCluster", want: `not in-cluster: CheckBaseURL("http://muster.example.test")`},
+	{name: "in-cluster http: refused to a Service name", file: client, from: "(loopback || ClusterInternal(h))", to: "(loopback || false)",
+		pkg: "./internal/muster", test: "TestCheckBaseURLAllowsHTTPOnlyInsideTheCluster", want: `in-cluster: CheckBaseURL("http://muster-web.tenant-b.svc:8105")`},
+	{name: "in-cluster http: .svc anywhere in the name", file: client, from: "case strings.HasSuffix(h, \".svc\"):", to: "case strings.Contains(h, \".svc\"):",
+		pkg: "./internal/muster", test: "TestCheckBaseURLAllowsHTTPOnlyInsideTheCluster", want: `not in-cluster: CheckBaseURL("http://muster.svc.example.test")`},
+	{name: "in-cluster http: the labels are not checked", file: client, from: "if !clusterLabel.MatchString(l) {", to: "if false {",
+		pkg: "./internal/muster", test: "TestCheckBaseURLAllowsHTTPOnlyInsideTheCluster", want: `not in-cluster: CheckBaseURL("http://muster..svc")`},
+
+	// ---- 🔴 phase 2c: MEETINGS_CLIENT_IP_HEADER ----
+	{name: "client ip header: read from an untrusted peer", file: limiter, from: "\tif inAny(addr, trusted) {\n\t\tif header != \"\" {", to: "\tif header != \"\" || inAny(addr, trusted) {\n\t\tif header != \"\" {",
+		pkg: "./internal/lobby", test: "TestClientAddrWithAClientIPHeader", want: "untrusted peer spoofs the header: peer 198.51.100.7:4000"},
+	{name: "client ip header: read from an untrusted peer (the knock)", file: limiter, from: "\tif inAny(addr, trusted) {\n\t\tif header != \"\" {", to: "\tif header != \"\" || inAny(addr, trusted) {\n\t\tif header != \"\" {",
+		pkg: "./internal/server", test: "TestTheClientIPHeaderIsBelievedOnlyFromATrustedPeer", want: "an untrusted peer's CF-Connecting-IP was believed"},
+	{name: "client ip header: ignored, X-Forwarded-For read", file: limiter, from: "\t\tif header != \"\" {\n", to: "\t\tif false {\n",
+		pkg: "./internal/server", test: "TestTheClientIPHeaderIsBelievedOnlyFromATrustedPeer", want: "trusted peer: the 11th knock from one CF-Connecting-IP = 201"},
+	{name: "client ip header: a repeated header is believed", file: limiter, from: "len(vs) == 1 {", to: "len(vs) >= 1 {",
+		pkg: "./internal/lobby", test: "TestClientAddrWithAClientIPHeader", want: "a repeated header leaves the peer"},
+	{name: "client ip header: a missing header falls back to X-Forwarded-For", file: limiter, from: "\t\t} else {\n\t\t\taddr = forwardedFor(r, addr, trusted)\n\t\t}", to: "\t\t}\n\t\tif r.Header.Get(header) == \"\" {\n\t\t\taddr = forwardedFor(r, addr, trusted)\n\t\t}",
+		pkg: "./internal/lobby", test: "TestClientAddrWithAClientIPHeader", want: "no header leaves the peer"},
+	{name: "client ip header: boots without trusted proxies", file: mainGo, from: "if !haveTrusted {", to: "if false {",
+		pkg: ".", test: "TestLoadConfigClientIPHeader", want: "set without trusted proxies: LoadConfig = <nil>"},
+	{name: "client ip header: X-Forwarded-For accepted as its name", file: mainGo, from: `if v == "X-Forwarded-For" {`, to: `if false {`,
+		pkg: ".", test: "TestLoadConfigClientIPHeader", want: `MEETINGS_CLIENT_IP_HEADER="X-Forwarded-For": LoadConfig accepted it`},
+	{name: "client ip header: not passed to the server", file: mainGo, from: "\t\tClientIPHeader: cfg.ClientIPHeader}", to: "\t\tClientIPHeader: \"\"}",
+		pkg: ".", test: "TestTheProxySettingsReachTheServer", want: `server config: header ""`},
+
 	// ---- configuration ----
 	{name: "config: allow the plugin on muster's own origin", file: mainGo, from: `if c.PublicURL == c.MusterOrigin {`, to: `if false {`,
 		pkg: ".", test: "TestLoadConfig", want: "public URL is muster's origin: LoadConfig accepted it"},

@@ -83,6 +83,10 @@ type Config struct {
 	// plugin: a knock from one of them is counted against the
 	// X-Forwarded-For client instead (lobby.ClientAddr).
 	TrustedProxies []netip.Prefix
+	// ClientIPHeader, when set, names the one header (e.g. CF-Connecting-IP)
+	// that carries the client's address in place of X-Forwarded-For. It is
+	// read only from a peer inside TrustedProxies (lobby.ClientAddr).
+	ClientIPHeader string
 	// StreamRecheck is how often an event stream re-reads the database
 	// even with no change signalled (an end made elsewhere: the 24 h sweep,
 	// a revocation); default 5 s. ReconcileEvery is the reconcile loop's

@@ -322,7 +322,7 @@ test.describe('reduced motion', () => {
       const t = a.effect?.getComputedTiming();
       return t && Number(t.duration) > 0 && a.playState === 'running';
     }).length);
-    expect(moving).toBe(0);
+    expect(moving, 'Web Animations running under reduced motion').toBe(0);
     const offenders = await f.evaluate(() => {
       const out: string[] = [];
       let n = 0;

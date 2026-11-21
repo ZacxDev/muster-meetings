@@ -938,7 +938,7 @@ var mutants = []mutant{
 	{name: "ui: reduced motion ignored (a literal duration)", file: appCSS, from: "opacity var(--mu-dur-base) var(--mu-ease-exit), transform", to: "opacity 200ms var(--mu-ease-exit), transform",
 		e2e: "ui-call.spec.ts", test: "reduced motion", want: "transition 0s, 0.2s, 0s"},
 	{name: "ui: reduced motion ignored (the FLIP animation)", file: uiJS, from: "    var d = dur('base');\n    var before", to: "    var d = 200;\n    var before",
-		e2e: "ui-call.spec.ts", test: "reduced motion", want: "expect(moving).toBe(0)"},
+		e2e: "ui-call.spec.ts", test: "reduced motion", want: "Web Animations running under reduced motion"},
 	{name: "ui: Share drawn where getDisplayMedia is missing", file: callJS, from: "shareBtn.hidden = !(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia);", to: "shareBtn.hidden = false;",
 		e2e: "ui-call.spec.ts", test: "phone with no screen sharing", want: "btn-share"},
 	{name: "ui: the M shortcut does nothing", file: callJS, from: "var b = k === 'm' ? mic :", to: "var b = k === '\\u0000' ? mic :",

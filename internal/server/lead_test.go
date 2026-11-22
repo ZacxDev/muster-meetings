@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ZacxDev/muster-meetings/internal/egresstest"
+	"github.com/ZacxDev/muster-meetings/internal/server"
 	"github.com/ZacxDev/muster-meetings/internal/store"
 	"github.com/ZacxDev/muster-meetings/internal/stttest"
 )
@@ -268,5 +269,58 @@ func TestALineThatAlreadyEndsWithAMarkGetsNoSecond(t *testing.T) {
 		if !strings.HasPrefix(a.Text, "Alice will") {
 			t.Fatalf("an amend of a line that already ended with a mark: %+v", a)
 		}
+	}
+}
+
+// 🔴 The amend log (what the panels have yet to be sent) is freed however a
+// meeting ends, not only by End: by LiveKit's room_finished and by everyone
+// leaving (track_unpublished, then room_finished, which closes no stream).
+// And a late mark after the end (the end's final, {"text":"","lead":"."})
+// still amends the store, which the archive reads, without a new log entry.
+func TestEveryEndingFreesTheAmendLog(t *testing.T) {
+	server.SetAmendLogGraceForTest(t, 100*time.Millisecond)
+	for _, how := range []string{"End", "room_finished", "everyone left, then room_finished"} {
+		t.Run(how, func(t *testing.T) {
+			e, srv := newNemEnv(t)
+			srv.Set(func(s *stttest.Server) { s.Lines = []string{"Can everyone hear me clearly?", "Alice will."} })
+			e.lk.EgressAudio = func(room, identity, track string) []byte { return speech }
+			e.lk.EgressPace = time.Millisecond
+			c := e.meeting(ada)
+			e.started(c)
+			owner := e.open("GET", "/api/meetings/"+c.ID+"/events", c.Sess, nil)
+			tr := e.publish(c, store.OwnerIdentity, "MICROPHONE")
+			var p panel
+			p.read(t, owner, func(p *panel) bool { return len(p.amends) == 1 })
+			if n := e.server.AmendLogsForTest(); n != 1 {
+				t.Fatalf("%d amend logs while the meeting runs, want 1 (the positive control)", n)
+			}
+			switch how {
+			case "End":
+				if resp, raw := e.do("POST", "/api/meetings/"+c.ID+"/end", c.Sess, nil); resp.StatusCode != 200 {
+					t.Fatalf("end = %d %s", resp.StatusCode, raw)
+				}
+			case "room_finished":
+				if st, _ := e.lk.Webhook(e.internal.URL+"/livekit/webhook", "room_finished", c.Room, ""); st != 200 {
+					t.Fatal(st)
+				}
+			default:
+				if st, err := e.lk.Unpublish(c.Room, store.OwnerIdentity, tr); err != nil || st != 200 {
+					t.Fatalf("track_unpublished = %d, %v", st, err)
+				}
+				eventually(t, 10*time.Second, "the log freed after the last stream", func() bool { return e.server.AmendLogsForTest() == 0 })
+				if st, _ := e.lk.Webhook(e.internal.URL+"/livekit/webhook", "room_finished", c.Room, ""); st != 200 {
+					t.Fatal(st)
+				}
+			}
+			// The end's final carries line 2's "." into the store.
+			eventually(t, 10*time.Second, "the end's late mark in the archive", func() bool {
+				return slices.Equal(e.archive(c), []string{"Ada L.: Can everyone hear me clearly?", "Ada L.: Alice will."})
+			})
+			eventually(t, 10*time.Second, "no amend log left", func() bool { return e.server.AmendLogsForTest() == 0 })
+			time.Sleep(300 * time.Millisecond)
+			if n := e.server.AmendLogsForTest(); n != 0 {
+				t.Fatalf("%d amend logs after the meeting ended (%s), want 0", n, how)
+			}
+		})
 	}
 }

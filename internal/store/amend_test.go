@@ -87,3 +87,28 @@ func TestAmendLastLine(t *testing.T) {
 		})
 	}
 }
+
+// 🔴 A lead stays in its meeting. The owner's identity is the same constant
+// in every meeting, so only the meeting filter keeps a late mark in meeting
+// A off the owner's newer line in meeting B.
+func TestAmendLastLineStaysInItsMeeting(t *testing.T) {
+	s, _ := open(t)
+	a, b := mk(t, s, subA, t0), mk(t, s, subA, t0)
+	for _, m := range []struct{ id, track, text string }{{a.Meeting.ID, "TR_a", "In meeting A"}, {b.Meeting.ID, "TR_b", "In meeting B"}} {
+		if _, err := s.UpsertTrack(ctx, store.RoomName(m.id), m.track, store.OwnerIdentity, "Ada", t0); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.AddSegment(ctx, m.track, "text", 1000, 1500, m.text, "nemotron"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, changed, err := s.AmendLastLine(ctx, a.Meeting.ID, store.OwnerIdentity, "?", marks); err != nil || !changed {
+		t.Fatalf("changed %v, %v", changed, err)
+	}
+	for _, m := range []struct{ id, want string }{{a.Meeting.ID, "In meeting A?"}, {b.Meeting.ID, "In meeting B"}} {
+		segs, err := s.SegmentsAfter(ctx, m.id, 0, 10)
+		if err != nil || len(segs) != 1 || segs[0].Text != m.want {
+			t.Fatalf("meeting %s holds %+v (%v), want %q", m.id, segs, err, m.want)
+		}
+	}
+}

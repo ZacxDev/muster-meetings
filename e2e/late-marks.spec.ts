@@ -51,6 +51,8 @@ test('a line already shown gets its late "?" in place on every open panel, witho
   await owner.goto(`${parent}/apps/${pluginID}`);
   const app: FrameLocator = owner.frameLocator('#app');
   await app.locator('#new-meeting').click();
+  // The link is filled in when New meeting's answer comes: wait for it.
+  await expect(app.locator('#join-url')).not.toHaveValue('');
   const link = await app.locator('#join-url').inputValue();
   await expect(app.locator('#btn-join')).toBeEnabled({ timeout: 15_000 });
   await app.locator('#btn-join').click();

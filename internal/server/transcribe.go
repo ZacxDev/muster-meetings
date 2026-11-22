@@ -113,6 +113,37 @@ func (s *Server) noteAmend(meetingID string, id int64) {
 	s.tr.amends[meetingID] = l
 }
 
+// amendLogGrace is how long a meeting's amend log outlives its last ingest
+// stream while the meeting is still live: long enough for every event stream
+// to send the stream's last amends (each catches up at once on a change).
+var amendLogGrace = 30 * time.Second
+
+// freeAmends frees meetingID's amend log. 🔴 Every way a meeting ends
+// (End, room_finished, the 24 h cap, an uninstall) ends its ingest streams,
+// and serveIngest's cleanup lands here: at once when the meeting is no longer
+// live, else amendLogGrace after its last stream, if no new stream of the
+// meeting has registered meanwhile (a meeting whose people all left frees it
+// before LiveKit's room_finished, which closes no stream).
+func (s *Server) freeAmends(meetingID string, live bool) {
+	free := func() {
+		s.tr.mu.Lock()
+		defer s.tr.mu.Unlock()
+		for track := range s.tr.conns {
+			if s.tr.meetings[track] == meetingID {
+				return // a stream of the meeting is open again: its log stays
+			}
+		}
+		delete(s.tr.amends, meetingID)
+	}
+	if !live {
+		s.tr.mu.Lock()
+		delete(s.tr.amends, meetingID)
+		s.tr.mu.Unlock()
+		return
+	}
+	time.AfterFunc(amendLogGrace, free)
+}
+
 // amendSeqNow is the number of the latest amend of any meeting.
 func (s *Server) amendSeqNow() int64 {
 	s.tr.mu.Lock()
@@ -674,6 +705,7 @@ func (s *Server) serveIngest(conn *ingest.Conn, t store.Track) {
 		if err != nil || cur.State != store.TrackActive || !cur.MeetingLive {
 			s.forgetTrack(t.MeetingID, t.Track)
 		}
+		s.freeAmends(t.MeetingID, err == nil && cur.MeetingLive)
 		s.hub.Changed(t.MeetingID)
 		conn.Close(ingest.CloseNormal, "")
 	}()
@@ -832,7 +864,12 @@ func (s *Server) storeSegment(ctx context.Context, t store.Track, lc *liveConn, 
 			if id, changed, err := s.store.AmendLastLine(ctx, t.MeetingID, t.Identity, seg.Lead, stt.Marks); err != nil {
 				s.cfg.Log.Printf("transcript: a line's closing mark was not stored: %v", err)
 			} else if changed {
-				s.noteAmend(t.MeetingID, id)
+				// The panels hear of it only while the meeting is live: an
+				// ended meeting's streams are closing and its log is freed
+				// (freeAmends); the store, which the archive reads, has it.
+				if cur, err := s.store.TrackByID(ctx, t.Track, s.cfg.Now()); err == nil && cur.MeetingLive {
+					s.noteAmend(t.MeetingID, id)
+				}
 			}
 		}
 		// A final with only a lead stores no line (any other final is

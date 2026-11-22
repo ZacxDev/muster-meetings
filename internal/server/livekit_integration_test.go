@@ -3,6 +3,9 @@ package server_test
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ZacxDev/muster-meetings/internal/egresstest"
 	"github.com/ZacxDev/muster-meetings/internal/livekit"
 	"github.com/ZacxDev/muster-meetings/internal/store"
 )
@@ -283,6 +287,45 @@ logging:
 		t.Fatalf("the owner's newer device did not stay: room %v\n%s", inRoom(c.Room), second.String())
 	}
 
+	// 🔴 LiveKit's own Egress worker. The server sets ParticipantInfo.Kind
+	// from the join token's `kind` claim, which `lk room join` cannot set,
+	// so two bare signalling connections join here instead (a websocket to
+	// /rtc with a token, no WebRTC): one whose token says kind "egress", as
+	// the real Egress's does, and one with no kind and an EG_-looking
+	// identity. Neither gets as far as ACTIVE, so the real server sends no
+	// participant_joined for them (that path's real body is pinned by
+	// TestTheRealServersEgressWebhookBodyIsNotRemoved, recorded from a real
+	// run); but the real server LISTS both, with their kinds, and the
+	// reconcile pass judges them through the real admission code.
+	realEgress, realImpostor := "EG_realEgress0001", "EG_realImpostor01"
+	for id, kind := range map[string]string{realEgress: "egress", realImpostor: ""} {
+		tok := tokenWithKind(t, keys, id, c.Room, kind)
+		cl, err := egresstest.Dial(ws + "/rtc?access_token=" + tok + "&protocol=16&auto_subscribe=1")
+		if err != nil {
+			t.Fatalf("a bare signalling join of %s: %v", id, err)
+		}
+		cl.Watch()
+		t.Cleanup(func() { cl.Drop() })
+	}
+	eventually(t, 10*time.Second, "the real server lists both bare joins", func() bool {
+		in := inRoom(c.Room)
+		return slices.Contains(in, realEgress) && slices.Contains(in, realImpostor)
+	})
+	if ps, err := lk.ListParticipants(ctx, c.Room); err == nil {
+		for _, p := range ps {
+			if p.Identity == realEgress && !p.Egress() {
+				t.Fatalf("the real server lists %s as kind %q, want EGRESS (the fixture of this test)", p.Identity, p.Kind)
+			}
+		}
+	}
+	e.server.Reconcile(ctx)
+	eventually(t, 10*time.Second, "the reconcile pass removes the STANDARD participant with an EG_ identity", func() bool {
+		return !slices.Contains(inRoom(c.Room), realImpostor)
+	})
+	if !slices.Contains(inRoom(c.Room), realEgress) {
+		t.Fatalf("the reconcile pass removed the real server's EGRESS participant: room %v", inRoom(c.Room))
+	}
+
 	// End meeting deletes the real room, which disconnects Linus.
 	if resp, raw := e.do("POST", "/api/meetings/"+c.ID+"/end", c.Sess, nil); resp.StatusCode != 200 {
 		t.Fatalf("end = %d %s", resp.StatusCode, raw)
@@ -311,4 +354,26 @@ logging:
 	if strings.Contains(e.log.String(), "webhook: refused") {
 		t.Errorf("the plugin refused a webhook from the real server:\n%s", e.log.String())
 	}
+}
+
+// tokenWithKind is a join token for identity in room whose `kind` claim is
+// kind ("" for none): what LiveKit's Egress (kind "egress") joins with. The
+// plugin mints no such token (livekit.Claims has no kind), so the test signs
+// its own.
+func tokenWithKind(t *testing.T, k livekit.Keys, identity, room, kind string) string {
+	t.Helper()
+	now := time.Now()
+	claims := map[string]any{"iss": k.Key, "sub": identity, "nbf": now.Unix(), "exp": now.Add(time.Hour).Unix(),
+		"video": map[string]any{"roomJoin": true, "room": room}}
+	if kind != "" {
+		claims["kind"] = kind
+	}
+	body, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsigned := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`)) + "." + base64.RawURLEncoding.EncodeToString(body)
+	m := hmac.New(sha256.New, []byte(k.Secret))
+	m.Write([]byte(unsigned))
+	return unsigned + "." + base64.RawURLEncoding.EncodeToString(m.Sum(nil))
 }

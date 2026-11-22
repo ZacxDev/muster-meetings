@@ -280,7 +280,9 @@ func (s *Store) guest(ctx context.Context, where string, now time.Time, args ...
 // owner's, or a guest whose row is admitted. Revoked, removed, denied, left,
 // waiting, unknown, and anyone in an ended meeting's room may not. The guest
 // token mint, the participant_joined check and the reconcile loop all ask
-// this one function.
+// this one function (the latter two through server.mayStay, which first lets
+// LiveKit's own Egress worker, a participant of kind EGRESS, stay in a live
+// meeting's room: it is not a person, and the transcript needs it there).
 func (s *Store) MayBeInRoom(ctx context.Context, room, identity string, now time.Time) (bool, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM meetings m WHERE m.room = ? AND `+live+` AND (

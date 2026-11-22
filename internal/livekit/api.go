@@ -154,7 +154,60 @@ type ParticipantInfo struct {
 	Identity string      `json:"identity"`
 	Name     string      `json:"name"`
 	Tracks   []TrackInfo `json:"tracks"`
+	// Kind is what LiveKit says the participant is. The server takes it from
+	// the `kind` claim of the access token the participant joined with, so
+	// only a holder of the API secret can set it; the tokens the plugin
+	// mints carry no such claim (Claims has no field for it), so every
+	// owner and guest is STANDARD.
+	Kind Kind `json:"kind"`
 }
+
+// Kind is LiveKit's ParticipantInfo.Kind, by its protobuf enum name. Both
+// wire formats send the name: Twirp's JSON (ListParticipants) always, as
+// "kind":"STANDARD" too; the webhook's protojson leaves the zero value out,
+// so an absent kind is STANDARD. Measured against livekit-server 1.13.11
+// (internal/livekit/testdata/real-*.json). A number is read as the enum
+// value, should a server ever send one. Absent ("") is STANDARD.
+type Kind string
+
+// The participant kinds (livekit_models.proto, ParticipantInfo.Kind).
+const (
+	KindStandard Kind = "STANDARD"
+	KindIngress  Kind = "INGRESS"
+	KindEgress   Kind = "EGRESS"
+	KindSIP      Kind = "SIP"
+	KindAgent    Kind = "AGENT"
+)
+
+var kindByValue = map[int]Kind{0: KindStandard, 1: KindIngress, 2: KindEgress, 3: KindSIP, 4: KindAgent, 7: "CONNECTOR", 8: "BRIDGE"}
+
+// UnmarshalJSON reads the enum's name or its number; null or absent is
+// STANDARD.
+func (k *Kind) UnmarshalJSON(b []byte) error {
+	var v any
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	switch x := v.(type) {
+	case string:
+		*k = Kind(x)
+	case float64:
+		if n, ok := kindByValue[int(x)]; ok {
+			*k = n
+		} else {
+			*k = Kind(fmt.Sprintf("KIND_%d", int(x)))
+		}
+	case nil:
+		*k = KindStandard
+	default:
+		return fmt.Errorf("livekit: a participant kind that is neither a name nor a number")
+	}
+	return nil
+}
+
+// Egress says p is a LiveKit Egress worker: what LiveKit's own Egress
+// service joins a room as to record or stream a track.
+func (p ParticipantInfo) Egress() bool { return p.Kind == KindEgress }
 
 // TrackInfo is the part of LiveKit's TrackInfo the plugin reads. Source is
 // the protobuf enum's name ("MICROPHONE", "CAMERA", "SCREEN_SHARE",

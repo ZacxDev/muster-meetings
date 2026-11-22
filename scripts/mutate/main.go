@@ -116,6 +116,7 @@ const (
 	parts   = "internal/store/participants.go"
 	lkToken = "internal/livekit/token.go"
 	lkHook  = "internal/livekit/webhook.go"
+	lkAPI   = "internal/livekit/api.go"
 	name    = "internal/lobby/name.go"
 	knocker = "internal/lobby/knocker.go"
 	limiter = "internal/lobby/limiter.go"
@@ -446,12 +447,43 @@ var mutants = []mutant{
 		pkg: "./internal/server", test: "TestARemovedGuestIsRevokedKickedAndKeptOut", want: `no "removed" event`},
 	{name: "removal: a removed ticket may wait again", file: guest, from: "case store.StRemoved, store.StLeft:", to: "case store.StLeft:",
 		pkg: "./internal/server", test: "TestARemovedGuestIsRevokedKickedAndKeptOut", want: "the removed ticket's /wait = 200"},
-	{name: "rejoin: the participant_joined check is removed", file: machine, from: "\t\ts.admitOrRemove(ctx, room, ev.Participant.Identity)\n", to: "\t\t_ = 0\n",
+	{name: "rejoin: the participant_joined check is removed", file: machine, from: "\t\ts.admitOrRemove(ctx, room, *ev.Participant)\n", to: "\t\t_ = 0\n",
 		pkg: "./internal/server", test: "TestARemovedGuestIsRevokedKickedAndKeptOut", want: "is back in the LiveKit room after rejoining with the old token"},
-	{name: "rejoin (real LiveKit): the participant_joined check is removed", file: machine, from: "\t\ts.admitOrRemove(ctx, room, ev.Participant.Identity)\n", to: "\t\t_ = 0\n", realLiveKit: true,
+	{name: "rejoin (real LiveKit): the participant_joined check is removed", file: machine, from: "\t\ts.admitOrRemove(ctx, room, *ev.Participant)\n", to: "\t\t_ = 0\n", realLiveKit: true,
 		pkg: "./internal/server", test: "TestAgainstARealLiveKitServer", want: "the rejoining removed guest is disconnected by the plugin (PARTICIPANT_REMOVED)"},
 	{name: "rejoin: anyone joining is removed (control)", file: machine, from: "\tif ok {\n\t\treturn\n\t}\n\tif err := s.cfg.LiveKit.RemoveParticipant", to: "\tif ok && false {\n\t\treturn\n\t}\n\tif err := s.cfg.LiveKit.RemoveParticipant",
 		pkg: "./internal/server", test: "TestARemovedGuestIsRevokedKickedAndKeptOut", want: "an admitted guest's join was removed (the positive control)"},
+
+	// ---- 🔴 LiveKit's own Egress worker is not removed (and only it) ----
+	// One rule (mayStay) serves both paths; each path's mutant drops the kind
+	// on its way in, so each path's test must catch it on its own.
+	{name: "egress admission: the exemption is removed (webhook)", file: machine, from: "\tif p.Egress() {\n", to: "\tif false {\n",
+		pkg: "./internal/server", test: "TestTheJoinWebhookKeepsLiveKitsEgressAndRemovesAnEGIdentityOfAnotherKind", want: "participant_joined removed LiveKit's Egress worker"},
+	{name: "egress admission: the exemption is removed (reconcile)", file: machine, from: "\tif p.Egress() {\n", to: "\tif false {\n",
+		pkg: "./internal/server", test: "TestTheReconcileLoopKeepsLiveKitsEgressAndRemovesAnEGIdentityOfAnotherKind", want: "the reconcile loop removed LiveKit's Egress worker"},
+	{name: "egress admission: the exemption is removed (the fake's Egress, end to end)", file: machine, from: "\tif p.Egress() {\n", to: "\tif false {\n",
+		pkg: "./internal/server", test: "TestATranscribedTracksEgressWorkerIsNotRemovedFromTheRoom", want: "the plugin removed LiveKit's Egress worker"},
+	{name: "egress admission: the webhook path drops the kind", file: machine, from: "\t\ts.admitOrRemove(ctx, room, *ev.Participant)\n", to: "\t\ts.admitOrRemove(ctx, room, livekit.ParticipantInfo{Identity: ev.Participant.Identity})\n",
+		pkg: "./internal/server", test: "TestTheJoinWebhookKeepsLiveKitsEgressAndRemovesAnEGIdentityOfAnotherKind", want: "participant_joined removed LiveKit's Egress worker"},
+	{name: "egress admission: the webhook path drops the kind (the real server's body)", file: machine, from: "\t\ts.admitOrRemove(ctx, room, *ev.Participant)\n", to: "\t\ts.admitOrRemove(ctx, room, livekit.ParticipantInfo{Identity: ev.Participant.Identity})\n",
+		pkg: "./internal/server", test: "TestTheRealServersEgressWebhookBodyIsNotRemoved", want: "EG_capture0001 in the room = false, want true"},
+	{name: "egress admission: the reconcile path drops the kind", file: machine, from: "\t\t\ts.admitOrRemove(ctx, room, p)\n", to: "\t\t\ts.admitOrRemove(ctx, room, livekit.ParticipantInfo{Identity: p.Identity})\n",
+		pkg: "./internal/server", test: "TestTheReconcileLoopKeepsLiveKitsEgressAndRemovesAnEGIdentityOfAnotherKind", want: "the reconcile loop removed LiveKit's Egress worker"},
+	{name: "egress admission (real LiveKit): the reconcile path drops the kind", file: machine, from: "\t\t\ts.admitOrRemove(ctx, room, p)\n", to: "\t\t\ts.admitOrRemove(ctx, room, livekit.ParticipantInfo{Identity: p.Identity})\n", realLiveKit: true,
+		pkg: "./internal/server", test: "TestAgainstARealLiveKitServer", want: "the reconcile pass removed the real server's EGRESS participant"},
+	{name: "egress admission: by identity prefix instead of kind (webhook)", file: machine, from: "\tif p.Egress() {\n", to: "\tif strings.HasPrefix(p.Identity, \"EG_\") {\n",
+		pkg: "./internal/server", test: "TestTheJoinWebhookKeepsLiveKitsEgressAndRemovesAnEGIdentityOfAnotherKind", want: "kept a STANDARD participant with an EG_ identity"},
+	{name: "egress admission: by identity prefix instead of kind (reconcile)", file: machine, from: "\tif p.Egress() {\n", to: "\tif strings.HasPrefix(p.Identity, \"EG_\") {\n",
+		pkg: "./internal/server", test: "TestTheReconcileLoopKeepsLiveKitsEgressAndRemovesAnEGIdentityOfAnotherKind", want: "the EG_ impostor and the agent removed"},
+	{name: "egress admission: every server-side kind is exempt", file: machine, from: "\tif p.Egress() {\n", to: "\tif p.Kind != \"\" && p.Kind != livekit.KindStandard {\n",
+		pkg: "./internal/server", test: "TestTheJoinWebhookKeepsLiveKitsEgressAndRemovesAnEGIdentityOfAnotherKind", want: "kept a participant of kind INGRESS"},
+	{name: "egress admission: an Egress keeps an ended meeting's room", file: machine, from: "\t\treturn s.store.RoomLive(ctx, room, s.cfg.Now())\n", to: "\t\treturn true, nil\n",
+		pkg: "./internal/server", test: "TestTheJoinWebhookKeepsLiveKitsEgressAndRemovesAnEGIdentityOfAnotherKind", want: "an Egress joining an ended meeting's room kept the room"},
+	{name: "egress admission: the kind is not read off the wire", file: lkAPI, from: "\tKind Kind `json:\"kind\"`\n", to: "\tKind Kind `json:\"-\"`\n",
+		pkg: "./internal/livekit", test: "TestTheParticipantKindIsReadFromTheRealServersWebhookAndList", want: "Egress() = false, want true"},
+	{name: "egress admission: a minted token carries a kind", file: lkToken, from: "\tSHA256 string `json:\"sha256,omitempty\"`\n", to: "\tSHA256 string `json:\"sha256,omitempty\"`\n\tKind   string `json:\"kind,omitempty\"`\n",
+		more: []edit{{lkToken, "Video: &g, Attributes: map[string]string{\"display_name\": p.Name},", "Video: &g, Attributes: map[string]string{\"display_name\": p.Name}, Kind: \"egress\","}},
+		pkg:  "./internal/livekit", test: "TestAMintedTokenCarriesNoKindClaim", want: "token carries a kind claim"},
 
 	// ---- 🔴 the webhook ----
 	{name: "webhook: the body hash is not compared", file: lkHook, from: "if subtle.ConstantTimeCompare(got[:], want) != 1 {", to: "if subtle.ConstantTimeCompare(got[:], want) != 1 && false {",
@@ -529,7 +561,7 @@ var mutants = []mutant{
 		pkg: "./internal/server", test: "TestTheKnockIsPushedOnlyWhileTheOwnerIsNotLooking", want: "after the lobby emptied"},
 
 	// ---- 🔴 the reconcile loop ----
-	{name: "reconcile: the ListParticipants loop is removed", file: machine, from: "\t\tfor _, p := range ps {\n\t\t\ts.admitOrRemove(ctx, room, p.Identity)\n\t\t}", to: "\t\t_ = ps",
+	{name: "reconcile: the ListParticipants loop is removed", file: machine, from: "\t\tfor _, p := range ps {\n\t\t\ts.admitOrRemove(ctx, room, p)\n\t\t}", to: "\t\t_ = ps",
 		pkg: "./internal/server", test: "TestTheReconcileLoopRemovesWhoIsNotAdmittedAndDeletesEndedRooms", want: "after one pass the room holds"},
 	{name: "reconcile: ended meetings' rooms are kept", file: machine, from: "if strings.HasPrefix(rm.Name, \"meeting-\") {", to: "if strings.HasPrefix(rm.Name, \"meeting-\") && false {",
 		pkg: "./internal/server", test: "TestTheReconcileLoopRemovesWhoIsNotAdmittedAndDeletesEndedRooms", want: "the reconcile pass left an ended meeting's room"},

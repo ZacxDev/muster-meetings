@@ -47,6 +47,28 @@ type Joined struct {
 	Name     string
 	Grant    livekit.VideoGrant
 	Tracks   []livekit.TrackInfo
+	// Kind is LiveKit's participant kind ("" is STANDARD). The real server
+	// takes it from the join token's `kind` claim; the fake's Join takes
+	// tokens the plugin mints, which carry none, so only PutKind and the
+	// fake's own Egress make another kind.
+	Kind livekit.Kind
+}
+
+func kindName(k livekit.Kind) livekit.Kind {
+	if k == "" {
+		return livekit.KindStandard
+	}
+	return k
+}
+
+// participantJSON is a participant as LiveKit's webhook (protojson) carries
+// it: the zero kind, STANDARD, is left out.
+func participantJSON(identity string, kind livekit.Kind) map[string]any {
+	p := map[string]any{"sid": "PA_" + identity, "identity": identity}
+	if kindName(kind) != livekit.KindStandard {
+		p["kind"] = string(kind)
+	}
+	return p
 }
 
 // Fake is a fake LiveKit server.
@@ -94,6 +116,9 @@ type Egress struct {
 	Streamed bool
 	// DialErr is why the websocket was not opened, if it was not.
 	DialErr string
+	// Removed says the egress's participant was removed from the room (a
+	// RemoveParticipant of it), which ended the egress.
+	Removed bool
 	active  bool
 	stop    chan string // the status it ends with
 }
@@ -211,6 +236,27 @@ func (f *Fake) Put(room, identity string) {
 		f.rooms[room] = r
 	}
 	r.Participants[identity] = Joined{Identity: identity}
+}
+
+// PutKind is Put for a participant of a given kind (LiveKit's Egress worker
+// is EGRESS): what the real server lists for a participant whose join token
+// carried that `kind` claim.
+func (f *Fake) PutKind(room, identity string, kind livekit.Kind) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r := f.rooms[room]
+	if r == nil {
+		r = &Room{Name: room, Participants: map[string]Joined{}}
+		f.rooms[room] = r
+	}
+	r.Participants[identity] = Joined{Identity: identity, Kind: kind}
+}
+
+// ParticipantJoined posts participant_joined for identity, of kind, in room,
+// shaped as the real server's webhook (the kind left out when STANDARD).
+func (f *Fake) ParticipantJoined(url, room, identity string, kind livekit.Kind) (int, error) {
+	return f.PostEvent(url, map[string]any{"event": "participant_joined", "room": map[string]any{"sid": "RM_fake", "name": room},
+		"participant": participantJSON(identity, kind)})
 }
 
 // Webhook posts a signed LiveKit webhook to url: event about room, and
@@ -348,16 +394,30 @@ func (f *Fake) twirp(w http.ResponseWriter, r *http.Request) {
 					// Twirp's JSON: the field names, the enums by name.
 					ts = append(ts, map[string]any{"sid": t.SID, "type": t.Type, "source": t.Source})
 				}
-				ps = append(ps, map[string]any{"sid": "PA_" + p.Identity, "identity": p.Identity, "name": p.Name, "tracks": ts})
+				// Twirp's JSON sends every field, the kind by name, STANDARD too.
+				ps = append(ps, map[string]any{"sid": "PA_" + p.Identity, "identity": p.Identity, "name": p.Name, "tracks": ts,
+					"kind": string(kindName(p.Kind))})
 			}
 			writeOK(map[string]any{"participants": ps})
 			return
 		}
-		if _, ok := rm.Participants[in.Identity]; !ok {
+		p, ok := rm.Participants[in.Identity]
+		if !ok {
 			twirpErr(w, 404, "not_found", "participant not found")
 			return
 		}
 		delete(rm.Participants, in.Identity)
+		// Removing Egress's participant ends its egress, as the real Egress
+		// does (disconnected: PARTICIPANT_REMOVED, then egress_ended
+		// EGRESS_FAILED).
+		if p.Kind == livekit.KindEgress {
+			for _, e := range f.egresses {
+				if e.ID == in.Identity && e.active {
+					e.Removed = true
+					go f.endEgress(e, "EGRESS_FAILED")
+				}
+			}
+		}
 		writeOK(map[string]any{})
 	default:
 		twirpErr(w, 404, "bad_route", "no such method")
@@ -488,6 +548,12 @@ func (f *Fake) endEgress(e *Egress, status string) {
 	}
 	e.active = false
 	stop, url, room := e.stop, f.WebhookURL, e.Room
+	// Egress leaves the room when its egress ends.
+	if r := f.rooms[room]; r != nil {
+		if p, ok := r.Participants[e.ID]; ok && p.Kind == livekit.KindEgress {
+			delete(r.Participants, e.ID)
+		}
+	}
 	f.mu.Unlock()
 	if stop != nil {
 		select {
@@ -625,12 +691,33 @@ func (f *Fake) egressTwirp(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// runEgress is the fake's Egress for one track: it dials the websocket URL
-// with no credential but the URL, streams pcm, then waits, silent, until the
-// egress is stopped (a close frame) or killed (the connection cut).
+// runEgress is the fake's Egress for one track. First it joins the room as
+// the real Egress does, as a participant of kind EGRESS whose identity is
+// the egress id, and posts participant_joined; if the plugin removes it, the
+// egress ends (EGRESS_FAILED) and nothing is streamed. Then it dials the
+// websocket URL with no credential but the URL, streams pcm, and waits,
+// silent, until the egress is stopped (a close frame) or killed (the
+// connection cut).
 func (f *Fake) runEgress(e *Egress, pcm []byte, pace time.Duration) {
 	if pace == 0 {
 		pace = 10 * time.Millisecond
+	}
+	f.mu.Lock()
+	if r := f.rooms[e.Room]; r != nil && e.active {
+		r.Participants[e.ID] = Joined{Identity: e.ID, Kind: livekit.KindEgress}
+	}
+	url := f.WebhookURL
+	f.mu.Unlock()
+	if url != "" {
+		// The plugin answers participant_joined after acting on it, so a
+		// removal has happened (Removed set) by the time this returns.
+		f.ParticipantJoined(url, e.Room, e.ID, livekit.KindEgress)
+	}
+	f.mu.Lock()
+	removed := e.Removed || !e.active
+	f.mu.Unlock()
+	if removed {
+		return
 	}
 	cl, err := egresstest.Dial(e.URL)
 	if err != nil {

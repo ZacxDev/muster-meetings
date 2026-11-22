@@ -3,6 +3,7 @@ package server_test
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -217,5 +218,30 @@ func TestPagesAreNeverCachedAndAssetsAreRevalidated(t *testing.T) {
 	}
 	if seen < 6 {
 		t.Fatalf("%d versioned /static/ files fetched from the guest page, want at least 6", seen)
+	}
+}
+
+// Revalidation is cheap: every /static/ file's strong ETag is its version
+// (the same hash as ?v=, from the file's bytes on disk), an If-None-Match
+// naming it is a 304 with no body, and a stale or wrong one is the whole file.
+func TestAStaticFileRevalidatesByItsVersion(t *testing.T) {
+	e := newEnv(t)
+	for _, f := range []string{"app.js", "app.css", "vendor/livekit-client-2.25.0.umd.js"} {
+		etag := `"` + fileVersion(t, f) + `"`
+		u := "/static/" + f + "?v=" + fileVersion(t, f)
+		resp, full := e.do("GET", u, "", nil)
+		if resp.StatusCode != 200 || len(full) == 0 || resp.Header.Get("ETag") != etag {
+			t.Fatalf("%s = %d (%d bytes), ETag %q, want 200 with ETag %s", u, resp.StatusCode, len(full), resp.Header.Get("ETag"), etag)
+		}
+		resp, body := e.do("GET", u, "", nil, "If-None-Match", etag)
+		if resp.StatusCode != http.StatusNotModified || len(body) != 0 || resp.Header.Get("Cache-Control") != "no-cache" {
+			t.Errorf("%s with If-None-Match %s = %d (%d bytes, Cache-Control %q), want 304, no body, no-cache", u, etag, resp.StatusCode, len(body), resp.Header.Get("Cache-Control"))
+		}
+		for _, stale := range []string{`"0000000000000000"`, `"` + fileVersion(t, "ui.js") + `"`, fileVersion(t, f)} {
+			resp, body := e.do("GET", u, "", nil, "If-None-Match", stale)
+			if resp.StatusCode != 200 || string(body) != string(full) {
+				t.Errorf("%s with a stale If-None-Match %s = %d (%d bytes), want 200 and the whole file (%d bytes)", u, stale, resp.StatusCode, len(body), len(full))
+			}
+		}
 	}
 }

@@ -103,10 +103,22 @@ var pageFuncs = template.FuncMap{
 }
 
 // staticHandler serves web/static, always revalidated (`no-cache`); the
-// pages' ?v= is what keeps a browser off an old file after a deploy.
+// pages' ?v= is what keeps a browser off an old file after a deploy. The
+// file's version is its strong ETag (the embedded files carry no
+// modification time, so without it every revalidation was a full download):
+// an If-None-Match naming it is a 304 with no body; any other is the file.
 func staticHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "no-cache")
+		h := w.Header()
+		h.Set("Cache-Control", "no-cache")
+		if v := staticVersion(r.URL.Path); v != "" {
+			etag := `"` + v + `"`
+			h.Set("ETag", etag)
+			if r.Header.Get("If-None-Match") == etag {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+		}
 		next.ServeHTTP(w, r)
 	})
 }

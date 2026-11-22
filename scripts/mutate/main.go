@@ -1042,8 +1042,12 @@ var mutants = []mutant{
 		pkg: "./internal/server", test: "TestPagesAreNeverCachedAndAssetsAreRevalidated", want: `the guest's join page: Cache-Control "max-age=14400"`},
 	{name: "asset versions: the owner's page served with max-age", file: srv, from: `h.Set("Cache-Control", "no-store")`, to: `h.Set("Cache-Control", "max-age=14400")`,
 		pkg: "./internal/server", test: "TestPagesAreNeverCachedAndAssetsAreRevalidated", want: `the owner's app: Cache-Control "max-age=14400"`},
-	{name: "asset versions: a static file served with max-age", file: assetsGo, from: `w.Header().Set("Cache-Control", "no-cache")`, to: `w.Header().Set("Cache-Control", "max-age=14400")`,
+	{name: "asset versions: a static file served with max-age", file: assetsGo, from: `h.Set("Cache-Control", "no-cache")`, to: `h.Set("Cache-Control", "max-age=14400")`,
 		pkg: "./internal/server", test: "TestPagesAreNeverCachedAndAssetsAreRevalidated", want: `Cache-Control "max-age=14400", want 200 no-cache`},
+	{name: "asset versions: no ETag sent", file: assetsGo, from: "\t\t\th.Set(\"ETag\", etag)\n", to: "",
+		pkg: "./internal/server", test: "TestAStaticFileRevalidatesByItsVersion", want: `want 200 with ETag`},
+	{name: "asset versions: 304 for a non-matching If-None-Match", file: assetsGo, from: `if r.Header.Get("If-None-Match") == etag {`, to: `if r.Header.Get("If-None-Match") != "" {`,
+		pkg: "./internal/server", test: "TestAStaticFileRevalidatesByItsVersion", want: "want 200 and the whole file"},
 	{name: "asset versions: the version ignores the bytes", file: assetsGo, from: "v := shortHash(b)", to: "v := shortHash(b[:0])",
 		pkg: "./internal/server", test: "TestAssetVersionsFollowTheBytes", want: "app.js versions"},
 

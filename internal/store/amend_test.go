@@ -23,26 +23,27 @@ func TestAmendLastLine(t *testing.T) {
 		lead     string
 		want     []string // every segment's text afterwards, in order
 		changed  bool
+		out      store.AmendOutcome
 	}{
 		{"appends to the participant's latest line", []seg{{"TR_own", "text", "Can everyone hear me clearly"}}, store.OwnerIdentity, "?",
-			[]string{"Can everyone hear me clearly?"}, true},
+			[]string{"Can everyone hear me clearly?"}, true, store.Amended},
 		{"trailing whitespace goes before the mark", []seg{{"TR_own", "text", "so  "}}, store.OwnerIdentity, ",",
-			[]string{"so,"}, true},
-		{"already ends with the same mark", []seg{{"TR_own", "text", "Done."}}, store.OwnerIdentity, ".", []string{"Done."}, false},
-		{"already ends with another mark", []seg{{"TR_own", "text", "Done."}}, store.OwnerIdentity, "?", []string{"Done."}, false},
-		{"already ends with an ellipsis", []seg{{"TR_own", "text", "well…"}}, store.OwnerIdentity, ".", []string{"well…"}, false},
-		{"no previous segment", nil, store.OwnerIdentity, "?", nil, false},
-		{"an empty lead", []seg{{"TR_own", "text", "Hello"}}, store.OwnerIdentity, "", []string{"Hello"}, false},
+			[]string{"so,"}, true, store.Amended},
+		{"already ends with the same mark", []seg{{"TR_own", "text", "Done."}}, store.OwnerIdentity, ".", []string{"Done."}, false, store.AmendHasMark},
+		{"already ends with another mark", []seg{{"TR_own", "text", "Done."}}, store.OwnerIdentity, "?", []string{"Done."}, false, store.AmendHasMark},
+		{"already ends with an ellipsis", []seg{{"TR_own", "text", "well…"}}, store.OwnerIdentity, ".", []string{"well…"}, false, store.AmendHasMark},
+		{"no previous segment", nil, store.OwnerIdentity, "?", nil, false, store.AmendNoLine},
+		{"an empty lead", []seg{{"TR_own", "text", "Hello"}}, store.OwnerIdentity, "", []string{"Hello"}, false, store.AmendNoLead},
 		{"the latest is a gap marker", []seg{{"TR_own", "text", "Hello"}, {"TR_own", "gap", ""}}, store.OwnerIdentity, "?",
-			[]string{"Hello", ""}, false},
+			[]string{"Hello", ""}, false, store.AmendGap},
 		{"the latest is an empty line", []seg{{"TR_own", "text", "Hello"}, {"TR_own", "text", ""}}, store.OwnerIdentity, "?",
-			[]string{"Hello", ""}, false},
+			[]string{"Hello", ""}, false, store.AmendEmpty},
 		{"another participant's newer line is not theirs", []seg{{"TR_own", "text", "Hello"}, {"TR_gst", "text", "Hi there"}}, store.OwnerIdentity, "?",
-			[]string{"Hello?", "Hi there"}, true},
+			[]string{"Hello?", "Hi there"}, true, store.Amended},
 		{"a participant with no line of their own", []seg{{"TR_gst", "text", "Hi there"}}, store.OwnerIdentity, "?",
-			[]string{"Hi there"}, false},
+			[]string{"Hi there"}, false, store.AmendNoLine},
 		{"only the latest of the participant's lines", []seg{{"TR_own", "text", "One"}, {"TR_own", "text", "Two"}}, store.OwnerIdentity, "!",
-			[]string{"One", "Two!"}, true},
+			[]string{"One", "Two!"}, true, store.Amended},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s, _ := open(t)
@@ -59,9 +60,10 @@ func TestAmendLastLine(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			id, changed, err := s.AmendLastLine(ctx, m.Meeting.ID, c.identity, c.lead, marks)
-			if err != nil || changed != c.changed {
-				t.Fatalf("changed %v, %v; want %v", changed, err, c.changed)
+			id, out, err := s.AmendLastLine(ctx, m.Meeting.ID, c.identity, c.lead, marks)
+			changed := out == store.Amended
+			if err != nil || changed != c.changed || out != c.out {
+				t.Fatalf("%q, %v; want %q", out, err, c.out)
 			}
 			var got []string
 			var ids []int64
@@ -102,8 +104,8 @@ func TestAmendLastLineStaysInItsMeeting(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, changed, err := s.AmendLastLine(ctx, a.Meeting.ID, store.OwnerIdentity, "?", marks); err != nil || !changed {
-		t.Fatalf("changed %v, %v", changed, err)
+	if _, out, err := s.AmendLastLine(ctx, a.Meeting.ID, store.OwnerIdentity, "?", marks); err != nil || out != store.Amended {
+		t.Fatalf("%q, %v", out, err)
 	}
 	for _, m := range []struct{ id, want string }{{a.Meeting.ID, "In meeting A?"}, {b.Meeting.ID, "In meeting B"}} {
 		segs, err := s.SegmentsAfter(ctx, m.id, 0, 10)

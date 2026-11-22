@@ -893,8 +893,8 @@ var mutants = []mutant{
 		pkg: "./internal/stt", test: "TestAFallbackThatFailsToOpenIsLogged", want: "the log does not say the fallback failed"},
 
 	// ---- late closing marks (the server's `lead`: the previous line's mark) ----
-	{name: "late mark: the amend dropped", file: trans, from: "if id, changed, err := s.store.AmendLastLine(ctx, t.MeetingID, t.Identity, seg.Lead, stt.Marks); err != nil {",
-		to:  "if id, changed, err := int64(0), false, error(nil); err != nil {",
+	{name: "late mark: the amend dropped", file: trans, from: "id, out, err := s.store.AmendLastLine(ctx, t.MeetingID, t.Identity, seg.Lead, stt.Marks)",
+		to:  "id, out, err := int64(0), store.AmendNoLine, error(nil)",
 		pkg: "./internal/server", test: "TestALateClosingMarkAmendsThePreviousLineEverywhere", want: `the panel stopped short: lines ["Ada L.: Can everyone hear me clearly" "Ada L.: Alice will"]`},
 	{name: "late mark: another participant's line amended", file: segs, from: "WHERE meeting_id = ? AND identity = ? ORDER BY id DESC LIMIT 1`",
 		to:  "WHERE meeting_id = ? AND ? != '' ORDER BY id DESC LIMIT 1`",
@@ -1019,6 +1019,19 @@ var mutants = []mutant{
 		e2e: "ui-remember.spec.ts", test: "unanswered camera prompt", want: "pending"},
 	{name: "ui: an amend (a late closing mark) not drawn", file: callJS, from: "if (text) text.textContent = a.text;", to: "if (false) text.textContent = a.text;",
 		e2e: "late-marks.spec.ts", test: "late .* in place on every open panel", want: `Expected: "Can everyone hear me clearly?"`},
+
+	// ---- the lead log (one line per final with a lead: ids and times, never text) ----
+	{name: "lead log: not logged", file: trans, from: "\t\t\ts.logLead(t, seg.Lead, start, end, id, out, err)\n", to: "",
+		pkg: "./internal/server", test: "TestEachLeadIsLoggedWithIdsAndTimesAndNoText", want: "0 lead log lines, want 1"},
+	{name: "lead log: the final's words logged", file: trans, from: "s.logLead(t, seg.Lead, start, end, id, out, err)", to: "s.logLead(t, seg.Lead+\" \"+seg.Text, start, end, id, out, err)",
+		more: []edit{{trans, "stt.CleanLead(lead), t.MeetingID", "lead, t.MeetingID"}},
+		pkg:  "./internal/server", test: "TestEachLeadIsLoggedWithIdsAndTimesAndNoText", want: `the log holds "Xylophone", a word of the transcript`},
+	{name: "lead log: the wrong segment named", file: trans, from: `what := fmt.Sprintf("amended segment %d", id)`, to: `what := fmt.Sprintf("amended segment %d", id+1)`,
+		pkg: "./internal/server", test: "TestEachLeadIsLoggedWithIdsAndTimesAndNoText", want: "amended segment 2"},
+	{name: "lead log: why a lead was dropped not said", file: trans, from: `what = "dropped: " + string(out)`, to: `what = "dropped"`,
+		pkg: "./internal/server", test: "TestEachLeadIsLoggedWithIdsAndTimesAndNoText", want: `ms: dropped": fields`},
+	{name: "lead log: the final's times not the stored line's", file: trans, from: "stt.CleanLead(lead), t.MeetingID, t.Track, start, end, what)", to: "stt.CleanLead(lead), t.MeetingID, t.Track, start+1, end, what)",
+		pkg: "./internal/server", test: "TestEachLeadIsLoggedWithIdsAndTimesAndNoText", want: "fields"},
 
 	// ---- asset versions (a deploy is a new URL; the pages are never cached) ----
 	{name: "asset versions: guest.js unversioned on the guest page", file: guestHTML, from: `<script src="{{asset "guest.js"}}"></script>`, to: `<script src="/static/guest.js"></script>`,

@@ -2,7 +2,10 @@ package server_test
 
 import (
 	"encoding/json"
+	"fmt"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -320,6 +323,76 @@ func TestEveryEndingFreesTheAmendLog(t *testing.T) {
 			time.Sleep(300 * time.Millisecond)
 			if n := e.server.AmendLogsForTest(); n != 0 {
 				t.Fatalf("%d amend logs after the meeting ended (%s), want 0", n, how)
+			}
+		})
+	}
+}
+
+// 🔴 One log line per final that carries a lead, with ids and times only:
+// the meeting, the track, the marks, the final's meeting time, and the
+// segment it amended (or why it was dropped). It is what shows, on the live
+// path, which line a late mark went to. The deployment may hold health
+// information, so NO word of the final or of the amended line may reach the
+// log: the script's words are distinctive, and the whole log is searched
+// for each (the archive holding them is the control).
+func TestEachLeadIsLoggedWithIdsAndTimesAndNoText(t *testing.T) {
+	words := []string{"Zanzibar", "quokkas", "yodel", "loudly", "Xylophone", "marmalade"}
+	leadLine := regexp.MustCompile(`(?m)^transcript: lead (.*)$`)
+	logged := regexp.MustCompile(`^"([^"]*)" meeting (\S+) track (\S+) final (\d+)-(\d+) ms: (.*)$`)
+	for _, c := range []struct {
+		name  string
+		lines []string
+		want  []string // the archive
+		marks string
+		what  func(e *env) string
+	}{
+		{"amended", []string{"Zanzibar quokkas yodel loudly?", "Xylophone marmalade"},
+			[]string{"Ada L.: Zanzibar quokkas yodel loudly?", "Ada L.: Xylophone marmalade"}, "?",
+			func(e *env) string {
+				var id int64
+				e.dbQuery(`SELECT MIN(id) FROM segments`).Scan(&id)
+				return fmt.Sprintf("amended segment %d", id)
+			}},
+		{"dropped", []string{"? Xylophone marmalade"}, []string{"Ada L.: Xylophone marmalade"}, "?",
+			func(*env) string { return "dropped: " + string(store.AmendNoLine) }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e, srv := newNemEnv(t)
+			srv.Set(func(s *stttest.Server) { s.Lines = c.lines })
+			e.lk.EgressAudio = func(room, identity, track string) []byte { return speech }
+			if c.name == "dropped" {
+				e.lk.EgressAudio = func(room, identity, track string) []byte { return egresstest.Script(1000, 1000) }
+			}
+			e.lk.EgressPace = time.Millisecond
+			m := e.meeting(ada)
+			e.started(m)
+			tr := e.publish(m, store.OwnerIdentity, "MICROPHONE")
+			e.settled(m, srv, len(c.lines), c.want)
+			// The control: the words are in the system (the archive).
+			if a := strings.Join(e.archive(m), " "); !strings.Contains(a, "Xylophone") {
+				t.Fatalf("the archive %q does not hold the script's words", a)
+			}
+			log := e.log.String()
+			for _, w := range words {
+				if strings.Contains(strings.ToLower(log), strings.ToLower(w)) {
+					t.Errorf("the log holds %q, a word of the transcript: %q", w, log)
+				}
+			}
+			got := leadLine.FindAllStringSubmatch(log, -1)
+			if len(got) != 1 {
+				t.Fatalf("%d lead log lines, want 1 (one final carried a lead): %q", len(got), log)
+			}
+			f := logged.FindStringSubmatch(got[0][1])
+			if f == nil {
+				t.Fatalf("the lead line %q is not `\"marks\" meeting <id> track <id> final <start>-<end> ms: <what>`", got[0][0])
+			}
+			// The final's own times are those of the line it stored (the
+			// meeting's latest segment).
+			var start, end int64
+			e.dbQuery(`SELECT start_ms, end_ms FROM segments ORDER BY id DESC LIMIT 1`).Scan(&start, &end)
+			want := []string{c.marks, m.ID, tr, strconv.FormatInt(start, 10), strconv.FormatInt(end, 10), c.what(e)}
+			if !slices.Equal(f[1:], want) {
+				t.Fatalf("the lead line %q: fields %q, want %q", got[0][0], f[1:], want)
 			}
 		})
 	}

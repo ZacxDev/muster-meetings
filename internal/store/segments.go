@@ -281,7 +281,7 @@ func (s *Store) AddSegment(ctx context.Context, track, kind string, startMS, end
 // AmendLastLine appends lead (closing marks the STT server decoded only when
 // the participant's next speech began) to the participant's previous line:
 // identity's LATEST segment in the meeting. It answers that segment's id and
-// whether it changed.
+// what it did (Amended, or why not: an AmendOutcome).
 //
 // Nothing changes when lead is empty, when the participant has no segment,
 // when their latest segment is not a line (a gap marker: the mark may belong
@@ -290,13 +290,13 @@ func (s *Store) AddSegment(ctx context.Context, track, kind string, startMS, end
 // lead sent twice adds nothing). Another participant's line is never
 // touched: the row is chosen by meeting AND identity. One transaction, so
 // two amends of one line cannot both see it unmarked.
-func (s *Store) AmendLastLine(ctx context.Context, meetingID, identity, lead, marks string) (int64, bool, error) {
+func (s *Store) AmendLastLine(ctx context.Context, meetingID, identity, lead, marks string) (int64, AmendOutcome, error) {
 	if lead == "" {
-		return 0, false, nil
+		return 0, AmendNoLead, nil
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, false, err
+		return 0, AmendFailed, err
 	}
 	defer tx.Rollback()
 	var id int64
@@ -304,23 +304,44 @@ func (s *Store) AmendLastLine(ctx context.Context, meetingID, identity, lead, ma
 	err = tx.QueryRowContext(ctx, `SELECT id, kind, text FROM segments WHERE meeting_id = ? AND identity = ? ORDER BY id DESC LIMIT 1`,
 		meetingID, identity).Scan(&id, &kind, &text)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, false, nil
+		return 0, AmendNoLine, nil
 	}
 	if err != nil {
-		return 0, false, err
+		return 0, AmendFailed, err
 	}
 	text = strings.TrimRightFunc(text, unicode.IsSpace)
-	if kind != SegText || text == "" {
-		return id, false, nil
+	if kind != SegText {
+		return id, AmendGap, nil
+	}
+	if text == "" {
+		return id, AmendEmpty, nil
 	}
 	if last, _ := utf8.DecodeLastRuneInString(text); strings.ContainsRune(marks, last) {
-		return id, false, nil
+		return id, AmendHasMark, nil
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE segments SET text = ? WHERE id = ?`, text+lead, id); err != nil {
-		return 0, false, err
+		return 0, AmendFailed, err
 	}
-	return id, true, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return 0, AmendFailed, err
+	}
+	return id, Amended, nil
 }
+
+// AmendOutcome is what AmendLastLine did with a lead: Amended, or why the
+// lead was dropped. Each is a fixed phrase (it is logged), never a line's
+// text.
+type AmendOutcome string
+
+const (
+	Amended      AmendOutcome = "amended"
+	AmendNoLead  AmendOutcome = "no lead"
+	AmendNoLine  AmendOutcome = "the participant has no earlier segment"
+	AmendGap     AmendOutcome = "the participant's latest segment is a gap"
+	AmendEmpty   AmendOutcome = "the participant's latest segment is empty"
+	AmendHasMark AmendOutcome = "the participant's latest segment already ends with a mark"
+	AmendFailed  AmendOutcome = "the store failed"
+)
 
 const segCols = `s.id, s.speaker, s.identity != '` + OwnerIdentity + `', s.kind, s.start_ms, s.end_ms, s.text`
 

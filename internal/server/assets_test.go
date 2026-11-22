@@ -16,11 +16,10 @@ import (
 // the origin said, an unversioned /static/app.js kept an owner on the old
 // script for up to four hours after a deploy. So: every /static/ URL in every
 // page is `?v=` the first 8 bytes of its file's SHA-256, in hex (pinned here
-// from the file on disk, not from the server's own table), and is served
-// for a year, immutable; the same path with no version or another one is
-// `no-cache`; the kit (/kit/v1/, proxied from muster and re-themed at run
-// time) is `?v=` the build's version and stays `no-cache`; and the pages
-// themselves are never cached.
+// from the file on disk, not from the server's own table); every /static/
+// response is `no-cache`, versioned or not; the kit (/kit/v1/, proxied from
+// muster and re-themed at run time) is `?v=` the build's version and is
+// `no-cache` too; and the pages themselves are never cached.
 
 // fileVersion is a static file's version as the pages must name it.
 func fileVersion(t *testing.T, rel string) string {
@@ -191,42 +190,28 @@ func TestTheAssetScanSeesAnUnversionedReference(t *testing.T) {
 	}
 }
 
-func TestPagesAreNeverCachedAndVersionedAssetsAreCachedForAYear(t *testing.T) {
+func TestPagesAreNeverCachedAndAssetsAreRevalidated(t *testing.T) {
 	e := newEnv(t)
 	for name, p := range servedPages(t, e) {
 		if !(p.cc == "no-store" || p.cc == "no-cache") || strings.Contains(p.cc, "max-age") {
 			t.Errorf("%s: Cache-Control %q, want no-store or no-cache (a page is never reused unchecked)", name, p.cc)
 		}
 	}
-	const year = "public, max-age=31536000, immutable"
 	pages := servedPages(t, e)
 	seen := 0
 	for _, m := range attrURL.FindAllSubmatch(pages["the guest's join page"].body, -1) {
 		u := string(m[1])
-		resp, body := e.do("GET", u, "", nil)
-		cc := resp.Header.Get("Cache-Control")
-		if resp.StatusCode != 200 || len(body) == 0 {
-			t.Errorf("%s = %d (%d bytes)", u, resp.StatusCode, len(body))
-		}
-		switch {
-		case strings.HasPrefix(u, "/static/"):
+		bare, _, _ := strings.Cut(u, "?")
+		urls := []string{u}
+		if strings.HasPrefix(u, "/static/") {
 			seen++
-			if cc != year {
-				t.Errorf("%s: Cache-Control %q, want %q", u, cc, year)
-			}
-			// The same file unversioned, or under another version (a page
-			// from before a deploy), must be revalidated.
-			bare, _, _ := strings.Cut(u, "?")
-			for _, other := range []string{bare, bare + "?v=0000000000000000", bare + "?v="} {
-				resp, _ := e.do("GET", other, "", nil)
-				if got := resp.Header.Get("Cache-Control"); resp.StatusCode != 200 || got != "no-cache" {
-					t.Errorf("%s = %d, Cache-Control %q, want no-cache", other, resp.StatusCode, got)
-				}
-			}
-		case strings.HasPrefix(u, "/kit/v1/"):
-			// The kit is re-themed while the plugin runs: never a year.
-			if cc != "no-cache" {
-				t.Errorf("%s: Cache-Control %q, want no-cache", u, cc)
+			// The same file unversioned, or under another version.
+			urls = append(urls, bare, bare+"?v=0000000000000000")
+		}
+		for _, x := range urls {
+			resp, body := e.do("GET", x, "", nil)
+			if cc := resp.Header.Get("Cache-Control"); resp.StatusCode != 200 || len(body) == 0 || cc != "no-cache" {
+				t.Errorf("%s = %d (%d bytes), Cache-Control %q, want 200 no-cache", x, resp.StatusCode, len(body), cc)
 			}
 		}
 	}

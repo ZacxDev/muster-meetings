@@ -18,11 +18,10 @@ import (
 // unversioned /static/app.js then outlived a deploy.
 //
 //   - /static/<file>?v=<the file's version>: the first 8 bytes of the file's
-//     SHA-256, in hex, computed once from the embedded bytes. Served
-//     `public, max-age=31536000, immutable` ONLY when v is the file's
-//     current version; the bare path, or any other v (a page from before a
-//     deploy), is `no-cache`, so a long-cached response is always the bytes
-//     its URL names.
+//     SHA-256, in hex, computed once from the embedded bytes. Every
+//     /static/ response is `no-cache`, whatever v says: the version is what
+//     makes a deploy a new URL (a cache that ignores `no-cache` still keys
+//     on the URL); the server does not promise more.
 //   - /kit/v1/<file>?v=<the build's version>: the kit is proxied from
 //     muster and re-themed while the plugin runs (kit.go), so its bytes are
 //     not known when a page is drawn. It carries the build's version (every
@@ -103,22 +102,11 @@ var pageFuncs = template.FuncMap{
 	},
 }
 
-// AssetCacheControl is what a /static/ file is served with under its
-// current version, and NoCache under any other URL.
-const (
-	AssetCacheControl = "public, max-age=31536000, immutable"
-	NoCache           = "no-cache"
-)
-
-// staticHandler serves web/static: a year for the file's current version,
-// else revalidated every time.
+// staticHandler serves web/static, always revalidated (`no-cache`); the
+// pages' ?v= is what keeps a browser off an old file after a deploy.
 func staticHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cc := NoCache
-		if v := r.URL.Query().Get("v"); v != "" && v == staticVersion(r.URL.Path) {
-			cc = AssetCacheControl
-		}
-		w.Header().Set("Cache-Control", cc)
+		w.Header().Set("Cache-Control", "no-cache")
 		next.ServeHTTP(w, r)
 	})
 }

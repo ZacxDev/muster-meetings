@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -217,4 +218,99 @@ func asAPI(err error, target **livekit.APIError) bool {
 		*target = e
 	}
 	return ok
+}
+
+// ---- the participant kind (LiveKit's own Egress joins as EGRESS) ----
+
+// The fixtures in testdata are the exact bodies a real livekit-server
+// (1.13.11) sent in one run, with only the room's turnPassword blanked: two
+// clients joined one room through LiveKit's Go SDK, one with a token whose
+// `kind` claim was "egress" (identity EG_capture0001, what LiveKit's Egress
+// worker joins with) and one with no kind claim and an EG_-looking identity
+// (EG_impostor01). The participant_joined webhooks (protojson) and the
+// RoomService.ListParticipants answer (Twirp JSON) were recorded.
+func readFixture(t *testing.T, name string) []byte {
+	t.Helper()
+	b, err := os.ReadFile("testdata/" + name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// The kind is read from both of the real server's wire formats: "EGRESS" by
+// name in each, STANDARD left out of the webhook (protojson's zero value)
+// and spelled out in Twirp's answer.
+func TestTheParticipantKindIsReadFromTheRealServersWebhookAndList(t *testing.T) {
+	for _, tc := range []struct {
+		file, identity string
+		egress         bool
+	}{
+		{"real-webhook-participant-joined-egress.json", "EG_capture0001", true},
+		{"real-webhook-participant-joined-standard.json", "EG_impostor01", false},
+	} {
+		var ev livekit.Event
+		if err := json.Unmarshal(readFixture(t, tc.file), &ev); err != nil || ev.Participant == nil {
+			t.Fatalf("%s: %v", tc.file, err)
+		}
+		if ev.Participant.Identity != tc.identity || ev.Participant.Egress() != tc.egress {
+			t.Errorf("%s: identity %q kind %q: Egress() = %v, want %v", tc.file, ev.Participant.Identity, ev.Participant.Kind, ev.Participant.Egress(), tc.egress)
+		}
+	}
+	var list struct {
+		Participants []livekit.ParticipantInfo `json:"participants"`
+	}
+	if err := json.Unmarshal(readFixture(t, "real-list-participants.json"), &list); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]livekit.Kind{}
+	for _, p := range list.Participants {
+		got[p.Identity] = p.Kind
+	}
+	if len(got) != 2 || got["EG_capture0001"] != livekit.KindEgress || got["EG_impostor01"] != livekit.KindStandard {
+		t.Errorf("ListParticipants kinds = %v, want EG_capture0001 EGRESS and EG_impostor01 STANDARD", got)
+	}
+}
+
+// A number is read as the enum's value (2 is EGRESS), null as STANDARD, and
+// anything else is an error rather than a silent STANDARD.
+func TestAParticipantKindNumberIsTheEnumValue(t *testing.T) {
+	for in, want := range map[string]livekit.Kind{`2`: livekit.KindEgress, `0`: livekit.KindStandard, `4`: livekit.KindAgent, `null`: livekit.KindStandard, `"SIP"`: livekit.KindSIP} {
+		var p livekit.ParticipantInfo
+		if err := json.Unmarshal([]byte(`{"identity":"x","kind":`+in+`}`), &p); err != nil || p.Kind != want {
+			t.Errorf("kind %s = %q %v, want %q", in, p.Kind, err, want)
+		}
+	}
+	var p livekit.ParticipantInfo
+	if err := json.Unmarshal([]byte(`{"identity":"x","kind":{}}`), &p); err == nil {
+		t.Error("an object kind was read")
+	}
+}
+
+// 🔴 A token the plugin mints carries no `kind` claim, so LiveKit makes every
+// owner and guest STANDARD: the kind the admission check exempts (EGRESS)
+// can only come from a token signed outside the plugin with the API secret.
+// (An invariant guard: the bug this file's kind tests cover never minted a
+// kind.)
+func TestAMintedTokenCarriesNoKindClaim(t *testing.T) {
+	for name, g := range map[string]livekit.VideoGrant{"owner": livekit.OwnerGrant("meeting-Qx7_room"), "guest": livekit.GuestGrant("meeting-Qx7_room")} {
+		tok, err := keys.Mint(livekit.Participant{Identity: "EG_x", Name: "n"}, g, t0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := base64.RawURLEncoding.DecodeString(part(tok, 1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var claims map[string]any
+		if err := json.Unmarshal(raw, &claims); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := claims["kind"]; ok {
+			t.Errorf("the %s token carries a kind claim: %s", name, raw)
+		}
+		if _, ok := claims["kindDetails"]; ok {
+			t.Errorf("the %s token carries kindDetails: %s", name, raw)
+		}
+	}
 }

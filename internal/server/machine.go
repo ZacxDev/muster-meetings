@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/ZacxDev/muster-meetings/internal/livekit"
 )
 
 // Run starts the server's background work and returns when ctx ends: the
@@ -34,11 +36,11 @@ func (s *Server) Run(ctx context.Context) {
 // Authorization JWT is signed by the API secret and carries the body's
 // SHA-256); anything else is 401. Then:
 //
-//   - participant_joined: an identity that may not be in the room
-//     (store.MayBeInRoom: not the owner's, not an admitted guest's, or the
-//     meeting has ended) is removed at once. That is the backstop that ends
-//     a removed guest's still-valid token (design: "Removed guest cannot
-//     rejoin").
+//   - participant_joined: a participant that may not be in the room
+//     (mayStay: not the owner's, not an admitted guest's, not LiveKit's own
+//     Egress, or the meeting has ended) is removed at once. That is the
+//     backstop that ends a removed guest's still-valid token (design:
+//     "Removed guest cannot rejoin").
 //   - participant_left: nothing. A dropped connection is not a revocation;
 //     the guest reconnects (design: "an admitted control guest who
 //     reconnects is not" disconnected).
@@ -61,7 +63,7 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		if ev.Participant == nil || room == "" {
 			break
 		}
-		s.admitOrRemove(ctx, room, ev.Participant.Identity)
+		s.admitOrRemove(ctx, room, *ev.Participant)
 	case "participant_left":
 		// 🔴 Not a revocation: a connection that drops (a network blink, a
 		// reload) must not cost an admitted guest their admission. They
@@ -95,11 +97,35 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// admitOrRemove removes identity from room unless it may be there. When the
-// room is an ended meeting's (a client re-created it with a token it still
-// held), the room is deleted too.
-func (s *Server) admitOrRemove(ctx context.Context, room, identity string) {
-	ok, err := s.store.MayBeInRoom(ctx, room, identity, s.cfg.Now())
+// mayStay is the rule the participant_joined webhook and the reconcile loop
+// both apply to a participant LiveKit reports in room (one function, so the
+// two paths cannot disagree):
+//
+//   - LiveKit's own Egress worker (Kind EGRESS) may stay while the room's
+//     meeting is live. It is how a track's audio reaches the transcript: the
+//     plugin's StartTrackEgress makes Egress join the room as a participant
+//     to subscribe to the track, and removing it ends that egress
+//     (PARTICIPANT_REMOVED, then egress_ended EGRESS_FAILED). Kind is set by
+//     the LiveKit server from the join token's `kind` claim, which only a
+//     holder of the API secret can sign and which no token the plugin mints
+//     carries; the identity is NOT the test (an "EG_…" identity of any
+//     other kind is judged like anyone else).
+//   - Everyone else, every other server-side kind included (INGRESS, SIP,
+//     AGENT: the plugin starts none of them, and each would be a speaker or
+//     listener the owner never admitted), is store.MayBeInRoom: the owner,
+//     or an admitted guest, of a live meeting.
+func (s *Server) mayStay(ctx context.Context, room string, p livekit.ParticipantInfo) (bool, error) {
+	if p.Egress() {
+		return s.store.RoomLive(ctx, room, s.cfg.Now())
+	}
+	return s.store.MayBeInRoom(ctx, room, p.Identity, s.cfg.Now())
+}
+
+// admitOrRemove removes p from room unless it may be there (mayStay). When
+// the room is an ended meeting's (a client re-created it with a token it
+// still held), the room is deleted too.
+func (s *Server) admitOrRemove(ctx context.Context, room string, p livekit.ParticipantInfo) {
+	ok, err := s.mayStay(ctx, room, p)
 	if err != nil {
 		s.cfg.Log.Printf("webhook: the admission check failed: %v", err)
 		return
@@ -107,10 +133,10 @@ func (s *Server) admitOrRemove(ctx context.Context, room, identity string) {
 	if ok {
 		return
 	}
-	if err := s.cfg.LiveKit.RemoveParticipant(ctx, room, identity); err != nil {
+	if err := s.cfg.LiveKit.RemoveParticipant(ctx, room, p.Identity); err != nil {
 		s.cfg.Log.Printf("webhook: removing an identity that is not admitted: %v (the reconcile loop retries)", err)
 	} else {
-		s.cfg.Log.Printf("webhook: removed an identity that is not admitted")
+		s.cfg.Log.Printf("webhook: removed an identity that is not admitted (participant kind %q)", p.Kind)
 	}
 	s.deleteIfEnded(ctx, room)
 }
@@ -135,8 +161,8 @@ func (s *Server) deleteIfEnded(ctx context.Context, room string) {
 // "A webhook can be lost, so a reconcile loop also calls ListParticipants for
 // each live meeting every 15 s and removes any identity not admitted"):
 //
-//   - for every live meeting, every identity in its room that may not be
-//     there (store.MayBeInRoom) is removed;
+//   - for every live meeting, every participant in its room that may not
+//     be there (mayStay) is removed;
 //   - every room LiveKit holds that belongs to a meeting no longer live is
 //     deleted. That ends the calls of meetings ended by any path (End
 //     meeting whose DeleteRoom failed, the 24 h cap, an uninstall, a person
@@ -158,7 +184,7 @@ func (s *Server) Reconcile(ctx context.Context) {
 			return
 		}
 		for _, p := range ps {
-			s.admitOrRemove(ctx, room, p.Identity)
+			s.admitOrRemove(ctx, room, p)
 		}
 	}
 	all, err := s.cfg.LiveKit.ListRooms(ctx)

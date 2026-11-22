@@ -64,6 +64,27 @@ h2 { font-size: 1rem; font-weight: 600; margin: 0; }
 @keyframes breathe { from { opacity: .25; } to { opacity: 1; } }
 @keyframes tile-in { from { opacity: 0; transform: scale(.96); } to { opacity: 1; transform: none; } }
 
+/* ---- the contacts card, after the meeting (guest.js showCard) ----
+   One card under the ended message: icon-led title, the consent sentence,
+   two fields, Send and an equally plain Skip. It rises in, and leaves by
+   fading, on the kit's durations (0 ms under reduced motion). */
+.card-ask { max-width: 26rem; margin: 1.5rem auto 0; padding: 1.25rem; text-align: left; display: flex; flex-direction: column; gap: .75rem;
+  animation: rise var(--mu-dur-slow) var(--mu-ease-enter);
+  transition: opacity var(--mu-dur-base) var(--mu-ease-standard), transform var(--mu-dur-base) var(--mu-ease-standard); }
+.card-ask[data-leaving] { opacity: 0; transform: translateY(.25rem); }
+.card-ask__head { display: flex; align-items: center; gap: .5rem; }
+.card-ask__head h2 { overflow-wrap: anywhere; }
+.card-ask__icon { display: inline-flex; color: rgb(var(--mu-accent)); flex: 0 0 auto; }
+.card-ask__icon .mu-icon { width: 1.25rem; height: 1.25rem; }
+.notice .card-ask p.card-ask__consent { margin: 0; color: rgb(var(--mu-text2)); font-size: .9375rem; line-height: 1.45; }
+.card-ask__form { display: flex; flex-direction: column; gap: .75rem; }
+.card-ask__form .mu-input { width: 100%; }
+.notice .card-ask p.card__error { margin: .25rem 0 0; }
+.card-ask__actions { display: flex; gap: .5rem; flex-wrap: wrap; }
+.card-ask__actions .mu-btn { flex: 1 1 8rem; }
+.notice .card-ask p.card-ask__done { margin: 0; display: flex; align-items: center; gap: .5rem; color: rgb(var(--mu-text)); animation: rise var(--mu-dur-base) var(--mu-ease-enter); }
+@media (max-width: 30rem) { .card-ask { margin-top: 1rem; padding: 1rem; } }
+
 /* ---- pre-join: the preview, its toggles and meter, the devices ---- */
 .prejoin { max-width: 34rem; margin: 0 auto; display: flex; flex-direction: column; gap: .75rem;
   padding: max(.75rem, env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right)) max(1rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left)); }

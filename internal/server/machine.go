@@ -15,6 +15,7 @@ func (s *Server) Run(ctx context.Context) {
 	defer s.bgStop()
 	go func() { <-ctx.Done(); s.bgStop() }()
 	go s.knocker.Run(ctx)
+	s.runContacts(ctx)
 	// Once at start: a restart may have missed webhooks.
 	s.Reconcile(ctx)
 	// And every transcribed track lost its egress's stream.

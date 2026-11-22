@@ -45,6 +45,18 @@
 // final's `lead`, and the plugin amends the line it has already shown.
 // -nemotron-script "line|line|…" replaces captionLines.
 //
+// With -contacts=fake the plugin is configured with contacts, against the
+// fake contacts API (internal/contactstest, held to the contract by
+// internal/contacts's contract test), and the parent adds:
+//
+//	GET /contacts-received     every card submission the fake accepted, as JSON
+//	GET /contacts-mode?mode=up|down&accepting=0|1
+//	                           the fake answers as the contract says (up), or black-holes
+//	                           every request (down); accepting=0 answers the owner 404
+//
+// Without it (the default) the plugin has no contacts URL: the guest card
+// does not exist, exactly as in a deployment that never set one.
+//
 // LiveKit is a fake (internal/livekittest): rooms and participants over its
 // server API, and a signalling endpoint that records, verified, the token a
 // browser connects with and refuses the connection (it carries no media).
@@ -71,6 +83,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ZacxDev/muster-meetings/internal/contacts"
+	"github.com/ZacxDev/muster-meetings/internal/contactstest"
 	"github.com/ZacxDev/muster-meetings/internal/egresstest"
 	"github.com/ZacxDev/muster-meetings/internal/livekit"
 	"github.com/ZacxDev/muster-meetings/internal/livekittest"
@@ -92,7 +106,12 @@ var (
 	lkMode   = flag.String("livekit", "fake", "fake, or real (a livekit-server binary)")
 	sttMode  = flag.String("stt", "fake", "fake (the fake engine), or nemotron (the nemotron engine against the fake Nemotron server)")
 	nemLines = flag.String("nemotron-script", "", "with -stt=nemotron: the fake Nemotron server's script, lines separated by |")
+	ctMode   = flag.String("contacts", "off", "off (no contacts URL: no card), or fake (the fake contacts API)")
 )
+
+// contactsToken is the harness's contacts API token (the fake's and the
+// plugin's copy).
+const contactsToken = "ctk_e2e_harness_contacts_token_0123456789"
 
 // captionLines is the fake Nemotron server's script (-stt=nemotron).
 var captionLines = []string{"Captions arrive word by word as Ada speaks.", "Then the next line follows."}
@@ -199,7 +218,18 @@ func run(logger *log.Logger) error {
 	// The kit: fetched by the plugin from the parent (muster's role), and
 	// revalidated on every page load (a 1 ms TTL, and a failure retried at
 	// once), so a theme or failure mode a test sets shows on the next load.
-	srv := server.New(server.Config{PublicURL: pluginURL, MusterOrigin: parentOrigin, KitUpstream: parentOrigin, KitTTL: time.Millisecond, KitRetry: time.Millisecond, Log: logger,
+	var ct *contactstest.Fake
+	var ctClient *contacts.Client
+	switch *ctMode {
+	case "off":
+	case "fake":
+		ct = contactstest.New(contactsToken)
+		defer ct.Close()
+		ctClient = contacts.New(ct.URL, contactsToken)
+	default:
+		return fmt.Errorf("-contacts is off or fake, not %q", *ctMode)
+	}
+	srv := server.New(server.Config{PublicURL: pluginURL, Contacts: ctClient, MusterOrigin: parentOrigin, KitUpstream: parentOrigin, KitTTL: time.Millisecond, KitRetry: time.Millisecond, Log: logger,
 		LiveKit: lkc, LiveKitURL: lkWS, ICE: "all",
 		// The fake engine (MEETINGS_TEST_MODE's) or the nemotron engine
 		// against the fake Nemotron server, and the ingest listener the fake
@@ -227,6 +257,38 @@ func run(logger *log.Logger) error {
 	mux.HandleFunc("GET /redeems", func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, strconv.Itoa(fake.CountCalls("POST", "/plugin/v1/handoffs/redeem")))
 	})
+	if ct != nil {
+		subject := func() string { return fake.Subject(app.PluginID, ada.ID) }
+		mux.HandleFunc("GET /contacts-received", func(w http.ResponseWriter, r *http.Request) {
+			type row struct {
+				Key, Name, Email, Owner, Meeting, Title, TypedName string
+			}
+			out := []row{}
+			for _, g := range ct.Got() {
+				out = append(out, row{Key: g.Key, Name: g.Body.Name, Email: g.Body.Email, Owner: g.Body.Owner, Meeting: g.Body.Meeting.ID,
+					Title: g.Body.Meeting.Title, TypedName: g.Body.Participant.TypedName})
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"received": out, "owner": subject(),
+				"submission_posts": ct.Count("POST", contacts.PathSubmissions)})
+		})
+		mux.HandleFunc("GET /contacts-mode", func(w http.ResponseWriter, r *http.Request) {
+			q := r.URL.Query()
+			switch q.Get("mode") {
+			case "", "up":
+				ct.SetMode(contactstest.Up, 0, "")
+			case "down":
+				ct.SetMode(contactstest.BlackHole, 0, "")
+			default:
+				http.Error(w, "mode is up or down", http.StatusBadRequest)
+				return
+			}
+			if a := q.Get("accepting"); a != "" {
+				ct.SetAccepting(subject(), a == "1")
+			}
+			io.WriteString(w, "ok")
+		})
+	}
 	mux.HandleFunc("GET /livekit-joins", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(lk.RTCs())
@@ -263,7 +325,7 @@ func run(logger *log.Logger) error {
 	parent := &http.Server{Handler: mux}
 	go parent.Serve(parentLn)
 
-	b, _ := json.Marshal(map[string]any{"plugin": pluginURL, "parent": parentOrigin, "plugin_id": app.PluginID, "real_livekit": real})
+	b, _ := json.Marshal(map[string]any{"plugin": pluginURL, "parent": parentOrigin, "plugin_id": app.PluginID, "real_livekit": real, "contacts": ct != nil})
 	fmt.Println(string(b))
 
 	done := make(chan struct{})

@@ -28,8 +28,12 @@ type Limiter struct {
 }
 
 // NewLimiter is the design's limit.
-func NewLimiter() *Limiter {
-	return &Limiter{Max: KnocksPerAddress, Window: KnockWindow, seen: map[netip.Addr][]time.Time{}}
+func NewLimiter() *Limiter { return NewLimiterOf(KnocksPerAddress, KnockWindow) }
+
+// NewLimiterOf is a limiter of max per window, its own bucket (the guest
+// card's, beside the knocks').
+func NewLimiterOf(max int, window time.Duration) *Limiter {
+	return &Limiter{Max: max, Window: window, seen: map[netip.Addr][]time.Time{}}
 }
 
 // Allow records a knock from addr at now and says whether it is within the

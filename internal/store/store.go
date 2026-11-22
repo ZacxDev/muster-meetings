@@ -186,6 +186,35 @@ var migrations = []string{
 		pass       TEXT    NOT NULL DEFAULT 'live' CHECK (pass IN ('live', 'final'))
 	) STRICT;
 	CREATE INDEX segments_meeting ON segments (meeting_id, id);`,
+
+	// 5: contacts, phase 1b (muster's docs/design/contacts.md: "How meetings
+	// delivers it", "Failure behaviour"). The guest card: one per admitted
+	// guest, its id stored only as its SHA-256, live 30 minutes, spent once
+	// (sent or skipped). contacts_outbox: a card submission waiting to reach
+	// the contacts plugin, written in the transaction that spends the card.
+	// 🔴 body holds a guest's name and email: never logged, deleted on
+	// delivery, on a 4xx that will never succeed, after 72 h, and on every
+	// boot with no contacts URL configured. Every column added is NULL on
+	// every existing row, and nothing an older build reads changes.
+	// 🔴 One-way, like every migration here: an older build refuses a
+	// database at schema 5 ("newer than this build"). Roll back by unsetting
+	// the two contacts variables (README: "Contacts (optional)"), never by
+	// running an older image on this database.
+	`ALTER TABLE participants ADD COLUMN card_sha256 TEXT;
+	ALTER TABLE participants ADD COLUMN card_expires_at INTEGER;
+	ALTER TABLE participants ADD COLUMN card_state TEXT CHECK (card_state IN ('offered', 'sent', 'skipped'));
+	CREATE UNIQUE INDEX participants_card ON participants (card_sha256) WHERE card_sha256 IS NOT NULL;
+	CREATE TABLE contacts_outbox (
+		id         INTEGER PRIMARY KEY,
+		key        TEXT    NOT NULL UNIQUE, -- the Idempotency-Key, e.g. card:<participant id>
+		kind       TEXT    NOT NULL CHECK (kind IN ('submission', 'attendance')),
+		path       TEXT    NOT NULL,        -- the contacts route it is POSTed to
+		body       TEXT    NOT NULL,        -- the JSON body: a guest's name and email; never logged
+		created_at INTEGER NOT NULL,
+		next_at    INTEGER NOT NULL,
+		attempts   INTEGER NOT NULL DEFAULT 0
+	) STRICT;
+	CREATE INDEX contacts_outbox_due ON contacts_outbox (next_at, id);`,
 }
 
 // ErrNeedsSubjectMap is a phase-2a database that holds owners or meetings:

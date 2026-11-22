@@ -44,6 +44,12 @@
 //	MEETINGS_INGEST_SECRET    32+ random bytes, base64: the HMAC key of every ingest URL's token
 //	MEETINGS_INGEST_URL       the ingest listener as Egress reaches it, e.g. ws://muster-meetings:8082
 //	MEETINGS_INGEST_LISTEN    the ingest listener (default :8082): internal only, Egress's alone
+//
+// Contacts, phase 1b (muster's docs/design/contacts.md), OPTIONAL: both or
+// neither, and with neither the plugin behaves exactly as without them.
+//
+//	MEETINGS_CONTACTS_URL     the contacts plugin's internal API, http(s)://host[:port]
+//	MEETINGS_CONTACTS_TOKEN   its bearer: a COPY of the contacts plugin's CONTACTS_API_TOKEN (32+ characters)
 package main
 
 import (
@@ -63,6 +69,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ZacxDev/muster-meetings/internal/contacts"
 	"github.com/ZacxDev/muster-meetings/internal/ingest"
 	"github.com/ZacxDev/muster-meetings/internal/livekit"
 	"github.com/ZacxDev/muster-meetings/internal/muster"
@@ -109,6 +116,10 @@ type Config struct {
 	IngestKey    []byte
 	IngestURL    string
 	IngestListen string
+
+	// Contacts is the contacts plugin's API client, or nil when
+	// MEETINGS_CONTACTS_URL and _TOKEN are both unset.
+	Contacts *contacts.Client
 }
 
 // The engines MEETINGS_STT_ENGINE names.
@@ -207,6 +218,9 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	if err := c.loadTranscript(getenv); err != nil {
+		return Config{}, err
+	}
+	if c.Contacts, err = contacts.Configure(getenv("MEETINGS_CONTACTS_URL"), getenv("MEETINGS_CONTACTS_TOKEN"), c.Token); err != nil {
 		return Config{}, err
 	}
 	return c, nil
@@ -452,7 +466,8 @@ func run(logger *log.Logger) error {
 func (cfg Config) serverConfig(logger *log.Logger, lk *livekit.Client) server.Config {
 	return server.Config{PublicURL: cfg.PublicURL, MusterOrigin: cfg.MusterOrigin, KitUpstream: cfg.URL, Log: logger,
 		LiveKit: lk, LiveKitURL: cfg.LiveKitURL, ICE: cfg.ICE, TrustedProxies: cfg.TrustedProxies,
-		ClientIPHeader: cfg.ClientIPHeader, IngestURL: cfg.IngestURL, IngestKey: cfg.IngestKey}
+		ClientIPHeader: cfg.ClientIPHeader, IngestURL: cfg.IngestURL, IngestKey: cfg.IngestKey,
+		Contacts: cfg.Contacts}
 }
 
 // sweep ends meetings past the 24 h cap and drops expired sessions, every
@@ -494,6 +509,10 @@ func startupLine(cfg Config, name string, pluginID int64, tasks bool) string {
 			muster.Redact(cfg.StreamURL), muster.Redact(cfg.STTURL), cfg.IngestListen, muster.Redact(cfg.IngestURL))
 	default:
 		line += fmt.Sprintf("; transcript: %s engine, ingest %s (Egress streams to %s)", cfg.Engine, cfg.IngestListen, muster.Redact(cfg.IngestURL))
+	}
+	// Nothing is added without contacts: the line is today's, byte for byte.
+	if cfg.Contacts != nil {
+		line += fmt.Sprintf("; contacts: %s (the guest card is offered)", muster.Redact(cfg.Contacts.Host()))
 	}
 	return line
 }

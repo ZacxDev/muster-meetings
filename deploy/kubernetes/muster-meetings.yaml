@@ -9,7 +9,10 @@
 #                    stt-cohere's one bearer: rotating it means updating both),
 #                    and for the nemotron engine only MEETINGS_STREAM_STT_TOKEN
 #                    (a COPY of stt-nemotron's STT_API_TOKEN; optional, so a
-#                    Secret without it still boots the utterance engine)
+#                    Secret without it still boots the utterance engine),
+#                    and for contacts only MEETINGS_CONTACTS_TOKEN (a COPY of
+#                    the contacts plugin's CONTACTS_API_TOKEN; optional, so a
+#                    Secret without it boots with no guest card)
 #   livekit-keys     LIVEKIT_API_KEY, LIVEKIT_API_SECRET (shared with LiveKit)
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -97,6 +100,14 @@ spec:
               valueFrom: {configMapKeyRef: {name: muster-meetings-params, key: stt-url}}
             - name: MEETINGS_STREAM_STT_URL
               valueFrom: {configMapKeyRef: {name: muster-meetings-params, key: stream-stt-url, optional: true}}
+            # Contacts (optional; README "Contacts (optional)"): the contacts
+            # plugin's internal API. contacts-url empty (the base) and no
+            # MEETINGS_CONTACTS_TOKEN in the Secret is meetings with no guest
+            # card, exactly as before; both set turns it on; one alone
+            # refuses to start. Both refs are optional, so an overlay or a
+            # Secret from before contacts still boots.
+            - name: MEETINGS_CONTACTS_URL
+              valueFrom: {configMapKeyRef: {name: muster-meetings-params, key: contacts-url, optional: true}}
             - name: MEETINGS_INGEST_LISTEN
               value: ":8082"
             - name: MEETINGS_INGEST_URL
@@ -111,6 +122,8 @@ spec:
               valueFrom: {secretKeyRef: {name: muster-meetings, key: MEETINGS_STT_TOKEN}}
             - name: MEETINGS_STREAM_STT_TOKEN
               valueFrom: {secretKeyRef: {name: muster-meetings, key: MEETINGS_STREAM_STT_TOKEN, optional: true}}
+            - name: MEETINGS_CONTACTS_TOKEN
+              valueFrom: {secretKeyRef: {name: muster-meetings, key: MEETINGS_CONTACTS_TOKEN, optional: true}}
             - name: LIVEKIT_API_KEY
               valueFrom: {secretKeyRef: {name: livekit-keys, key: LIVEKIT_API_KEY}}
             - name: LIVEKIT_API_SECRET

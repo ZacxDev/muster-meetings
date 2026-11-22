@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/netip"
 	"testing"
 	"time"
@@ -54,3 +55,6 @@ func SetAmendLogGraceForTest(t *testing.T, d time.Duration) {
 	amendLogGrace = d
 	t.Cleanup(func() { amendLogGrace = old })
 }
+
+// RunContactsForTest is Run's contacts step alone (the boot's outbox rule).
+func (s *Server) RunContactsForTest(ctx context.Context) { s.runContacts(ctx) }

@@ -36,6 +36,10 @@
 #                             stack runs no stt-nemotron)
 #   MEETINGS_STREAM_STT_TOKEN nemotron only: stt-nemotron's STT_API_TOKEN
 #   MEETINGS_TRUSTED_PROXIES, MEETINGS_CLIENT_IP_HEADER   (optional; see the README)
+#   MEETINGS_CONTACTS_URL, MEETINGS_CONTACTS_TOKEN  optional, both or neither:
+#                             the contacts plugin's internal API and a COPY of
+#                             its CONTACTS_API_TOKEN (README "Contacts
+#                             (optional)"); unset, there is no guest card
 #
 # Published on 127.0.0.1 only, for the stack's reverse proxy on this host:
 #   ${MEETINGS_HTTP_PORT:-8106}  the plugin: route https://meet-<x>.<domain> here
@@ -83,6 +87,9 @@ services:
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-}
       MEETINGS_TRUSTED_PROXIES: ${MEETINGS_TRUSTED_PROXIES:-}
       MEETINGS_CLIENT_IP_HEADER: ${MEETINGS_CLIENT_IP_HEADER:-}
+      # Contacts (optional; both or neither): empty is no guest card.
+      MEETINGS_CONTACTS_URL: ${MEETINGS_CONTACTS_URL:-}
+      MEETINGS_CONTACTS_TOKEN: ${MEETINGS_CONTACTS_TOKEN:-}
       STATE_DIR: /state
       MEETINGS_STT_ENGINE: ${MEETINGS_STT_ENGINE:-utterance}
       MEETINGS_STT_URL: ${MEETINGS_STT_URL:-http://stt-cohere:8000}

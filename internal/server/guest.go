@@ -153,6 +153,7 @@ func (s *Server) handleKnock(w http.ResponseWriter, r *http.Request) {
 	}
 	s.hub.Changed(k.MeetingID)
 	s.knocker.Kick(k.MeetingID)
+	s.touchContacts(gm.Subject)
 	writeJSON(w, http.StatusCreated, map[string]any{"ticket": k.Ticket})
 }
 
@@ -299,8 +300,11 @@ func (s *Server) handleGuestEvents(w http.ResponseWriter, r *http.Request) {
 			return true, err
 		}
 		if !cur.MeetingLive || cur.State == store.StEnded {
-			return true, sse(w, f, "ended", map[string]any{"message": GuestEnded})
+			// With contacts configured, the card rides in this event
+			// (card.go); without, the event is exactly as it was.
+			return true, sse(w, f, "ended", s.endedPayload(r.Context(), cur))
 		}
+		s.touchContacts(cur.Subject)
 		if cur.State != store.StAdmitted {
 			return true, sse(w, f, "removed", map[string]any{"message": GuestRemoved})
 		}
@@ -358,5 +362,11 @@ func (s *Server) handleLeave(w http.ResponseWriter, r *http.Request) {
 		s.cfg.Log.Printf("leave: LiveKit: %v (the reconcile loop retries)", err)
 	}
 	s.hub.Changed(g.MeetingID)
+	// With contacts configured and a card offered, the answer carries it
+	// (200); otherwise it is today's 204.
+	if c := s.offerCard(r.Context(), g.Subject, g.ParticipantID); c != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"card": c})
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }

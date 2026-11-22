@@ -31,6 +31,10 @@ configMapGenerator:
       # muster's stt-cohere Service, as dictation reaches it.
       - stt-engine=utterance
       - stt-url=http://muster-stt-cohere:8000
+      # Contacts (optional): the contacts plugin's internal API. With it, the
+      # Secret holds MEETINGS_CONTACTS_TOKEN, and the NetworkPolicy patch
+      # below lets the plugin reach that port and nothing more.
+      - contacts-url=http://muster-contacts:8081
 
 patches:
   # The NodePorts the outside route targets.
@@ -64,6 +68,16 @@ patches:
       - op: replace
         path: /spec/egress/2/to/0/podSelector/matchLabels
         value: {app: muster-stt-cohere}
+      # Contacts (optional): the contacts plugin's internal port, appended
+      # last so the patches by index above keep their targets.
+      - op: add
+        path: /spec/egress/-
+        value:
+          to:
+            - podSelector:
+                matchLabels: {app.kubernetes.io/name: muster-contacts}
+          ports:
+            - {protocol: TCP, port: 8081}
   # A Secret under another name (here, the TURN certificate's).
   - target: {kind: Deployment, name: livekit}
     patch: |-

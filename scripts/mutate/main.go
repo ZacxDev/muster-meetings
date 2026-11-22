@@ -14,6 +14,7 @@
 //	go run ./scripts/mutate -list       # names only
 //	go run ./scripts/mutate -match re   # the mutants whose name matches re, and the two controls
 //	go run ./scripts/mutate -e2e        # the UI mutants instead, each killed by a Playwright test
+//	go run ./scripts/mutate -check      # only check that every mutant's text occurs exactly once (no test runs)
 //
 // A UI mutant (e2e set) is killed by one Playwright test in e2e/ (the
 // chromium project, -g its title), run with npx: the sweep needs the e2e
@@ -150,6 +151,14 @@ const (
 	// phase 3c
 	nemGo = "internal/stt/nemotron.go"
 	wsCl  = "internal/stt/wsclient.go"
+	// contacts, phase 1b (muster's docs/design/contacts.md)
+	cardsGo = "internal/store/cards.go"
+	cardGo  = "internal/server/card.go"
+	ctGo    = "internal/contacts/contacts.go"
+	ctOut   = "internal/contacts/outbox.go"
+	ctAcc   = "internal/contacts/accepting.go"
+	ctMail  = "internal/contacts/email.go"
+	cardE2E = "contacts-card.spec.ts"
 )
 
 var mutants = []mutant{
@@ -1058,13 +1067,123 @@ var mutants = []mutant{
 		pkg: ".", test: "TestLoadConfigTranscript", want: "fake without test mode: LoadConfig accepted it"},
 	{name: "config: allow the plugin on muster's own origin", file: mainGo, from: `if c.PublicURL == c.MusterOrigin {`, to: `if false {`,
 		pkg: ".", test: "TestLoadConfig", want: "public URL is muster's origin: LoadConfig accepted it"},
+	// ---- 🔴 contacts, phase 1b: the guest card and the outbox ----
+	{name: "contacts card: offered to the owner", file: cardsGo, from: "cardEligible = `p.kind = 'guest' AND ", to: "cardEligible = `",
+		pkg: "./internal/server", test: "TestCardIsNeverOfferedToTheOwner", want: "the owner's row was offered a card"},
+	{name: "contacts card: offered to a removed guest", file: cardsGo, from: "p.state IN ('ended', 'left') AND", to: "p.state IN ('ended', 'left', 'removed', 'denied') AND",
+		pkg: "./internal/server", test: "TestCardEligibilityRemovedOrDenied", want: "OfferCard minted a card for Grace H."},
+	{name: "contacts card: offered to a guest never admitted", file: cardsGo, from: "p.admitted_at IS NOT NULL AND ", to: "",
+		pkg: "./internal/server", test: "TestCardEligibilityNeverAdmitted", want: "a never-admitted guest was offered a card"},
+	{name: "contacts card: offered while contacts says not accepting", file: cardGo, from: "if s.contacts == nil || !s.contacts.accepting.Get(subject) {", to: "if s.contacts == nil {",
+		pkg: "./internal/server", test: "TestCardEligibilityNotAccepting", want: "a card while contacts says not accepting"},
+	{name: "contacts card: once only (a second card for one guest)", file: cardsGo, from: " AND p.card_state IS NULL`", to: "`",
+		pkg: "./internal/server", test: "TestCardOnLeaveAndOnlyOnce", want: "a second card was minted for the same guest"},
+	{name: "contacts card: Send does not spend the card", file: cardsGo, from: "`UPDATE participants SET card_state = ? WHERE id = ? AND card_state = 'offered'`, state, c.ParticipantID)",
+		to:  "`UPDATE participants SET card_state = CASE ? WHEN 'sent' THEN 'offered' ELSE ? END WHERE id = ? AND card_state = 'offered'`, state, state, c.ParticipantID)",
+		pkg: "./internal/server", test: "TestCardSendWritesOneOutboxRowAndSkipWritesNone", want: "a second send = 200"},
+	{name: "contacts card: Skip does not spend the card", file: cardsGo, from: "`UPDATE participants SET card_state = ? WHERE id = ? AND card_state = 'offered'`, state, c.ParticipantID)",
+		to:  "`UPDATE participants SET card_state = CASE ? WHEN 'skipped' THEN 'offered' ELSE ? END WHERE id = ? AND card_state = 'offered'`, state, state, c.ParticipantID)",
+		pkg: "./internal/server", test: "TestCardOnLeaveAndOnlyOnce", want: "/card/skip after a skip = 204"},
+	{name: "contacts card: an expired card still spends", file: cardsGo, from: "AND p.card_expires_at > ?`", to: "AND ? IS NOT NULL`",
+		pkg: "./internal/server", test: "TestCardExpiredUnknownAndMalformedAreOneAnswer", want: "an expired card = 200"},
+	{name: "contacts card: Skip enqueues a submission", file: cardGo, from: "s.store.SpendCard(r.Context(), in.ID, store.CardSkipped, now, nil)",
+		to:  "s.store.SpendCard(r.Context(), in.ID, store.CardSent, now, func(c store.Card) (store.OutboxItem, error) { return contacts.SubmissionItem(c, c.TypedName, \"skip@example.test\") })",
+		pkg: "./internal/server", test: "TestCardSendWritesOneOutboxRowAndSkipWritesNone", want: "a skip wrote 1 outbox rows"},
+	{name: "contacts card: the answer depends on contacts (not uniform)", file: cardGo, from: `map[string]any{"message": CardSentMessage(spent.OwnerName)}`,
+		to:  `map[string]any{"message": CardSentMessage(spent.OwnerName), "accepting": s.contacts.accepting.Get(spent.Subject)}`,
+		pkg: "./internal/server", test: "TestCardAnswerIsUniformWhateverContactsDoes", want: "the answers differ by what contacts does"},
+	{name: "contacts card: the name check skipped at Send", file: cardGo, from: "name, err := lobby.CleanName(in.Name)", to: "name, err := in.Name, error(nil)",
+		pkg: "./internal/server", test: "TestCardValidationNamesTheFieldAndSpendsNothing", want: "want 400 naming name"},
+	{name: "contacts card: no per-address limit", file: cardGo, from: "!s.contacts.byAddr.Allow(s.clientAddr(r), now) || ", to: "",
+		pkg: "./internal/server", test: "TestCardLimitsPerAddressAndPerMeeting", want: "from one address = 400"},
+	{name: "contacts card: no per-meeting limit", file: cardGo, from: " || !s.contacts.byMeeting.Allow(meetingID, now)", to: "",
+		pkg: "./internal/server", test: "TestCardLimitsPerAddressAndPerMeeting", want: "from a fresh address = 400"},
+	{name: "contacts logs: the card's name and email logged", file: cardGo, from: "\temail, err := contacts.CleanEmail(in.Email)\n",
+		to:  "\ts.cfg.Log.Printf(\"card: %s <%s>\", in.Name, in.Email)\n\temail, err := contacts.CleanEmail(in.Email)\n",
+		pkg: "./internal/server", test: "TestTheCardLogsNoPII", want: `the log holds "Imogen V-T."`},
+	{name: "contacts logs: the outbox logs a refused row's body", file: ctOut, from: `o.log.Printf("contacts: outbox: %s %d refused (%d); dropped", r.Kind, r.ID, a.Status)`,
+		to:  `o.log.Printf("contacts: outbox: %s %d refused (%d); dropped: %s", r.Kind, r.ID, a.Status, r.Body)`,
+		pkg: "./internal/contacts", test: "TestTheOutboxLogsNoPII", want: "the log holds"},
+	{name: "contacts no URL: a card minted with no contacts", file: cardGo, from: "if s.contacts == nil || !s.contacts.accepting.Get(subject) {\n\t\treturn nil",
+		to:  "if s.contacts != nil && !s.contacts.accepting.Get(subject) {\n\t\treturn nil",
+		pkg: "./internal/server", test: "TestNoContactsURLChangesNothing", want: "changed from the pre-change commit's"},
+	{name: "contacts no URL: /card mounted with no contacts", file: srv, from: "\tif s.contacts != nil {\n\t\ts.mux.HandleFunc(\"POST /card\"", to: "\tif true {\n\t\ts.mux.HandleFunc(\"POST /card\"",
+		pkg: "./internal/server", test: "TestNoContactsURLChangesNothing", want: "changed from the pre-change commit's"},
+	{name: "contacts no URL: the outbox kept on boot", file: cardGo, from: "if n, err := s.store.ClearOutbox(ctx); err != nil {", to: "if n, err := int64(0), error(nil); err != nil {",
+		pkg: "./internal/server", test: "TestNoContactsURLEmptiesTheOutboxOnBoot", want: "kept 1 outbox row(s)"},
+	{name: "contacts no URL: one variable alone accepted", file: ctGo, from: "if u == \"\" || tok == \"\" {\n\t\treturn nil, ErrHalfConfigured", to: "if false {\n\t\treturn nil, ErrHalfConfigured",
+		pkg: "./internal/contacts", test: "TestConfigureIsBothOrNeither", want: "one alone"},
+	{name: "contacts down: End delivers the outbox first", file: calls, from: "\ts.hub.Changed(id)\n\ts.knocker.Kick(id)\n\ts.stopTranscription",
+		to:  "\ts.hub.Changed(id)\n\ts.knocker.Kick(id)\n\tif ob := s.Outbox(); ob != nil {\n\t\tob.Pass(r.Context())\n\t}\n\ts.stopTranscription",
+		pkg: "./internal/server", test: "TestContactsDownLeavesTheCallAndEndAsFast", want: "End took"},
+	{name: "contacts down: the knock waits for contacts", file: cardGo, from: "\ts.contacts.accepting.Refresh(subject)\n", to: "\ts.contacts.accepting.Refresh(subject)\n\ts.contacts.accepting.Wait()\n",
+		pkg: "./internal/server", test: "TestContactsDownLeavesTheCallAndEndAsFast", want: "knock took"},
+	{name: "contacts accepting: a failed refresh drops the last answer", file: ctAcc, from: "\t\te.inflight = false\n\t\tif err != nil {\n", to: "\t\te.inflight = false\n\t\tif err != nil {\n\t\t\te.ok = false\n",
+		pkg: "./internal/contacts", test: "TestTheAcceptingCache", want: "a failed refresh dropped the last answer"},
+	{name: "contacts accepting: an old answer used forever", file: ctAcc, from: "e != nil && e.have && e.ok && a.now().Sub(e.at) < AcceptingStale", to: "e != nil && e.have && e.ok",
+		pkg: "./internal/contacts", test: "TestTheAcceptingCache", want: "older than AcceptingStale"},
+	{name: "contacts outbox: a 404 retried forever", file: ctOut, from: "case s == http.StatusNotFound:\n\t\treturn NotAccepting", to: "case s == http.StatusNotFound:\n\t\treturn Retry",
+		pkg: "./internal/contacts", test: "TestTheOutboxKeepsOrDeletesByTheAnswer", want: "kept = true, want false"},
+	{name: "contacts outbox: a 5xx dropped", file: ctOut, from: "\t}\n\treturn Retry\n}", to: "\t}\n\treturn Refused\n}",
+		pkg: "./internal/contacts", test: "TestTheOutboxKeepsOrDeletesByTheAnswer", want: "kept = false, want true"},
+	{name: "contacts outbox: one failure holds back the rows after it", file: ctOut, from: "r.Kind, r.ID, what, wait)\n", to: "r.Kind, r.ID, what, wait)\n\t\t\treturn delivered\n",
+		pkg: "./internal/contacts", test: "TestTheOutboxDeliversInOrderAndOneFailureHoldsNothingBack", want: "delivered 1, want 2"},
+	{name: "contacts outbox: newest first", file: cardsGo, from: "WHERE next_at <= ? ORDER BY id LIMIT ?`", to: "WHERE next_at <= ? ORDER BY id DESC LIMIT ?`",
+		pkg: "./internal/contacts", test: "TestTheOutboxDeliversInOrderAndOneFailureHoldsNothingBack", want: "insertion order"},
+	{name: "contacts outbox: no 72 h drop", file: cardsGo, from: "`DELETE FROM contacts_outbox WHERE created_at <= ?`", to: "`DELETE FROM contacts_outbox WHERE created_at <= ? AND 0`",
+		pkg: "./internal/contacts", test: "TestTheOutboxDropsARowAfter72Hours", want: "want the younger one alone"},
+	{name: "contacts outbox: the backoff never grows", file: ctOut, from: "\t\td *= 2\n", to: "\t\td *= 1\n",
+		pkg: "./internal/contacts", test: "TestTheOutboxBacksOffFrom5sDoublingTo10Minutes", want: "attempt 2: 5s, want 10s"},
+	{name: "contacts contract: no bearer sent", file: ctGo, from: `req.Header.Set("Authorization", "Bearer "+c.token)`, to: `req.Header.Set("Authorization", "Bearer")`,
+		pkg: "./internal/contacts", test: "TestContractTheRequestsMeetingsSends", want: "Authorization"},
+	{name: "contacts contract: no Idempotency-Key sent", file: ctGo, from: "\tif key != \"\" {\n\t\treq.Header.Set(\"Idempotency-Key\"", to: "\tif false {\n\t\treq.Header.Set(\"Idempotency-Key\"",
+		pkg: "./internal/contacts", test: "TestContractTheRequestsMeetingsSends", want: "Idempotency-Key"},
+	{name: "contacts contract: the submission's times not in UTC", file: "internal/contacts/submission.go", from: "\t\t\tu := (*t).UTC()\n", to: "\t\t\tu := **t\n",
+		pkg: "./internal/contacts", test: "TestContractTheSubmissionMeetingsSends", want: "the body meetings sends"},
+	{name: "contacts validation: an all-digit top-level label", file: ctMail, from: `return strings.Trim(tld, "0123456789") != ""`, to: `return true`,
+		pkg: "./internal/contacts", test: "TestContractTheFieldTable", want: `email "wren@example.123" accepted`},
+	{name: "contacts validation: a space or quote in the local part", file: ctMail, from: "\t\tdefault:\n\t\t\treturn false\n", to: "\t\tdefault:\n",
+		pkg: "./internal/contacts", test: "TestContractTheFieldTable", want: `email "wren o@example.test" accepted`},
+	{name: "contacts deploy: the contacts token required in the Secret", file: kPlugin, from: "key: MEETINGS_CONTACTS_TOKEN, optional: true}", to: "key: MEETINGS_CONTACTS_TOKEN}",
+		pkg: "./deploy", test: "TestKubernetesPlugin", want: "MEETINGS_CONTACTS_TOKEN = "},
+
+	// ---- 🔴 contacts, phase 1b, in a browser (go run ./scripts/mutate -e2e) ----
+	{name: "contacts ui: the consent sentence reworded", file: guestJS, from: "', who will see that you were in this meeting. Nothing else is shared.'", to: "', who may see that you were in this meeting. Nothing else is shared.'",
+		e2e: cardE2E, test: "End: the guest's card .*\\(mobile\\)", want: "Your name and email go to Ada L., who will see"},
+	{name: "contacts ui: Skip sends the card", file: guestJS, from: "post('/card/skip', { id: x })", to: "post('/card', { id: x, name: nameIn.value, email: 'skip@example.test' })",
+		e2e: cardE2E, test: "Leave: .*\\(mobile\\)", want: "Expected"},
+	{name: "contacts ui: the Leave answer's card ignored", file: guestJS, from: "if (b && b.card) showCard(", to: "if (false) showCard(",
+		e2e: cardE2E, test: "Leave: .*\\(desktop\\)", want: "#card"},
+	{name: "contacts ui: the card rises at a literal duration", file: appCSS, from: "animation: rise var(--mu-dur-slow) var(--mu-ease-enter);\n  transition: opacity", to: "animation: rise 320ms var(--mu-ease-enter);\n  transition: opacity",
+		e2e: cardE2E, test: "neither rises nor fades", want: "0.32s"},
 }
 
 func main() {
 	list := flag.Bool("list", false, "print the mutants' names and stop")
 	e2eOnly := flag.Bool("e2e", false, "run the UI mutants (killed by Playwright tests) and their controls, instead of the Go ones")
 	match := flag.String("match", "", "run only the mutants whose name matches this regular expression (the controls always run)")
+	check := flag.Bool("check", false, "only check that every mutant's text occurs exactly once in its file, Go and UI alike; run no test")
 	flag.Parse()
+	if *check {
+		bad := 0
+		for _, m := range mutants {
+			for _, e := range m.edits() {
+				b, err := os.ReadFile(e.file)
+				if err != nil {
+					fatalf("%s: %v", e.file, err)
+				}
+				if n := bytes.Count(b, []byte(e.from)); n != 1 {
+					bad++
+					fmt.Printf("%-58s %s: the text to replace occurs %d times, want exactly 1\n", m.name, e.file, n)
+				}
+			}
+		}
+		if bad > 0 {
+			fatalf("%d edits do not apply", bad)
+		}
+		fmt.Printf("all %d mutants apply (every edit's text occurs exactly once)\n", len(mutants))
+		return
+	}
 	if *match != "" {
 		re, err := regexp.Compile(*match)
 		if err != nil {

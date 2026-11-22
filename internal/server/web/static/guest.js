@@ -35,7 +35,9 @@
   function post(path, body, signal) {
     var init = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), cache: 'no-store', credentials: 'omit' };
     if (signal) init.signal = signal;
-    return fetch(base + path, init);
+    // The card's routes are the origin's own (/card), not the link's: the
+    // link answers 410 once the meeting has ended.
+    return fetch((path.indexOf('/card') === 0 ? '' : base) + path, init);
   }
 
   // The pre-join check starts at once, EVERY time (a guest's page never
@@ -49,7 +51,7 @@
   $('name').addEventListener('input', function () { pre.refresh(); });
   pre.start();
 
-  function finish(s, text) {
+  function finish(s, text, card) {
     state(s);
     pre.stop();
     if (abort) { abort.abort(); abort = null; }
@@ -67,6 +69,143 @@
     p.textContent = text;
     m.appendChild(h); m.appendChild(p);
     document.body.appendChild(m);
+    if (card) showCard(m, card);
+  }
+
+  // The contacts card (muster's docs/design/contacts.md, "The guest card"):
+  // offered by the server only when contacts is configured and accepts this
+  // meeting's owner, once per guest per meeting, after End or the guest's
+  // own Leave. Optional: Skip is as easy as Send, closing the tab is a
+  // skip, nothing is pre-ticked. Its id lives in this function's memory
+  // only, and is sent in a body, never a URL.
+  function cardText(owner) {
+    var who = owner || 'the host';
+    return {
+      title: 'Stay in touch with ' + who + '?',
+      consent: 'Your name and email go to ' + who + ', who will see that you were in this meeting. Nothing else is shared.'
+    };
+  }
+
+  function el(tag, cls, text) {
+    var x = document.createElement(tag);
+    if (cls) x.className = cls;
+    if (text != null) x.textContent = text;
+    return x;
+  }
+
+  function field(id, label, input) {
+    var f = el('div', 'mu-field');
+    var l = el('label', 'mu-label', label);
+    l.setAttribute('for', id);
+    input.id = id;
+    input.className = 'mu-input';
+    var err = el('p', 'mu-error card__error');
+    err.id = id + '-error';
+    err.hidden = true;
+    input.setAttribute('aria-describedby', err.id);
+    f.appendChild(l); f.appendChild(input); f.appendChild(err);
+    return { box: f, input: input, err: err };
+  }
+
+  function showCard(page, card) {
+    if (document.getElementById('card')) return;
+    var t = cardText(card.owner);
+    var sec = el('section', 'mu-card card-ask');
+    sec.id = 'card';
+    sec.setAttribute('aria-labelledby', 'card-title');
+    var head = el('div', 'card-ask__head');
+    var ic = el('span', 'card-ask__icon');
+    ic.setAttribute('data-icon', 'people');
+    ic.setAttribute('aria-hidden', 'true');
+    var h = el('h2', null, t.title);
+    h.id = 'card-title';
+    head.appendChild(ic); head.appendChild(h);
+    var consent = el('p', 'card-ask__consent', t.consent);
+    consent.id = 'card-consent';
+    var form = el('form', 'card-ask__form');
+    form.id = 'card-form';
+    form.noValidate = true;
+    var nameIn = document.createElement('input');
+    nameIn.type = 'text'; nameIn.maxLength = 40; nameIn.autocomplete = 'name'; nameIn.required = true;
+    nameIn.value = card.name || '';
+    var emailIn = document.createElement('input');
+    emailIn.type = 'email'; emailIn.maxLength = 254; emailIn.autocomplete = 'email'; emailIn.required = true;
+    emailIn.setAttribute('inputmode', 'email'); emailIn.setAttribute('autocapitalize', 'off'); emailIn.spellcheck = false;
+    var fn = field('card-name', 'Name', nameIn), fe = field('card-email', 'Email', emailIn);
+    var status = el('p', 'status card-ask__status');
+    status.id = 'card-status';
+    status.setAttribute('role', 'status');
+    status.setAttribute('aria-live', 'polite');
+    var actions = el('div', 'card-ask__actions');
+    var send = el('button', 'mu-btn mu-btn--primary', 'Send');
+    send.type = 'submit'; send.id = 'card-send';
+    send.setAttribute('data-icon', 'send');
+    var skip = el('button', 'mu-btn mu-btn--ghost', 'Skip');
+    skip.type = 'button'; skip.id = 'card-skip';
+    actions.appendChild(send); actions.appendChild(skip);
+    form.appendChild(fn.box); form.appendChild(fe.box); form.appendChild(status); form.appendChild(actions);
+    sec.appendChild(head); sec.appendChild(consent); sec.appendChild(form);
+    page.appendChild(sec);
+    if (UI && UI.decorate) UI.decorate(sec);
+    var id = card.id;
+    var busy = false;
+
+    function bad(f, msg) {
+      f.input.setAttribute('aria-invalid', 'true');
+      f.err.textContent = msg;
+      f.err.hidden = false;
+    }
+    function clear() {
+      [fn, fe].forEach(function (f) { f.input.removeAttribute('aria-invalid'); f.err.hidden = true; f.err.textContent = ''; });
+      status.textContent = '';
+    }
+    function done(text) {
+      id = null;
+      sec.setAttribute('data-done', 'true');
+      sec.textContent = '';
+      var p = el('p', 'card-ask__done');
+      p.id = 'card-done';
+      p.setAttribute('role', 'status');
+      var ok = el('span', 'card-ask__icon');
+      ok.setAttribute('data-icon', 'check');
+      ok.setAttribute('aria-hidden', 'true');
+      p.appendChild(ok);
+      p.appendChild(el('span', null, text));
+      sec.appendChild(p);
+      if (UI && UI.decorate) UI.decorate(sec);
+    }
+    function gone() {
+      id = null;
+      sec.setAttribute('data-leaving', 'true');
+      var dur = parseFloat(getComputedStyle(sec).transitionDuration) || 0;
+      setTimeout(function () { if (sec.parentNode) sec.parentNode.removeChild(sec); }, dur * 1000);
+    }
+
+    form.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      if (busy || !id) return;
+      clear();
+      var n = nameIn.value.trim(), e = emailIn.value.trim();
+      if (!n) { bad(fn, 'Type your name.'); nameIn.focus(); return; }
+      if (!e || e.indexOf('@') < 1) { bad(fe, 'Type one email address, like name@example.com.'); emailIn.focus(); return; }
+      busy = true; send.disabled = true; skip.disabled = true;
+      post('/card', { id: id, name: n, email: e }).then(function (res) {
+        return res.json().catch(function () { return {}; }).then(function (b) {
+          if (res.status === 200) { done(b.message || 'Sent.'); return; }
+          if (res.status === 400 && b.field === 'name') { bad(fn, b.error); nameIn.focus(); }
+          else if (res.status === 400 && b.field === 'email') { bad(fe, b.error); emailIn.focus(); }
+          else if (res.status === 404) { done(b.error || 'This form has expired.'); return; }
+          else status.textContent = b.error || 'That did not work. Try again.';
+        });
+      }).catch(function () { status.textContent = 'Could not reach the meeting. Try again.'; })
+        .then(function () { busy = false; send.disabled = false; skip.disabled = false; });
+    });
+    skip.addEventListener('click', function () {
+      if (busy || !id) return;
+      var x = id;
+      gone();
+      post('/card/skip', { id: x }).catch(function () { /* closing is a skip too */ });
+    });
   }
 
   // needToken: the page wants the next token /events sends (a Retry).
@@ -115,7 +254,7 @@
         else if (name === 'amend') transcript.amend(data);
         else if (name === 'partials') transcript.partials(data.partials);
         else if (name === 'transcript') transcript.status(data.status);
-        else if (name === 'ended') finish('ended', 'This meeting has ended.');
+        else if (name === 'ended') finish('ended', 'This meeting has ended.', data && data.card);
         else if (name === 'removed') finish('removed', 'You are no longer in this meeting.');
       });
     }).catch(function () { /* left, replaced by a Retry, or the network: the call's own status says so */ });
@@ -182,7 +321,12 @@
 
   $('btn-leave').addEventListener('click', function () {
     var t = ticket;
-    if (t) post('/leave', { ticket: t }).catch(function () { /* gone already */ });
     finish('left', 'You left the meeting.');
+    // The Leave answer is today's 204, or, with contacts configured, a 200
+    // carrying the card.
+    if (t) post('/leave', { ticket: t }).then(function (res) {
+      if (res.status !== 200) return;
+      return res.json().then(function (b) { if (b && b.card) showCard(document.getElementById('guest'), b.card); });
+    }).catch(function () { /* gone already */ });
   });
 })();

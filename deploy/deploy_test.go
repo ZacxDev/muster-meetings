@@ -439,6 +439,22 @@ func TestKubernetesPlugin(t *testing.T) {
 			t.Errorf("%s = %v, want the params ConfigMap's %s", name, e, key)
 		}
 	}
+	// 🔴 Contacts is optional on both sides: an overlay or Secret from
+	// before it (no contacts-url key, no MEETINGS_CONTACTS_TOKEN) must still
+	// boot, with no guest card.
+	if e, _ := envEntry(c, "MEETINGS_CONTACTS_URL"); dig(e, "valueFrom", "configMapKeyRef", "key") != "contacts-url" || dig(e, "valueFrom", "configMapKeyRef", "optional") != true {
+		t.Errorf("MEETINGS_CONTACTS_URL = %v, want the params ConfigMap's contacts-url, optional", e)
+	}
+	if e, _ := envEntry(c, "MEETINGS_CONTACTS_TOKEN"); dig(e, "valueFrom", "secretKeyRef", "key") != "MEETINGS_CONTACTS_TOKEN" || dig(e, "valueFrom", "secretKeyRef", "optional") != true || dig(e, "value") != nil {
+		t.Errorf("MEETINGS_CONTACTS_TOKEN = %v, want it from the Secret, optional", e)
+	}
+	for _, d := range ofKind(docs, "ConfigMap") {
+		if n, _ := dig(d, "metadata", "name").(string); strings.HasPrefix(n, "muster-meetings-params-") {
+			if v, ok := d["data"].(obj)["contacts-url"]; !ok || v != "" {
+				t.Errorf("the base's contacts-url = %v (present %v), want present and empty: the base turns no card on", v, ok)
+			}
+		}
+	}
 	for _, pr := range []string{"startupProbe", "readinessProbe", "livenessProbe"} {
 		if dig(c, pr, "httpGet", "path") != "/healthz" || dig(c, pr, "httpGet", "port") != "internal" {
 			t.Errorf("%s = %v, want GET /healthz on the internal port", pr, c[pr])
@@ -791,6 +807,21 @@ func TestTheExampleOverlaySetsEveryKnob(t *testing.T) {
 	}
 	if got := dig(find(t, docs, "NetworkPolicy", "muster-meetings"), "spec", "egress", 2, "to", 0, "podSelector", "matchLabels"); !reflect.DeepEqual(got, obj{"app": "muster-stt-cohere"}) {
 		t.Errorf("the overlay's STT selector = %v", got)
+	}
+	// Contacts: the overlay sets the URL, and its patch appends exactly one
+	// egress rule, to the contacts plugin's internal port, after the base's.
+	eg := dig(find(t, docs, "NetworkPolicy", "muster-meetings"), "spec", "egress").([]any)
+	var want any
+	if err := yaml.Unmarshal([]byte(`{to: [{podSelector: {matchLabels: {app.kubernetes.io/name: muster-contacts}}}], ports: [{protocol: TCP, port: 8081}]}`), &want); err != nil {
+		t.Fatal(err)
+	}
+	if len(eg) != 6 || !reflect.DeepEqual(eg[5], want) {
+		t.Errorf("the overlay's plugin egress = %v, want the base's five and the contacts rule last", eg)
+	}
+	for _, d := range ofKind(docs, "ConfigMap") {
+		if v := d["data"].(obj)["contacts-url"]; v != "http://muster-contacts:8081" {
+			t.Errorf("the overlay's contacts-url = %v", v)
+		}
 	}
 }
 

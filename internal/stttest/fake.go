@@ -18,6 +18,18 @@
 //     bad_end 1003, idle 1001 (no frame for IdleTimeout).
 //   - A segment whose samples are all one value (padding excluded) yields
 //     empty text and no partials, as the server's constant-signal rule.
+//   - Closing marks arrive LATE, as the real model emits them (measured: a
+//     sentence's . ? ! , is decoded only when the NEXT speech begins). A
+//     script line's trailing marks ("Can everyone hear me clearly?") are not
+//     in its own final: they are the `lead` of the stream's next final that
+//     has speech ({"text": "Alice will", "lead": "?"}), or of the end's final
+//     (with or without speech; {"text": "", "lead": "?"}). A flush over
+//     silence keeps them back; a dead capture's final (one constant non-zero
+//     value) has `lead` "" and keeps them back too. Every final carries
+//     `lead` ("" when none); partials never do, and never show the marks.
+//     A script line that OPENS with marks ("? Alice will": a segment that
+//     began mid-sentence) has them stripped into its final's `lead`, after
+//     any held ones, as the server's strip_leading_punct does.
 //
 // It records every stream: the frames' sizes, the sample count at each
 // flush, the end's samples, and the bearer it was opened with; and it can
@@ -332,25 +344,65 @@ func (sg *segment) constant() bool {
 	return !any || lo == hi
 }
 
+// dead is a dead capture: every sample one constant NON-ZERO value (digital
+// silence, all zeros, is not).
+func (sg *segment) dead() bool {
+	if !sg.constant() {
+		return false
+	}
+	for _, v := range sg.pending {
+		return v != 0
+	}
+	return sg.any && sg.lo != 0
+}
+
+// marks is the server's strip_leading_punct set.
+const marks = ".,;:!?…"
+
+// splitMarks is a script line as the server sees it: the marks it opens
+// with (head), its words (body), and its trailing closing marks (tail),
+// each run of marks with whitespace dropped, in order.
+func splitMarks(line string) (head, body, tail string) {
+	isMark := func(r rune) bool { return strings.ContainsRune(marks, r) || r == ' ' }
+	body = strings.TrimRightFunc(line, isMark)
+	tail = strings.ReplaceAll(line[len(body):], " ", "")
+	rest := strings.TrimLeftFunc(body, isMark)
+	head = strings.ReplaceAll(body[:len(body)-len(rest)], " ", "")
+	return head, rest, tail
+}
+
 func (f *fconn) serve(idle time.Duration, every int, lines []string, delay time.Duration) {
 	var total int64
 	sg := &segment{}
+	// held is the closing marks decoded late: the last line's, not yet sent.
+	held := ""
 	wordsFor := func() string {
 		if len(lines) == 0 {
 			return ""
 		}
-		return lines[sg.nonempty%len(lines)]
+		_, body, _ := splitMarks(lines[sg.nonempty%len(lines)])
+		return body
 	}
-	final := func(end int64) {
-		text := ""
-		if !sg.constant() && sg.frames > 0 {
-			text = wordsFor()
+	final := func(end int64, atEnd bool) {
+		text, lead := "", ""
+		speech := !sg.constant() && sg.frames > 0
+		// The held marks come with the next speech, or at the end unless
+		// the last segment is a dead capture (whose output is not trusted).
+		if speech || (atEnd && !sg.dead()) {
+			lead, held = held, ""
+		}
+		if speech && len(lines) > 0 {
+			var head string
+			head, text, held = splitMarks(lines[sg.nonempty%len(lines)])
+			lead += head
+		}
+		if speech {
 			sg.nonempty++
 		}
 		if delay > 0 {
 			time.Sleep(delay)
 		}
-		f.send(map[string]any{"type": "final", "text": text, "start_ms": sg.start * 1000 / 16000, "end_ms": end * 1000 / 16000})
+		f.send(map[string]any{"type": "final", "text": text, "lead": lead, "start_ms": sg.start * 1000 / 16000, "end_ms": end * 1000 / 16000})
 		*sg = segment{start: end, nonempty: sg.nonempty}
 	}
 	for {
@@ -413,7 +465,7 @@ func (f *fconn) serve(idle time.Duration, every int, lines []string, delay time.
 					sg.fold(sg.pending)
 					sg.pending = nil
 				}
-				final(total)
+				final(total, false)
 			case "end":
 				var n int64
 				ok := m.Samples != nil && json.Unmarshal(*m.Samples, &n) == nil && !strings.ContainsAny(string(*m.Samples), ".eE\"")
@@ -429,7 +481,7 @@ func (f *fconn) serve(idle time.Duration, every int, lines []string, delay time.
 					sg.fold(sg.pending[:int64(len(sg.pending))-pad])
 					sg.pending = nil
 				}
-				final(n)
+				final(n, true)
 				f.closeWith(1000)
 				return
 			default:

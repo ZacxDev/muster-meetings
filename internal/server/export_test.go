@@ -38,3 +38,19 @@ func (s *Server) SetTrustedProxiesForTest(p []netip.Prefix) { s.cfg.TrustedProxi
 
 // SetClientIPHeaderForTest sets the client-address header's name.
 func (s *Server) SetClientIPHeaderForTest(h string) { s.cfg.ClientIPHeader = h }
+
+// AmendLogsForTest is how many meetings hold an amend log (late closing
+// marks kept for the event streams).
+func (s *Server) AmendLogsForTest() int {
+	s.tr.mu.Lock()
+	defer s.tr.mu.Unlock()
+	return len(s.tr.amends)
+}
+
+// SetAmendLogGraceForTest sets how long a live meeting's amend log outlives
+// its last ingest stream, until t ends.
+func SetAmendLogGraceForTest(t *testing.T, d time.Duration) {
+	old := amendLogGrace
+	amendLogGrace = d
+	t.Cleanup(func() { amendLogGrace = old })
+}

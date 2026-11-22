@@ -117,7 +117,8 @@ jobs:
       # without a knock), a second owner device against a real LiveKit, and
       # the transcript in the owner's and a guest's panels (the fake LiveKit
       # as Egress, the fake STT engine), and live captions at 390x844 and
-      # 1280x800 (the nemotron engine against the fake Nemotron server).
+      # 1280x800 (the nemotron engine against the fake Nemotron server), and
+      # a late closing mark amending a shown line in place (late-marks).
       # The UI pass (ui-*.spec.ts): the pre-join, the tile indicators, the
       # speaking ring, the layouts and screen share, the connection quality,
       # the shortcuts, reduced motion, accessible names, axe, and muster's UI
@@ -129,7 +130,7 @@ jobs:
         run: |
           set -o pipefail
           npx playwright test --project=chromium 2>&1 | tee /tmp/e2e.log
-          grep -qE '^\s+43 passed \(' /tmp/e2e.log
+          grep -qE '^\s+44 passed \(' /tmp/e2e.log
       # The UI mutants: each must turn its named Playwright test red (and the
       # no-op control must not).
       - name: UI mutation sweep (each UI mutant's named Playwright test must go red)

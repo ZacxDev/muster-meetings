@@ -21,6 +21,8 @@ import (
 //
 //	segment     {"id", "speaker", "kind", "start_ms", "end_ms", "text"}: a stored line, or a gap
 //	            marker (kind "gap", end_ms null while it is open, sent again when it closes)
+//	amend       {"id", "text"}: a line already sent, its text amended in place (the nemotron
+//	            engine's late closing mark, stt.Segment.Lead): the panel replaces that line's text
 //	partials    {"partials": [{"speaker", "start_ms", "text"}]}: the lines in progress, never stored
 //	transcript  {"status"}: "" or "Transcript paused"
 //
@@ -37,6 +39,11 @@ type tcursor struct {
 	partials string
 	status   string
 	primed   bool
+	// amendSeq is the latest amend (Server.noteAmend) this stream has
+	// accounted for; amendInit says it was set, at the stream's first send
+	// (amends before then are in the lines it reads).
+	amendSeq  int64
+	amendInit bool
 }
 
 func newTCursor() *tcursor { return &tcursor{open: map[int64]bool{}} }
@@ -47,6 +54,11 @@ func newTCursor() *tcursor { return &tcursor{open: map[int64]bool{}} }
 // partials when they changed, and the status when it changed.
 func (s *Server) sendTranscript(ctx context.Context, w io.Writer, f http.Flusher, meetingID string, cur *tcursor,
 	after func(int64) ([]store.Segment, error)) error {
+	// At a stream's first send: amends numbered up to now are already in
+	// every line it reads (the store is written before an amend is noted).
+	if !cur.amendInit {
+		cur.amendSeq, cur.amendInit = s.amendSeqNow(), true
+	}
 	// The open gaps are read FIRST, and serve both the closed-gap updates
 	// and the status: every gap in it was stored before the segments are
 	// read, so a stream never says "Transcript paused" about a gap it has
@@ -102,6 +114,31 @@ func (s *Server) sendTranscript(ctx context.Context, w io.Writer, f http.Flusher
 				delete(cur.open, g.ID)
 			}
 		}
+	}
+	// Lines amended in place (a late closing mark) that this stream has
+	// already sent: their new text, as `amend`. Read AFTER the new lines, so
+	// a line stored and amended meanwhile is either read with its new text
+	// above or re-sent here; one not yet sent is left to be read in full.
+	if ids, seq := s.amendsSince(meetingID, cur.amendSeq); seq != cur.amendSeq {
+		var sent []int64
+		for _, id := range ids {
+			if id <= cur.last {
+				sent = append(sent, id)
+			}
+		}
+		segs, err := s.store.SegmentsByID(ctx, meetingID, sent)
+		if err != nil {
+			return err
+		}
+		for _, g := range segs {
+			if g.Kind != store.SegText {
+				continue
+			}
+			if err := sse(w, f, "amend", map[string]any{"id": g.ID, "text": g.Text}); err != nil {
+				return err
+			}
+		}
+		cur.amendSeq = seq
 	}
 	p := s.partialsOf(meetingID)
 	if b := mustJSON(p); b != cur.partials {

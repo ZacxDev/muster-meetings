@@ -41,6 +41,9 @@
 // utterance's partials grow a word per 560 ms of audio, and its final is the
 // whole line. Each egress then streams two utterances of 3 s of speech, so a
 // partial caption stays on screen for seconds before its final replaces it.
+// As the real server, the fake sends a line's closing mark late, as the NEXT
+// final's `lead`, and the plugin amends the line it has already shown.
+// -nemotron-script "line|line|…" replaces captionLines.
 //
 // LiveKit is a fake (internal/livekittest): rooms and participants over its
 // server API, and a signalling endpoint that records, verified, the token a
@@ -86,8 +89,9 @@ var (
 )
 
 var (
-	lkMode  = flag.String("livekit", "fake", "fake, or real (a livekit-server binary)")
-	sttMode = flag.String("stt", "fake", "fake (the fake engine), or nemotron (the nemotron engine against the fake Nemotron server)")
+	lkMode   = flag.String("livekit", "fake", "fake, or real (a livekit-server binary)")
+	sttMode  = flag.String("stt", "fake", "fake (the fake engine), or nemotron (the nemotron engine against the fake Nemotron server)")
+	nemLines = flag.String("nemotron-script", "", "with -stt=nemotron: the fake Nemotron server's script, lines separated by |")
 )
 
 // captionLines is the fake Nemotron server's script (-stt=nemotron).
@@ -171,7 +175,11 @@ func run(logger *log.Logger) error {
 		const token = "e2e-harness-stream-token-0a1b"
 		nem := stttest.New(token)
 		defer nem.Close()
-		nem.Set(func(s *stttest.Server) { s.Lines = captionLines })
+		lines := captionLines
+		if *nemLines != "" {
+			lines = strings.Split(*nemLines, "|")
+		}
+		nem.Set(func(s *stttest.Server) { s.Lines = lines })
 		engine = stt.NewNemotron(nem.URL(), token, stt.NewUtterance(fallbackSTT{}), logger)
 		lk.EgressAudio = func(room, identity, track string) []byte { return egresstest.Script(1000, 3000, 3000) }
 	}

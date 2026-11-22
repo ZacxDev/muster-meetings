@@ -32,6 +32,7 @@ package stt
 import (
 	"context"
 	"errors"
+	"strings"
 )
 
 // Rate is the sample rate every engine takes: 16 kHz mono.
@@ -76,6 +77,14 @@ type Segment struct {
 	StartMS int64
 	EndMS   int64
 	Text    string
+	// Lead, on a Final only (the nemotron engine's), is the closing marks
+	// (. , ; : ! ? …) the server decoded at the START of this segment: they
+	// end the PREVIOUS line of the same participant, which the server had
+	// already finalised without them (the model emits a sentence's closing
+	// mark only when the next speech begins). The server sends it as the
+	// final's `lead`. A Final may carry a Lead and no Text: it stores no
+	// line, it only amends the previous one.
+	Lead string
 	// Engine is the engine that produced it ("" is the configured one): a
 	// nemotron stream's fallback lines are stored as the utterance
 	// engine's.
@@ -102,6 +111,26 @@ type Stream interface {
 	// Close ends the stream: what is buffered is finalised, then Segments
 	// closes.
 	Close() error
+}
+
+// Marks are the closing marks a Lead may hold, and that end a line: the
+// stt-nemotron server's strip_leading_punct set.
+const Marks = ".,;:!?…"
+
+// IsMark says r is one of Marks.
+func IsMark(r rune) bool { return strings.ContainsRune(Marks, r) }
+
+// CleanLead is a server's `lead` as stored: its marks, in order; anything
+// else (whitespace, or a character that is not a mark) is dropped, so a lead
+// can only ever add closing marks to a line.
+func CleanLead(lead string) string {
+	var b strings.Builder
+	for _, r := range lead {
+		if IsMark(r) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // ErrClosed is a Write after Close.

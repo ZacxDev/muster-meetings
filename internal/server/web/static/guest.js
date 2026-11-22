@@ -112,6 +112,7 @@
         if (name === 'token') { if (needToken) { needToken = false; connect(data); } }
         else if (name === 'meeting') MeetingsCall.showBadge(data.notice);
         else if (name === 'segment') transcript.segment(data);
+        else if (name === 'amend') transcript.amend(data);
         else if (name === 'partials') transcript.partials(data.partials);
         else if (name === 'transcript') transcript.status(data.status);
         else if (name === 'ended') finish('ended', 'This meeting has ended.');

@@ -4,7 +4,8 @@
 // `scripts/e2e-harness -stt=nemotron`. The fake LiveKit acts as Egress for
 // the owner's microphone (Egress's own PCM to the ingest); the engine sends
 // it to the fake server in 80 ms frames; the server's partials grow a word per
-// 560 ms of audio and its final is the whole line. In the transcript panel a
+// 560 ms of audio and its final is the whole line (its closing mark late, as
+// the next final's `lead`). In the transcript panel a
 // partial caption appears (in progress, no line yet) and is then REPLACED by
 // the final line. At a phone's size and a laptop's.
 import { test, expect, type Browser } from '@playwright/test';
@@ -95,9 +96,12 @@ for (const size of [{ width: 390, height: 844 }, { width: 1280, height: 800 }]) 
     await expect.poll(async () => ((await partial.locator('.text').textContent()) ?? '').length, { timeout: 10_000 })
       .toBeGreaterThan(caption.length);
 
-    // The final replaces it: one line, the whole of it, and no caption left.
+    // The final replaces it: one line, its words, and no caption left. Its
+    // closing "." comes late, as the real server sends it (the next final's
+    // `lead`, with the next utterance), and the line is amended in place
+    // (late-marks.spec.ts).
     await expect(finals).toHaveCount(1, { timeout: 15_000 });
-    await expect(finals.first().locator('.text')).toHaveText(line);
+    await expect(finals.first().locator('.text')).toHaveText(line, { timeout: 15_000 });
     await expect(finals.first().locator('.who')).toHaveText('Ada L.');
     await expect(list.locator('li.line.partial', { hasText: 'Captions' })).toHaveCount(0);
     // The panel fits the screen: no sideways scroll.

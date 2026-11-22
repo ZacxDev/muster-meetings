@@ -80,6 +80,94 @@ type transcriber struct {
 	// (serveIngest) one step each, so neither can fall between the other's
 	// check and write and leave a gap open while audio flows.
 	gapMu sync.Mutex
+	// amends is meeting → the lines amended in place (a late closing mark,
+	// stt.Segment.Lead), in order of amendSeq, the last MaxAmendLog kept:
+	// what each event stream re-sends as an `amend` event for a line it has
+	// already sent. amendSeq numbers every amend of every meeting.
+	amends   map[string][]amendRec
+	amendSeq int64
+}
+
+// amendRec is one amend: its number and the line's segment id.
+type amendRec struct {
+	seq int64
+	id  int64
+}
+
+// MaxAmendLog is how many amends of one meeting are kept for the event
+// streams. Every stream catches up on each change of its meeting, so it is
+// never more than a few behind; a stream further behind than this misses
+// the oldest (the archive and the export still read the amended line).
+const MaxAmendLog = 1024
+
+// noteAmend records that segment id of meetingID was amended, AFTER the
+// store has it: a stream that reads the record then reads the new text.
+func (s *Server) noteAmend(meetingID string, id int64) {
+	s.tr.mu.Lock()
+	defer s.tr.mu.Unlock()
+	s.tr.amendSeq++
+	l := append(s.tr.amends[meetingID], amendRec{seq: s.tr.amendSeq, id: id})
+	if len(l) > MaxAmendLog {
+		l = append([]amendRec(nil), l[len(l)-MaxAmendLog:]...)
+	}
+	s.tr.amends[meetingID] = l
+}
+
+// amendLogGrace is how long a meeting's amend log outlives its last ingest
+// stream while the meeting is still live: long enough for every event stream
+// to send the stream's last amends (each catches up at once on a change).
+var amendLogGrace = 30 * time.Second
+
+// freeAmends frees meetingID's amend log. 🔴 Every way a meeting ends
+// (End, room_finished, the 24 h cap, an uninstall) ends its ingest streams,
+// and serveIngest's cleanup lands here: at once when the meeting is no longer
+// live, else amendLogGrace after its last stream, if no new stream of the
+// meeting has registered meanwhile (a meeting whose people all left frees it
+// before LiveKit's room_finished, which closes no stream).
+func (s *Server) freeAmends(meetingID string, live bool) {
+	free := func() {
+		s.tr.mu.Lock()
+		defer s.tr.mu.Unlock()
+		for track := range s.tr.conns {
+			if s.tr.meetings[track] == meetingID {
+				return // a stream of the meeting is open again: its log stays
+			}
+		}
+		delete(s.tr.amends, meetingID)
+	}
+	if !live {
+		s.tr.mu.Lock()
+		delete(s.tr.amends, meetingID)
+		s.tr.mu.Unlock()
+		return
+	}
+	time.AfterFunc(amendLogGrace, free)
+}
+
+// amendSeqNow is the number of the latest amend of any meeting.
+func (s *Server) amendSeqNow() int64 {
+	s.tr.mu.Lock()
+	defer s.tr.mu.Unlock()
+	return s.tr.amendSeq
+}
+
+// amendsSince is the ids of meetingID's lines amended after seq (each once,
+// oldest first), and the latest amend's number.
+func (s *Server) amendsSince(meetingID string, seq int64) ([]int64, int64) {
+	s.tr.mu.Lock()
+	defer s.tr.mu.Unlock()
+	l := s.tr.amends[meetingID]
+	i := sort.Search(len(l), func(i int) bool { return l[i].seq > seq })
+	var ids []int64
+	seen := map[int64]bool{}
+	for _, r := range l[i:] {
+		if !seen[r.id] {
+			seen[r.id] = true
+			ids = append(ids, r.id)
+		}
+		seq = r.seq
+	}
+	return ids, seq
 }
 
 // liveConn is a registered ingest stream and the egress nonce its token
@@ -112,7 +200,7 @@ type partial struct {
 func newTranscriber() *transcriber {
 	return &transcriber{runs: map[string]*run{}, conns: map[string]*liveConn{},
 		partials: map[string]map[string]partial{}, paused: map[string]bool{}, delayed: map[string]*liveConn{}, meetings: map[string]string{},
-		restarts: map[string]int{}, audioAt: map[string]time.Time{}}
+		restarts: map[string]int{}, audioAt: map[string]time.Time{}, amends: map[string][]amendRec{}}
 }
 
 // Transcribing says the plugin has an engine.
@@ -425,6 +513,12 @@ func (s *Server) stopTranscription(ctx context.Context, meetingID string) {
 	if err != nil {
 		return
 	}
+	// The meeting's event streams close at its end, and its amend log goes
+	// with them (an amend by a last final after this still reaches the
+	// store, which the archive and the export read).
+	s.tr.mu.Lock()
+	delete(s.tr.amends, meetingID)
+	s.tr.mu.Unlock()
 	for _, t := range ts {
 		s.cancelRun(t.Track)
 		s.closeConn(t.Track, ingest.CloseNormal, "the meeting ended")
@@ -611,6 +705,7 @@ func (s *Server) serveIngest(conn *ingest.Conn, t store.Track) {
 		if err != nil || cur.State != store.TrackActive || !cur.MeetingLive {
 			s.forgetTrack(t.MeetingID, t.Track)
 		}
+		s.freeAmends(t.MeetingID, err == nil && cur.MeetingLive)
 		s.hub.Changed(t.MeetingID)
 		conn.Close(ingest.CloseNormal, "")
 	}()
@@ -761,8 +856,28 @@ func (s *Server) storeSegment(ctx context.Context, t store.Track, lc *liveConn, 
 		s.cfg.Log.Printf("transcript: track %s flagged %s (speech energy or a constant level and no words for %s)", t.Track, seg.Text, stt.SilentStart)
 		return
 	case stt.Final:
-		if _, err := s.store.AddSegment(ctx, t.Track, store.SegText, start, end, seg.Text, engine); err != nil {
-			s.cfg.Log.Printf("transcript: a line was not stored: %v", err)
+		// The previous line's late closing marks FIRST: once this final's
+		// own line is stored, it is the participant's latest. The amend
+		// goes to the same participant's previous line only (store:
+		// AmendLastLine), and every open panel updates that line in place.
+		if seg.Lead != "" {
+			if id, changed, err := s.store.AmendLastLine(ctx, t.MeetingID, t.Identity, seg.Lead, stt.Marks); err != nil {
+				s.cfg.Log.Printf("transcript: a line's closing mark was not stored: %v", err)
+			} else if changed {
+				// The panels hear of it only while the meeting is live: an
+				// ended meeting's streams are closing and its log is freed
+				// (freeAmends); the store, which the archive reads, has it.
+				if cur, err := s.store.TrackByID(ctx, t.Track, s.cfg.Now()); err == nil && cur.MeetingLive {
+					s.noteAmend(t.MeetingID, id)
+				}
+			}
+		}
+		// A final with only a lead stores no line (any other final is
+		// stored exactly as before).
+		if seg.Text != "" || seg.Lead == "" {
+			if _, err := s.store.AddSegment(ctx, t.Track, store.SegText, start, end, seg.Text, engine); err != nil {
+				s.cfg.Log.Printf("transcript: a line was not stored: %v", err)
+			}
 		}
 		s.tr.mu.Lock()
 		if m := s.tr.partials[t.MeetingID]; m != nil {

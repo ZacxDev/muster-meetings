@@ -28,6 +28,8 @@ test("a guest's mute and camera-off reach the owner's tile within 1 s, through a
   await page.goto(`${h.parent}/apps/${h.pluginID}`);
   const app = page.frameLocator('#app');
   await app.locator('#new-meeting').click();
+  // The link is filled in when New meeting's answer comes: wait for it.
+  await expect(app.locator('#join-url')).not.toHaveValue('');
   const link = await app.locator('#join-url').inputValue();
   await expect(app.locator('#btn-join')).toBeEnabled({ timeout: 15_000 });
   await app.locator('#btn-join').click();

@@ -14,7 +14,6 @@
 //	go run ./scripts/mutate -list       # names only
 //	go run ./scripts/mutate -match re   # the mutants whose name matches re, and the two controls
 //	go run ./scripts/mutate -e2e        # the UI mutants instead, each killed by a Playwright test
-//	go run ./scripts/mutate -check      # only check that every mutant's text occurs exactly once (no test runs)
 //
 // A UI mutant (e2e set) is killed by one Playwright test in e2e/ (the
 // chromium project, -g its title), run with npx: the sweep needs the e2e
@@ -157,7 +156,6 @@ const (
 	ctGo    = "internal/contacts/contacts.go"
 	ctOut   = "internal/contacts/outbox.go"
 	ctAcc   = "internal/contacts/accepting.go"
-	ctMail  = "internal/contacts/email.go"
 	cardE2E = "contacts-card.spec.ts"
 )
 
@@ -1092,14 +1090,12 @@ var mutants = []mutant{
 	{name: "contacts card: the answer depends on contacts (not uniform)", file: cardGo, from: `map[string]any{"message": CardSentMessage(spent.OwnerName)}`,
 		to:  `map[string]any{"message": CardSentMessage(spent.OwnerName), "accepting": s.contacts.accepting.Get(spent.Subject)}`,
 		pkg: "./internal/server", test: "TestCardAnswerIsUniformWhateverContactsDoes", want: "the answers differ by what contacts does"},
-	{name: "contacts card: the name check skipped at Send", file: cardGo, from: "name, err := lobby.CleanName(in.Name)", to: "name, err := in.Name, error(nil)",
+	{name: "contacts card: the name check skipped at Send", file: cardGo, from: "n, err := contactsapi.CleanName(name)", to: "n, err := name, error(nil)",
 		pkg: "./internal/server", test: "TestCardValidationNamesTheFieldAndSpendsNothing", want: "want 400 naming name"},
-	{name: "contacts card: no per-address limit", file: cardGo, from: "!s.contacts.byAddr.Allow(s.clientAddr(r), now) || ", to: "",
-		pkg: "./internal/server", test: "TestCardLimitsPerAddressAndPerMeeting", want: "from one address = 400"},
-	{name: "contacts card: no per-meeting limit", file: cardGo, from: " || !s.contacts.byMeeting.Allow(meetingID, now)", to: "",
-		pkg: "./internal/server", test: "TestCardLimitsPerAddressAndPerMeeting", want: "from a fresh address = 400"},
-	{name: "contacts logs: the card's name and email logged", file: cardGo, from: "\temail, err := contacts.CleanEmail(in.Email)\n",
-		to:  "\ts.cfg.Log.Printf(\"card: %s <%s>\", in.Name, in.Email)\n\temail, err := contacts.CleanEmail(in.Email)\n",
+	{name: "contacts card: no per-address limit", file: cardGo, from: "if !s.contacts.byAddr.Allow(s.clientAddr(r), s.cfg.Now()) {", to: "if false {",
+		pkg: "./internal/server", test: "TestCardLimitPerAddress", want: "from one address = 400"},
+	{name: "contacts logs: the card's name and email logged", file: cardGo, from: "\tname, email, field := CardFields(in.Name, in.Email)\n",
+		to:  "\ts.cfg.Log.Printf(\"card: %s <%s>\", in.Name, in.Email)\n\tname, email, field := CardFields(in.Name, in.Email)\n",
 		pkg: "./internal/server", test: "TestTheCardLogsNoPII", want: `the log holds "Imogen V-T."`},
 	{name: "contacts logs: the outbox logs a refused row's body", file: ctOut, from: `o.log.Printf("contacts: outbox: %s %d refused (%d); dropped", r.Kind, r.ID, a.Status)`,
 		to:  `o.log.Printf("contacts: outbox: %s %d refused (%d); dropped: %s", r.Kind, r.ID, a.Status, r.Body)`,
@@ -1136,14 +1132,14 @@ var mutants = []mutant{
 		pkg: "./internal/contacts", test: "TestTheOutboxBacksOffFrom5sDoublingTo10Minutes", want: "attempt 2: 5s, want 10s"},
 	{name: "contacts contract: no bearer sent", file: ctGo, from: `req.Header.Set("Authorization", "Bearer "+c.token)`, to: `req.Header.Set("Authorization", "Bearer")`,
 		pkg: "./internal/contacts", test: "TestContractTheRequestsMeetingsSends", want: "Authorization"},
-	{name: "contacts contract: no Idempotency-Key sent", file: ctGo, from: "\tif key != \"\" {\n\t\treq.Header.Set(\"Idempotency-Key\"", to: "\tif false {\n\t\treq.Header.Set(\"Idempotency-Key\"",
+	{name: "contacts contract: no Idempotency-Key sent", file: ctGo, from: "\tif key != \"\" {\n\t\treq.Header.Set(contactsapi.IdempotencyHeader", to: "\tif false {\n\t\treq.Header.Set(contactsapi.IdempotencyHeader",
 		pkg: "./internal/contacts", test: "TestContractTheRequestsMeetingsSends", want: "Idempotency-Key"},
-	{name: "contacts contract: the submission's times not in UTC", file: "internal/contacts/submission.go", from: "\t\t\tu := (*t).UTC()\n", to: "\t\t\tu := **t\n",
-		pkg: "./internal/contacts", test: "TestContractTheSubmissionMeetingsSends", want: "the body meetings sends"},
-	{name: "contacts validation: an all-digit top-level label", file: ctMail, from: `return strings.Trim(tld, "0123456789") != ""`, to: `return tld != ""`,
-		pkg: "./internal/contacts", test: "TestContractTheFieldTable", want: `email "wren@example.123" accepted`},
-	{name: "contacts validation: a space or quote in the local part", file: ctMail, from: "\t\tdefault:\n\t\t\treturn false\n", to: "\t\tdefault:\n",
-		pkg: "./internal/contacts", test: "TestContractTheFieldTable", want: `email "wren o@example.test" accepted`},
+	{name: "contacts contract: the submission's times not in UTC", file: "internal/contacts/submission.go", from: "\tu := t.UTC()\n", to: "\tu := *t\n",
+		pkg: "./internal/contacts", test: "TestContractTheSubmissionMeetingsSends", want: "times not RFC 3339 UTC"},
+	{name: "contacts contract: the card named by the participant id", file: cardsGo, from: "c.CardID = base64.RawURLEncoding.EncodeToString(raw)", to: "c.CardID = base64.RawURLEncoding.EncodeToString(raw)[:16]",
+		pkg: "./internal/server", test: "TestCardSendWritesOneOutboxRowAndSkipWritesNone", want: "send = 500"},
+	{name: "contacts validation: the email not checked by contacts' rule", file: cardGo, from: "a, _, err := contactsapi.CheckEmail(email)", to: "a, err := strings.TrimSpace(email), error(nil)",
+		pkg: "./internal/server", test: "TestCardFieldsFollowTheContractsFieldTable", want: "the contract says ok false"},
 	{name: "contacts deploy: the contacts token required in the Secret", file: kPlugin, from: "key: MEETINGS_CONTACTS_TOKEN, optional: true}", to: "key: MEETINGS_CONTACTS_TOKEN}",
 		pkg: "./deploy", test: "TestKubernetesPlugin", want: "MEETINGS_CONTACTS_TOKEN = "},
 
@@ -1162,28 +1158,7 @@ func main() {
 	list := flag.Bool("list", false, "print the mutants' names and stop")
 	e2eOnly := flag.Bool("e2e", false, "run the UI mutants (killed by Playwright tests) and their controls, instead of the Go ones")
 	match := flag.String("match", "", "run only the mutants whose name matches this regular expression (the controls always run)")
-	check := flag.Bool("check", false, "only check that every mutant's text occurs exactly once in its file, Go and UI alike; run no test")
 	flag.Parse()
-	if *check {
-		bad := 0
-		for _, m := range mutants {
-			for _, e := range m.edits() {
-				b, err := os.ReadFile(e.file)
-				if err != nil {
-					fatalf("%s: %v", e.file, err)
-				}
-				if n := bytes.Count(b, []byte(e.from)); n != 1 {
-					bad++
-					fmt.Printf("%-58s %s: the text to replace occurs %d times, want exactly 1\n", m.name, e.file, n)
-				}
-			}
-		}
-		if bad > 0 {
-			fatalf("%d edits do not apply", bad)
-		}
-		fmt.Printf("all %d mutants apply (every edit's text occurs exactly once)\n", len(mutants))
-		return
-	}
 	if *match != "" {
 		re, err := regexp.Compile(*match)
 		if err != nil {

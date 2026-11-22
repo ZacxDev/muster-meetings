@@ -115,7 +115,7 @@ test.describe('with contacts configured', () => {
         await expect.poll(async () => (await received(h)).received.length, { timeout: 15_000 }).toBe(before + 1);
         const got = (await received(h)).received.at(-1)!;
         expect(got).toMatchObject({ Name: name, Email: email, TypedName: name });
-        expect(got.Key).toMatch(/^card:[A-Za-z0-9_-]{16}$/);
+        expect(got.Key).toMatch(/^card:[A-Za-z0-9_-]{43}$/);
         // 🔴 Once only: the ended link shows no card again.
         await guest.reload();
         await expect(guest.locator('#message')).toHaveText('This meeting has ended.');

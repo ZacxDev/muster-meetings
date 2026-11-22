@@ -1,21 +1,20 @@
 package contacts_test
 
-// The contacts API contract, from meetings' side (muster's
-// docs/design/contacts.md, "Phase 1: the API contract, shared by both
-// plugins"). testdata/contract.json is meetings' own copy; every test here
-// reads only it, so replacing it with the contacts plugin's contract is a
-// file copy, and anything the two disagree on turns red here.
+// The contacts API contract, from meetings' side. The contract is the
+// contacts plugin's own (github.com/ZacxDev/muster-contacts/contactsapi,
+// pinned in go.mod), never a copy:
 //
-//   - TestContractCasesAgainstTheFake runs every case against
-//     internal/contactstest (or, with CONTACTS_CONTRACT_URL and
-//     CONTACTS_CONTRACT_TOKEN set, the state-free cases against a real
-//     contacts server), so what the server and e2e tests talk to IS the
-//     contract.
-//   - TestContractTheSubmissionMeetingsSends: the body meetings builds for
-//     the fixture's card equals the contract's body, field for field.
+//   - TestContractRunsAgainstTheFake runs contactsapi.RunContract (every case
+//     of the plugin's routes.json) against internal/contactstest, so the fake
+//     every server and e2e test talks to IS the contract.
+//   - TestContractTheSubmissionMeetingsSends: the body meetings builds decodes
+//     strictly into contactsapi.Submission, passes its Check, is keyed by
+//     KeyForCard, and the fake takes it.
 //   - TestContractTheRequestsMeetingsSends: method, path and headers.
-//   - TestContractEveryAnswerMeetingsHandles: the outbox's action per status.
-//   - TestContractTheFieldTable: the shared validation table.
+//   - TestContractEveryAnswerMeetingsHandles: every status the contract can
+//     answer a submission has a defined outbox action.
+//   - TestContractTheFieldTable: meetings' card fields (server.CardFields)
+//     against the plugin's fields.json lives in internal/server.
 
 import (
 	"bytes"
@@ -24,266 +23,92 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"reflect"
-	"regexp"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/ZacxDev/muster-contacts/contactsapi"
+
 	"github.com/ZacxDev/muster-meetings/internal/contacts"
 	"github.com/ZacxDev/muster-meetings/internal/contactstest"
-	"github.com/ZacxDev/muster-meetings/internal/lobby"
 	"github.com/ZacxDev/muster-meetings/internal/store"
 )
 
-type contract struct {
-	Token      string `json:"token"`
-	Owner      string `json:"owner"`
-	OtherOwner string `json:"other_owner"`
-	Submission struct {
-		Path string          `json:"path"`
-		Key  string          `json:"key"`
-		Body json.RawMessage `json:"body"`
-	} `json:"submission"`
-	Cases []struct {
-		Name  string `json:"name"`
-		Setup *struct {
-			NotAccepting []string `json:"not_accepting"`
-			DailyCap     *int     `json:"daily_cap"`
-		} `json:"setup"`
-		Request struct {
-			Method   string         `json:"method"`
-			Path     string         `json:"path"`
-			Auth     string         `json:"auth"`
-			Key      string         `json:"key"`
-			Body     string         `json:"body"`
-			Override map[string]any `json:"override"`
-		} `json:"request"`
-		Response struct {
-			Status     int            `json:"status"`
-			Body       map[string]any `json:"body"`
-			Receipt    bool           `json:"receipt"`
-			RetryAfter bool           `json:"retry_after"`
-			SameAs     string         `json:"same_as"`
-		} `json:"response"`
-		After *struct {
-			Stored int `json:"stored"`
-		} `json:"after"`
-	} `json:"cases"`
-	Outbox []struct {
-		Status int    `json:"status"`
-		Action string `json:"action"`
-	} `json:"outbox"`
-	Fields struct {
-		Emails []struct {
-			In  string  `json:"in"`
-			Out *string `json:"out"`
-		} `json:"emails"`
-		Names []struct {
-			In  string  `json:"in"`
-			Out *string `json:"out"`
-		} `json:"names"`
-	} `json:"fields"`
-}
+const contractToken = "ctk_contract_fixture_token_0123456789abcd"
 
-func loadContract(t *testing.T) contract {
-	t.Helper()
-	raw, err := os.ReadFile("testdata/contract.json")
+func TestContractRunsAgainstTheFake(t *testing.T) {
+	f := contactstest.New(contractToken)
+	defer f.Close()
+	c, err := contactsapi.LoadContract()
 	if err != nil {
 		t.Fatal(err)
 	}
-	var c contract
-	if err := json.Unmarshal(raw, &c); err != nil {
-		t.Fatal(err)
-	}
-	if len(c.Cases) < 10 || len(c.Outbox) < 10 || len(c.Fields.Emails) < 10 {
-		t.Fatalf("the contract has %d cases, %d outbox rows, %d emails: is it the file it should be?", len(c.Cases), len(c.Outbox), len(c.Fields.Emails))
-	}
-	return c
-}
-
-var receiptRE = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
-
-func TestContractCasesAgainstTheFake(t *testing.T) {
-	c := loadContract(t)
-	base, token := os.Getenv("CONTACTS_CONTRACT_URL"), os.Getenv("CONTACTS_CONTRACT_TOKEN")
-	var fake *contactstest.Fake
-	if base == "" {
-		fake = contactstest.New(c.Token)
-		defer fake.Close()
-		base, token = fake.URL, c.Token
-	}
-	subst := func(s string) string {
-		return strings.NewReplacer("{owner}", c.Owner, "{other_owner}", c.OtherOwner, "{submission.key}", c.Submission.Key).Replace(s)
-	}
-	seen := map[string]string{}
-	ran := 0
-	for _, tc := range c.Cases {
-		if tc.Setup != nil && fake == nil {
-			t.Logf("%s: needs state the contract sets up on the fake; skipped against a real server", tc.Name)
-			continue
-		}
-		if tc.Setup != nil {
-			for _, o := range tc.Setup.NotAccepting {
-				fake.SetAccepting(subst(o), false)
-			}
-			if tc.Setup.DailyCap != nil {
-				fake.SetDailyCap(*tc.Setup.DailyCap)
-			}
-		}
-		var body io.Reader
-		if tc.Request.Body != "" {
-			if tc.Request.Body != "{submission.body}" {
-				t.Fatalf("%s: body %q: only {submission.body} is known", tc.Name, tc.Request.Body)
-			}
-			var m map[string]any
-			if err := json.Unmarshal(c.Submission.Body, &m); err != nil {
-				t.Fatal(err)
-			}
-			for k, v := range tc.Request.Override {
-				m[k] = v
-			}
-			b, _ := json.Marshal(m)
-			body = bytes.NewReader(b)
-		}
-		req, _ := http.NewRequest(tc.Request.Method, base+subst(tc.Request.Path), body)
-		switch tc.Request.Auth {
-		case "token":
-			req.Header.Set("Authorization", "Bearer "+token)
-		case "wrong":
-			req.Header.Set("Authorization", "Bearer "+strings.Repeat("x", len(token)))
-		case "prefix":
-			req.Header.Set("Authorization", "Bearer "+token[:len(token)-1])
-		case "none":
-		default:
-			t.Fatalf("%s: auth %q", tc.Name, tc.Request.Auth)
-		}
-		if tc.Request.Key != "" {
-			req.Header.Set("Idempotency-Key", subst(tc.Request.Key))
-		}
-		if body != nil {
-			req.Header.Set("Content-Type", "application/json")
-		}
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatalf("%s: %v", tc.Name, err)
-		}
-		raw, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		ran++
-		if resp.StatusCode != tc.Response.Status {
-			t.Errorf("%s: status %d, want %d (%s)", tc.Name, resp.StatusCode, tc.Response.Status, raw)
-		}
-		if tc.Response.Body != nil {
-			var got map[string]any
-			if err := json.Unmarshal(raw, &got); err != nil || !reflect.DeepEqual(got, tc.Response.Body) {
-				t.Errorf("%s: body %s, want %v", tc.Name, raw, tc.Response.Body)
-			}
-		}
-		if tc.Response.Receipt {
-			var got map[string]any
-			_ = json.Unmarshal(raw, &got)
-			if r, _ := got["receipt"].(string); !receiptRE.MatchString(r) || len(got) != 1 {
-				t.Errorf("%s: body %s, want exactly {\"receipt\": <43 base64url>}", tc.Name, raw)
-			}
-		}
-		if tc.Response.RetryAfter && resp.Header.Get("Retry-After") == "" {
-			t.Errorf("%s: no Retry-After", tc.Name)
-		}
-		if tc.Response.SameAs != "" && seen[tc.Response.SameAs] != string(raw) {
-			t.Errorf("%s: body %s, want the same as %q's %s", tc.Name, raw, tc.Response.SameAs, seen[tc.Response.SameAs])
-		}
-		seen[tc.Name] = string(raw)
-		if tc.After != nil && fake != nil {
-			if n := len(fake.Got()); n != tc.After.Stored {
-				t.Errorf("%s: %d submissions stored, want %d", tc.Name, n, tc.After.Stored)
-			}
-		}
-		if fake != nil {
-			fake.SetAccepting(c.Owner, true)
-			fake.SetAccepting(c.OtherOwner, true)
-			fake.SetDailyCap(200)
-		}
-	}
-	if ran < 8 {
-		t.Fatalf("only %d cases ran", ran)
+	ran := contactsapi.RunContract(t, contactsapi.Target{URL: f.URL, Token: contractToken, Given: f.Given})
+	// Every case runs: the fake supports every precondition, so a skip here
+	// would be a case the fake is not held to.
+	if ran != len(c.Cases) || ran < 90 {
+		t.Fatalf("%d of %d contract cases ran", ran, len(c.Cases))
 	}
 }
 
-// fixtureCard is the store.Card the contract's submission is about: every
-// value the contract's body holds, as meetings reads it from its database.
-func fixtureCard(t *testing.T, c contract) (store.Card, string, string) {
-	t.Helper()
-	var m struct {
-		Owner   string `json:"owner"`
-		Meeting struct {
-			ID        string    `json:"id"`
-			Title     string    `json:"title"`
-			StartedAt time.Time `json:"started_at"`
-			EndedAt   time.Time `json:"ended_at"`
-		} `json:"meeting"`
-		Participant struct {
-			ID        string    `json:"id"`
-			Identity  string    `json:"identity"`
-			TypedName string    `json:"typed_name"`
-			JoinedAt  time.Time `json:"joined_at"`
-			LeftAt    time.Time `json:"left_at"`
-		} `json:"participant"`
-		Name  string `json:"name"`
-		Email string `json:"email"`
-	}
-	if err := json.Unmarshal(c.Submission.Body, &m); err != nil {
-		t.Fatal(err)
-	}
-	// Times as the store hands them over: UTC, but built in another zone
-	// first, so a builder that forgot to convert is seen.
+// fixtureCard is a card as the store hands it over, built in another zone
+// first so a builder that forgot to convert to UTC is seen.
+func fixtureCard() store.Card {
 	zone := time.FixedZone("UTC+5", 5*3600)
-	at := func(v time.Time) *time.Time { x := v.In(zone); return &x }
-	return store.Card{ParticipantID: m.Participant.ID, Identity: m.Participant.Identity, TypedName: m.Participant.TypedName,
-		AdmittedAt: at(m.Participant.JoinedAt), LeftAt: at(m.Participant.LeftAt), MeetingID: m.Meeting.ID, Title: m.Meeting.Title,
-		CreatedAt: m.Meeting.StartedAt.Add(-time.Hour), StartedAt: at(m.Meeting.StartedAt), EndedAt: at(m.Meeting.EndedAt),
-		Subject: m.Owner, OwnerName: "Owner Name Not Sent"}, m.Name, m.Email
+	at := func(m int) *time.Time { x := time.Date(2031, 3, 14, 15, m, 0, 0, time.UTC).In(zone); return &x }
+	return store.Card{CardID: strings.Repeat("c", 43), ParticipantID: "p4rT1c1pAnT0aaaa", Identity: "guest-Zm9vYmFyYmF6cXV4MDEyMzQ1Ng",
+		TypedName: "Wren O.", AdmittedAt: at(3), LeftAt: at(42), MeetingID: "mEeT1nG0id00aaaa", Title: "Quarterly planning",
+		CreatedAt: *at(0), StartedAt: at(1), EndedAt: at(42), Subject: "Q29udHJhY3RPd25lcjAxAA", OwnerName: "Owner Name Not Sent"}
 }
 
 func TestContractTheSubmissionMeetingsSends(t *testing.T) {
-	c := loadContract(t)
-	card, name, email := fixtureCard(t, c)
-	it, err := contacts.SubmissionItem(card, name, email)
+	card := fixtureCard()
+	it, err := contacts.SubmissionItem(card, "Wren Okafor", "wren.okafor@example.test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if it.Key != c.Submission.Key || it.Path != c.Submission.Path || it.Kind != "submission" {
-		t.Errorf("key %q path %q kind %q; want %q %q submission", it.Key, it.Path, it.Kind, c.Submission.Key, c.Submission.Path)
+	if it.Key != contactsapi.KeyForCard(card.CardID) || it.Path != contactsapi.RouteSubmissions || it.Kind != "submission" {
+		t.Errorf("key %q path %q kind %q", it.Key, it.Path, it.Kind)
 	}
-	var got, want any
-	if err := json.Unmarshal(it.Body, &got); err != nil {
-		t.Fatal(err)
+	var sub contactsapi.Submission
+	dec := json.NewDecoder(bytes.NewReader(it.Body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&sub); err != nil {
+		t.Fatalf("the body is not contactsapi.Submission: %v: %s", err, it.Body)
 	}
-	_ = json.Unmarshal(c.Submission.Body, &want)
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("the body meetings sends:\n%s\nthe contract's:\n%s", it.Body, c.Submission.Body)
+	if _, _, _, _, err := sub.Check(); err != nil {
+		t.Fatalf("contactsapi refuses the body: %v: %s", err, it.Body)
 	}
-	// 🔴 Never the owner's display name, and never the guest's card secret.
+	want := `"meeting":{"id":"mEeT1nG0id00aaaa","title":"Quarterly planning","started_at":"2031-03-14T15:01:00Z","ended_at":"2031-03-14T15:42:00Z"}`
+	if !bytes.Contains(it.Body, []byte(want)) || !bytes.Contains(it.Body, []byte(`"joined_at":"2031-03-14T15:03:00Z"`)) {
+		t.Errorf("times not RFC 3339 UTC: %s", it.Body)
+	}
 	if bytes.Contains(it.Body, []byte(card.OwnerName)) {
 		t.Errorf("the body carries the owner's display name: %s", it.Body)
 	}
-	// An untitled meeting is sent with its default label; a long title is cut.
+	// The fake (held to the contract above) takes it.
+	f := contactstest.New(contractToken)
+	defer f.Close()
+	a, err := contacts.New(f.URL, contractToken).Post(context.Background(), it.Path, it.Key, it.Body)
+	if err != nil || a.Status != http.StatusAccepted {
+		t.Fatalf("the fake answered %d, %v", a.Status, err)
+	}
+	// An untitled meeting goes with its default label; a long one is cut to
+	// the contract's limit and still passes its check.
 	card.Title = ""
-	it, _ = contacts.SubmissionItem(card, name, email)
-	if !bytes.Contains(it.Body, []byte(`"title":"Meeting on 14 Mar 2031, 14:00 UTC"`)) {
+	it, _ = contacts.SubmissionItem(card, "Wren Okafor", "wren.okafor@example.test")
+	if !bytes.Contains(it.Body, []byte(`"title":"Meeting on 14 Mar 2031, 15:00 UTC"`)) {
 		t.Errorf("an untitled meeting's body: %s", it.Body)
 	}
-	card.Title = strings.Repeat("é", contacts.MaxTitle+7)
-	it, _ = contacts.SubmissionItem(card, name, email)
-	if !bytes.Contains(it.Body, []byte(`"title":"`+strings.Repeat("é", contacts.MaxTitle)+`"`)) {
-		t.Errorf("a long title is not cut to %d characters: %s", contacts.MaxTitle, it.Body)
+	card.Title = strings.Repeat("é", contactsapi.MaxTitleRunes+7)
+	if it, err = contacts.SubmissionItem(card, "Wren Okafor", "wren.okafor@example.test"); err != nil ||
+		!bytes.Contains(it.Body, []byte(`"title":"`+strings.Repeat("é", contactsapi.MaxTitleRunes)+`"`)) {
+		t.Errorf("a long title: %v %s", err, it.Body)
 	}
 }
 
 func TestContractTheRequestsMeetingsSends(t *testing.T) {
-	c := loadContract(t)
 	var mu sync.Mutex
 	var got []*http.Request
 	var bodies [][]byte
@@ -295,71 +120,83 @@ func TestContractTheRequestsMeetingsSends(t *testing.T) {
 		w.WriteHeader(http.StatusAccepted)
 	}))
 	defer srv.Close()
-	cl := contacts.New(srv.URL, c.Token)
-	if _, _, err := cl.Accepting(context.Background(), c.Owner); err == nil {
+	card := fixtureCard()
+	it, err := contacts.SubmissionItem(card, "Wren Okafor", "wren.okafor@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cl := contacts.New(srv.URL, contractToken)
+	if _, _, err := cl.Accepting(context.Background(), card.Subject); err == nil {
 		t.Error("a 202 to the owners check is not an answer; want an error")
 	}
-	if _, err := cl.Post(context.Background(), c.Submission.Path, c.Submission.Key, c.Submission.Body); err != nil {
+	if _, err := cl.Post(context.Background(), it.Path, it.Key, it.Body); err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 2 {
 		t.Fatalf("%d requests", len(got))
 	}
 	for i, want := range []struct{ method, path, key, ct string }{
-		{"GET", "/v1/owners/" + c.Owner, "", ""},
-		{"POST", c.Submission.Path, c.Submission.Key, "application/json"},
+		{"GET", contactsapi.RouteOwner + card.Subject, "", ""},
+		{"POST", contactsapi.RouteSubmissions, contactsapi.KeyForCard(card.CardID), "application/json"},
 	} {
 		r := got[i]
 		if r.Method != want.method || r.URL.Path != want.path || r.URL.RawQuery != "" {
 			t.Errorf("request %d: %s %s?%s, want %s %s", i, r.Method, r.URL.Path, r.URL.RawQuery, want.method, want.path)
 		}
-		if a := r.Header.Get("Authorization"); a != "Bearer "+c.Token {
+		if a := r.Header.Get("Authorization"); a != "Bearer "+contractToken {
 			t.Errorf("request %d: Authorization %q", i, a)
 		}
-		if k := r.Header.Get("Idempotency-Key"); k != want.key {
+		if k := r.Header.Get(contactsapi.IdempotencyHeader); k != want.key {
 			t.Errorf("request %d: Idempotency-Key %q, want %q", i, k, want.key)
 		}
 		if ct := r.Header.Get("Content-Type"); ct != want.ct {
 			t.Errorf("request %d: Content-Type %q, want %q", i, ct, want.ct)
 		}
 	}
-	if !bytes.Equal(bodies[1], c.Submission.Body) {
+	if !bytes.Equal(bodies[1], it.Body) {
 		t.Errorf("the posted body changed in flight")
 	}
 }
 
+// Every status the contract answers a submission with has a defined outbox
+// action, and it is the design's: 202 delivered; 400, 409, 413 refused for
+// good; 401 and 429 retried. A status the contract gains that this table
+// does not name fails here.
 func TestContractEveryAnswerMeetingsHandles(t *testing.T) {
-	c := loadContract(t)
-	names := map[contacts.Action]string{contacts.Retry: "retry", contacts.Delivered: "delivered", contacts.NotAccepting: "not_accepting", contacts.Refused: "refused"}
-	for _, o := range c.Outbox {
-		var err error
-		if o.Status == 0 {
-			err = context.DeadlineExceeded
-		}
-		if got := names[contacts.Classify(contacts.Answer{Status: o.Status}, err)]; got != o.Action {
-			t.Errorf("status %d: the outbox would %s, the contract says %s", o.Status, got, o.Action)
+	c, err := contactsapi.LoadContract()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[int]contacts.Action{202: contacts.Delivered, 400: contacts.Refused, 409: contacts.Refused, 413: contacts.Refused,
+		401: contacts.Retry, 429: contacts.Retry}
+	seen := map[int]bool{}
+	for _, cs := range c.Cases {
+		for _, st := range cs.Steps {
+			if st.Method != http.MethodPost || st.Path != contactsapi.RouteSubmissions {
+				continue
+			}
+			seen[st.Status] = true
+			w, ok := want[st.Status]
+			if !ok {
+				t.Errorf("the contract answers a submission %d (%s): the outbox's action for it is not decided here", st.Status, cs.Name)
+				continue
+			}
+			if got := contacts.Classify(contacts.Answer{Status: st.Status}, nil); got != w {
+				t.Errorf("status %d: the outbox would take action %d, want %d", st.Status, got, w)
+			}
 		}
 	}
-}
-
-func TestContractTheFieldTable(t *testing.T) {
-	c := loadContract(t)
-	for _, e := range c.Fields.Emails {
-		got, err := contacts.CleanEmail(e.In)
-		switch {
-		case e.Out == nil && err == nil:
-			t.Errorf("email %q accepted as %q, want refused", e.In, got)
-		case e.Out != nil && (err != nil || got != *e.Out):
-			t.Errorf("email %q = %q, %v; want %q", e.In, got, err, *e.Out)
+	for s := range want {
+		if !seen[s] {
+			t.Errorf("status %d is in this table but the contract never answers it", s)
 		}
 	}
-	for _, n := range c.Fields.Names {
-		got, err := lobby.CleanName(n.In)
-		switch {
-		case n.Out == nil && err == nil:
-			t.Errorf("name %q accepted as %q, want refused", n.In, got)
-		case n.Out != nil && (err != nil || got != *n.Out):
-			t.Errorf("name %q = %q, %v; want %q", n.In, got, err, *n.Out)
+	for _, s := range []int{500, 502, 503} {
+		if contacts.Classify(contacts.Answer{Status: s}, nil) != contacts.Retry {
+			t.Errorf("%d is not retried", s)
 		}
+	}
+	if contacts.Classify(contacts.Answer{}, context.DeadlineExceeded) != contacts.Retry {
+		t.Error("no answer is not retried")
 	}
 }

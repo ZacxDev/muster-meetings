@@ -391,19 +391,26 @@ goldens taken at the commit before contacts.
 plugin's own `contacts_outbox` table in the transaction that spends the
 card, and answers at once with one message ("Sent to *owner*."), whatever
 contacts later does with it. A worker delivers it to `POST /v1/submissions`
-with an `Idempotency-Key` (`card:<participant id>`), a 3 s timeout, and a
-backoff of 5 s doubling to 10 minutes: `2xx` and `404` (not accepting)
-delete the row, `400`/`409` (and any other `4xx` but `401` and `429`)
-delete it and log the event, and `401`, `429` (its `Retry-After`), `5xx`
+(the contacts plugin's own wire types and field checks:
+`github.com/ZacxDev/muster-contacts/contactsapi`, pinned in `go.mod`) with
+an `Idempotency-Key` of `card:<card id>` (the card's public id: its SHA-256,
+never the secret the guest's page holds), RFC 3339 UTC times, a 3 s
+timeout, and a backoff of 5 s doubling to 10 minutes: `2xx` delete the row
+(contacts answers a card for an owner who is not accepting with the same
+`202`, and drops it), `400`/`409`/`413` (and any other `4xx` but `401` and
+`429`) delete it and log the event, and `401`, `429` (its `Retry-After`), `5xx`
 and no answer retry. A row 72 h old is deleted undelivered and counted in
 the log (`meetings_contacts_outbox_dropped_total`). Knock, admit, the token
 and End never wait on contacts: with it black-holed they take as long as
 without it. Log lines name events, statuses and row ids, never a name, an
 email, a card id or the token.
 
-**Limits:** 10 card posts per source address and 30 per meeting per 10
-minutes (`429`), 2 KiB bodies, names as at the knock (1–40 characters),
-one plain email address (no display name, no list).
+**Limits:** 10 card posts per source address per 10 minutes (`429`; the
+cards a meeting can mint are bounded by the guests the owner admitted, and
+contacts caps each owner's cards a day), 2 KiB bodies, and the contacts
+plugin's own field rules (`contactsapi.CleanName`, `contactsapi.CheckEmail`):
+a name as at the knock (1–40 characters), one plain email address (no
+display name, no list).
 
 To turn it on (Kubernetes):
 
@@ -926,10 +933,12 @@ card after the guest's own Leave, Skip sending nothing, and no second card
 at End; the same answer with contacts down and delivery once it is back;
 no card for an owner contacts is not accepting; no rise or fade under
 reduced motion; and, with no contacts URL, no card on either path and no
-card route. In Go, `internal/contacts` holds the contract
-(`testdata/contract.json`, meetings' own copy of the contacts API: the body
-meetings sends, every route's answer, the outbox's action per status, the
-shared field table), the outbox (each answer class, the backoff, the 72 h
+card route. In Go, `internal/contacts` runs the contacts plugin's own
+contract (`contactsapi.RunContract`, every case of its `routes.json`)
+against `internal/contactstest`, the fake every other test talks to, and
+checks the body meetings sends against `contactsapi.Submission`'s check and
+the outbox's action for every status the contract answers;
+`internal/server` checks the card's fields against its `fields.json`; the outbox (each answer class, the backoff, the 72 h
 drop, a retry after a lost answer making exactly one submission, insertion
 order with one failure holding nothing back, no PII in its log), and
 `internal/server`'s `card_test.go` and `nourl_test.go` the eligibility (each

@@ -39,8 +39,11 @@ const (
 )
 
 // Classify is the design's table ("Failure behaviour"): 2xx and 404 delete
-// the row; 400 and 409 (and any other 4xx but 401 and 429) delete it and
+// the row; 400, 409 and 413 (any other 4xx but 401 and 429) delete it and
 // are logged; 401, 429, 5xx, any other status and no answer at all retry.
+// (contactsapi's contract answers a submission for an owner who is not
+// accepting with the same 202 as an accepted one; a 404 is kept as "not
+// accepting" for the other routes and an older contacts.)
 func Classify(a Answer, err error) Action {
 	if err != nil {
 		return Retry

@@ -1,14 +1,11 @@
-// Package contactstest is a fake of the contacts plugin's internal API, as
-// muster's docs/design/contacts.md specifies it ("The contacts API") and as
-// internal/contacts/testdata/contract.json pins it for this repository:
-// bearer auth, per-owner accepting, submissions with Idempotency-Key, the
-// per-owner cap, strict bodies. internal/contacts's contract test runs every
-// case of the contract against it, so a test or the e2e harness that talks
-// to this fake talks to the contract.
+// Package contactstest is a fake of the contacts plugin's internal API, built
+// to the plugin's own contract (github.com/ZacxDev/muster-contacts/contactsapi,
+// pinned in go.mod): its routes, wire types, field checks and error texts.
+// internal/contacts's contract test runs contactsapi.RunContract (every case
+// of the plugin's routes.json) against it, so a test or the e2e harness that
+// talks to this fake talks to the contract.
 //
-// It is NOT the contacts plugin: it keeps what it was sent in memory and
-// makes no contact. When the plugin's own server is available, the contract
-// test runs against it instead (CONTACTS_CONTRACT_URL).
+// It is NOT the contacts plugin: it keeps what it was sent in memory.
 package contactstest
 
 import (
@@ -18,6 +15,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -26,8 +24,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ZacxDev/muster-meetings/internal/contacts"
-	"github.com/ZacxDev/muster-meetings/internal/lobby"
+	"github.com/ZacxDev/muster-contacts/contactsapi"
 )
 
 // Mode is how the fake answers.
@@ -38,39 +35,19 @@ const (
 	Up Mode = iota
 	// BlackHole accepts every connection and never answers (a hung peer).
 	BlackHole
-	// Status answers every request with Fake.ForceStatus.
+	// Status answers every request with the forced status.
 	Status
 )
 
-// Received is one submission the fake accepted.
+// Received is one submission the fake accepted and KEPT (one an owner who
+// is not accepting sent is answered alike and dropped, as the contract
+// says, and is not here).
 type Received struct {
 	Key  string
-	Body contacts.Submission
+	Body contactsapi.Submission
 }
 
-// Fake is the fake contacts API.
-type Fake struct {
-	*httptest.Server
-	Token string
-
-	mu sync.Mutex
-	// mode, forced: see Mode.
-	mode        Mode
-	forceStatus int
-	retryAfter  string
-	// notAccepting holds the owners answered 404 (everyone else is accepted:
-	// a person who never opened Contacts is, design: "every owner works").
-	notAccepting map[string]bool
-	// dailyCap is submissions per owner before 429 (design: 200).
-	dailyCap int
-	perOwner map[string]int
-	idem     map[string]idemEntry
-	got      []Received
-	requests []Request
-	hung     []net.Conn
-}
-
-// Request is one request the fake saw: method, path and headers that matter.
+// Request is one request the fake saw.
 type Request struct {
 	Method, Path, Auth, Key, ContentType string
 	Body                                 []byte
@@ -82,9 +59,36 @@ type idemEntry struct {
 	body   []byte
 }
 
+// Fake is the fake contacts API.
+type Fake struct {
+	*httptest.Server
+	Token string
+
+	mu          sync.Mutex
+	mode        Mode
+	forceStatus int
+	retryAfter  string
+	// notAccepting: owners answered 404 on the owners check, receipts and
+	// attendance, and whose cards are dropped (everyone else is accepted: a
+	// person who never opened Contacts is).
+	notAccepting map[string]bool
+	limited      map[string]bool
+	dailyCap     int
+	perOwner     map[string]int
+	idem         map[string]idemEntry
+	// contacts: owner -> email key -> contact ref; receipts: hash -> (owner, ref).
+	contacts map[string]map[string]string
+	receipts map[[32]byte][2]string
+	refs     map[string]string // ref -> owner
+	got      []Received
+	requests []Request
+	hung     []net.Conn
+}
+
 // New starts a fake with token.
 func New(token string) *Fake {
-	f := &Fake{Token: token, notAccepting: map[string]bool{}, dailyCap: 200, perOwner: map[string]int{}, idem: map[string]idemEntry{}}
+	f := &Fake{Token: token, notAccepting: map[string]bool{}, limited: map[string]bool{}, dailyCap: 200, perOwner: map[string]int{},
+		idem: map[string]idemEntry{}, contacts: map[string]map[string]string{}, receipts: map[[32]byte][2]string{}, refs: map[string]string{}}
 	f.Server = httptest.NewUnstartedServer(http.HandlerFunc(f.serve))
 	f.Server.Config.ConnState = func(c net.Conn, st http.ConnState) {
 		if st == http.StateNew {
@@ -99,25 +103,45 @@ func New(token string) *Fake {
 	return f
 }
 
-// SetMode changes how the fake answers. status is used by Status;
-// retryAfter is sent with it when not "".
+// SetMode changes how the fake answers; status (and retryAfter, when not
+// "") are used by Status.
 func (f *Fake) SetMode(m Mode, status int, retryAfter string) {
 	f.mu.Lock()
 	f.mode, f.forceStatus, f.retryAfter = m, status, retryAfter
 	f.mu.Unlock()
 }
 
-// SetAccepting sets whether owner's writes are accepted.
+// SetAccepting sets whether owner is accepting.
 func (f *Fake) SetAccepting(owner string, ok bool) {
 	f.mu.Lock()
 	f.notAccepting[owner] = !ok
 	f.mu.Unlock()
 }
 
-// SetDailyCap sets the per-owner submission cap.
-func (f *Fake) SetDailyCap(n int) { f.mu.Lock(); f.dailyCap = n; f.mu.Unlock() }
+// SetCardLimitReached spends owner's daily cards (the next is 429).
+func (f *Fake) SetCardLimitReached(owner string) {
+	f.mu.Lock()
+	f.limited[owner] = true
+	f.mu.Unlock()
+}
 
-// Got is every submission accepted, in order (a replayed key once).
+// Given is contactsapi.Target.Given for this fake: the contract's
+// preconditions, for owner.
+func (f *Fake) Given(given, owner string) error {
+	switch given {
+	case contactsapi.GivenOwnerRedeemed, contactsapi.GivenOwnerExpired:
+		f.SetAccepting(owner, true)
+	case contactsapi.GivenOwnerRevoked, contactsapi.GivenCollectOff:
+		f.SetAccepting(owner, false)
+	case contactsapi.GivenCardLimitReached:
+		f.SetCardLimitReached(owner)
+	default:
+		return contactsapi.ErrUnsupportedGiven
+	}
+	return nil
+}
+
+// Got is every submission kept, in order (a replayed key once).
 func (f *Fake) Got() []Received {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -131,7 +155,7 @@ func (f *Fake) Requests() []Request {
 	return append([]Request(nil), f.requests...)
 }
 
-// Count is how many requests to path the fake saw (prefix match).
+// Count is how many requests to a path with this prefix the fake saw.
 func (f *Fake) Count(method, pathPrefix string) int {
 	n := 0
 	for _, r := range f.Requests() {
@@ -153,17 +177,27 @@ func (f *Fake) Close() {
 	f.Server.Close()
 }
 
-func errBody(w http.ResponseWriter, code int, msg string) {
+func answer(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func refuse(w http.ResponseWriter, code int, msg string) {
+	answer(w, code, contactsapi.ErrorAnswer{Error: msg})
+}
+
+func random(n int) string {
+	b := make([]byte, n)
+	_, _ = rand.Read(b)
+	return base64.RawURLEncoding.EncodeToString(b)
 }
 
 func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
-	raw, _ := io.ReadAll(io.LimitReader(r.Body, 64<<10))
+	raw, tooBig := io.ReadAll(http.MaxBytesReader(w, r.Body, contactsapi.MaxBody))
 	f.mu.Lock()
-	f.requests = append(f.requests, Request{Method: r.Method, Path: r.URL.Path, Auth: r.Header.Get("Authorization"), Key: r.Header.Get("Idempotency-Key"),
-		ContentType: r.Header.Get("Content-Type"), Body: raw})
+	f.requests = append(f.requests, Request{Method: r.Method, Path: r.URL.Path, Auth: r.Header.Get("Authorization"),
+		Key: r.Header.Get(contactsapi.IdempotencyHeader), ContentType: r.Header.Get("Content-Type"), Body: raw})
 	mode, force, ra := f.mode, f.forceStatus, f.retryAfter
 	f.mu.Unlock()
 	switch mode {
@@ -174,111 +208,199 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		if ra != "" {
 			w.Header().Set("Retry-After", ra)
 		}
-		errBody(w, force, http.StatusText(force))
+		refuse(w, force, http.StatusText(force))
 		return
 	}
 	tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !ok || subtle.ConstantTimeCompare([]byte(tok), []byte(f.Token)) != 1 {
-		errBody(w, http.StatusUnauthorized, "unauthorised")
+		refuse(w, http.StatusUnauthorized, contactsapi.ErrUnauthorised)
+		return
+	}
+	var mbe *http.MaxBytesError
+	if errors.As(tooBig, &mbe) {
+		refuse(w, http.StatusRequestEntityTooLarge, contactsapi.ErrBodyTooLarge)
 		return
 	}
 	switch {
-	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, contacts.PathOwners):
-		owner := strings.TrimPrefix(r.URL.Path, contacts.PathOwners)
-		if !validOwner(owner) {
-			errBody(w, http.StatusNotFound, "not accepting")
-			return
-		}
-		f.mu.Lock()
-		no := f.notAccepting[owner]
-		f.mu.Unlock()
-		if no {
-			errBody(w, http.StatusNotFound, "not accepting")
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"accepting":true}`+"\n")
-	case r.Method == http.MethodPost && r.URL.Path == contacts.PathSubmissions:
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, contactsapi.RouteOwner):
+		f.owner(w, strings.TrimPrefix(r.URL.Path, contactsapi.RouteOwner))
+	case r.Method == http.MethodPost && r.URL.Path == contactsapi.RouteSubmissions:
 		f.submission(w, r, raw)
+	case r.Method == http.MethodPost && r.URL.Path == contactsapi.RouteReceiptsCheck:
+		f.receipt(w, raw)
+	case r.Method == http.MethodPost && r.URL.Path == contactsapi.RouteAttendance:
+		f.attendance(w, r, raw)
 	default:
-		errBody(w, http.StatusNotFound, "not found")
+		refuse(w, http.StatusNotFound, contactsapi.ErrNotFoundRoute)
 	}
 }
 
-func validOwner(s string) bool {
-	if len(s) != 22 {
+func strict(raw []byte, v any) bool {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	return dec.Decode(v) == nil
+}
+
+func fieldErr(w http.ResponseWriter, err error) {
+	var fe contactsapi.FieldError
+	if errors.As(err, &fe) {
+		answer(w, http.StatusBadRequest, contactsapi.ErrorAnswer{Error: contactsapi.ErrInvalidField, Field: fe.Field})
+		return
+	}
+	refuse(w, http.StatusBadRequest, contactsapi.ErrBadBody)
+}
+
+func (f *Fake) owner(w http.ResponseWriter, owner string) {
+	if !contactsapi.ValidSubject(owner) {
+		refuse(w, http.StatusBadRequest, contactsapi.ErrBadOwner)
+		return
+	}
+	f.mu.Lock()
+	no := f.notAccepting[owner]
+	f.mu.Unlock()
+	if no {
+		refuse(w, http.StatusNotFound, contactsapi.ErrNotAccepting)
+		return
+	}
+	answer(w, http.StatusOK, contactsapi.OwnerAnswer{Accepting: true})
+}
+
+// replay answers a key seen before: the stored answer for the same body,
+// 409 for another. It reports whether it answered.
+func (f *Fake) replay(w http.ResponseWriter, owner, key string, sum [32]byte) bool {
+	prev, ok := f.idem[owner+"\x00"+key]
+	if !ok {
 		return false
 	}
-	for _, c := range s {
-		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
-			return false
-		}
+	if prev.sum != sum {
+		refuse(w, http.StatusConflict, contactsapi.ErrKeyReused)
+		return true
 	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(prev.status)
+	_, _ = w.Write(prev.body)
 	return true
 }
 
+func (f *Fake) remember(w http.ResponseWriter, owner, key string, sum [32]byte, status int, v any) {
+	var body []byte
+	if v != nil {
+		body, _ = json.Marshal(v)
+		body = append(body, '\n')
+		w.Header().Set("Content-Type", "application/json")
+	}
+	f.idem[owner+"\x00"+key] = idemEntry{sum: sum, status: status, body: body}
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
+}
+
 func (f *Fake) submission(w http.ResponseWriter, r *http.Request, raw []byte) {
-	if len(raw) > 4<<10 {
-		errBody(w, http.StatusBadRequest, "body too large")
+	var s contactsapi.Submission
+	if !strict(raw, &s) {
+		refuse(w, http.StatusBadRequest, contactsapi.ErrBadBody)
 		return
 	}
-	var s contacts.Submission
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&s); err != nil {
-		errBody(w, http.StatusBadRequest, "body")
+	_, address, key, _, err := s.Check()
+	if err != nil {
+		fieldErr(w, err)
 		return
 	}
-	key := r.Header.Get("Idempotency-Key")
-	if key == "" || key != s.Key() {
-		errBody(w, http.StatusBadRequest, "Idempotency-Key")
-		return
-	}
-	if !validOwner(s.Owner) {
-		errBody(w, http.StatusBadRequest, "owner")
-		return
-	}
-	if _, err := lobby.CleanName(s.Name); err != nil {
-		errBody(w, http.StatusBadRequest, "name")
-		return
-	}
-	if e, err := contacts.CleanEmail(s.Email); err != nil || e != s.Email {
-		errBody(w, http.StatusBadRequest, "email")
+	ikey := r.Header.Get(contactsapi.IdempotencyHeader)
+	if ikey != contactsapi.KeyForCard(s.CardID) {
+		refuse(w, http.StatusBadRequest, contactsapi.ErrKey)
 		return
 	}
 	sum := sha256.Sum256(raw)
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	ik := s.Owner + "\x00" + key
-	if prev, ok := f.idem[ik]; ok {
-		if prev.sum != sum {
-			errBody(w, http.StatusConflict, "idempotency key reused with another body")
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(prev.status)
-		_, _ = w.Write(prev.body)
+	if f.replay(w, s.Owner, ikey, sum) {
 		return
 	}
-	if f.notAccepting[s.Owner] {
-		errBody(w, http.StatusNotFound, "not accepting")
-		return
-	}
-	if f.perOwner[s.Owner] >= f.dailyCap {
+	if f.limited[s.Owner] || f.perOwner[s.Owner] >= f.dailyCap {
 		w.Header().Set("Retry-After", "3600")
-		errBody(w, http.StatusTooManyRequests, "too many submissions")
+		refuse(w, http.StatusTooManyRequests, contactsapi.ErrTooManyCards)
 		return
 	}
-	f.perOwner[s.Owner]++
-	f.got = append(f.got, Received{Key: key, Body: s})
-	b := make([]byte, 32)
-	_, _ = rand.Read(b)
-	body, _ := json.Marshal(map[string]string{"receipt": base64.RawURLEncoding.EncodeToString(b)})
-	body = append(body, '\n')
-	f.idem[ik] = idemEntry{sum: sum, status: http.StatusAccepted, body: body}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
-	_, _ = w.Write(body)
+	receipt := random(32)
+	// Not accepting: answered exactly as an accepted card, and dropped (the
+	// receipt is never stored, so it checks unknown).
+	if !f.notAccepting[s.Owner] {
+		f.perOwner[s.Owner]++
+		book := f.contacts[s.Owner]
+		if book == nil {
+			book = map[string]string{}
+			f.contacts[s.Owner] = book
+		}
+		ref, ok := book[key]
+		if !ok {
+			ref = random(16)
+			book[key] = ref
+			f.refs[ref] = s.Owner
+		}
+		f.receipts[sha256.Sum256([]byte(receipt))] = [2]string{s.Owner, ref}
+		s.Email = address
+		f.got = append(f.got, Received{Key: ikey, Body: s})
+	}
+	f.remember(w, s.Owner, ikey, sum, http.StatusAccepted, contactsapi.SubmissionAnswer{Receipt: receipt})
+}
+
+func (f *Fake) receipt(w http.ResponseWriter, raw []byte) {
+	var rc contactsapi.ReceiptCheck
+	if !strict(raw, &rc) {
+		refuse(w, http.StatusBadRequest, contactsapi.ErrBadBody)
+		return
+	}
+	if !contactsapi.ValidSubject(rc.Owner) {
+		fieldErr(w, contactsapi.FieldError{Field: "owner"})
+		return
+	}
+	if !contactsapi.ValidReceipt(rc.Receipt) {
+		fieldErr(w, contactsapi.FieldError{Field: "receipt"})
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.notAccepting[rc.Owner] {
+		refuse(w, http.StatusNotFound, contactsapi.ErrNotAccepting)
+		return
+	}
+	if got, ok := f.receipts[sha256.Sum256([]byte(rc.Receipt))]; ok && got[0] == rc.Owner {
+		answer(w, http.StatusOK, contactsapi.ReceiptAnswer{Known: true, ContactRef: got[1]})
+		return
+	}
+	answer(w, http.StatusOK, contactsapi.ReceiptAnswer{Known: false})
+}
+
+func (f *Fake) attendance(w http.ResponseWriter, r *http.Request, raw []byte) {
+	var a contactsapi.Attendance
+	if !strict(raw, &a) {
+		refuse(w, http.StatusBadRequest, contactsapi.ErrBadBody)
+		return
+	}
+	if _, err := a.Check(); err != nil {
+		fieldErr(w, err)
+		return
+	}
+	ikey := r.Header.Get(contactsapi.IdempotencyHeader)
+	if ikey != contactsapi.KeyForAttendance(a.Meeting.ID, a.Participant.ID) {
+		refuse(w, http.StatusBadRequest, contactsapi.ErrKey)
+		return
+	}
+	sum := sha256.Sum256(raw)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.replay(w, a.Owner, ikey, sum) {
+		return
+	}
+	if f.notAccepting[a.Owner] {
+		refuse(w, http.StatusNotFound, contactsapi.ErrNotAccepting)
+		return
+	}
+	if f.refs[a.ContactRef] != a.Owner {
+		refuse(w, http.StatusNotFound, contactsapi.ErrNoSuchContact)
+		return
+	}
+	f.remember(w, a.Owner, ikey, sum, http.StatusNoContent, nil)
 }
 
 // Wait polls until cond holds or d passes; it reports whether it held.

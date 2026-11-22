@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"regexp"
 	"time"
@@ -74,6 +76,11 @@ func (s *Store) OfferCard(ctx context.Context, pid string, now time.Time) (CardO
 // Card is an offered, unexpired card as the card routes see it: who it is
 // for, and the meeting it was for.
 type Card struct {
+	// CardID is the card's PUBLIC id: its stored SHA-256, base64url (43
+	// characters, contactsapi.ValidCardID). It names the card to contacts
+	// (and keys the submission, card:<CardID>) without the secret the
+	// guest's page holds ever leaving meetings.
+	CardID        string
 	ParticipantID string
 	Identity      string
 	TypedName     string
@@ -89,17 +96,23 @@ type Card struct {
 }
 
 // cardCols reads a Card from participants p, meetings m and owners o.
-const cardCols = `p.id, p.identity, p.display_name, p.admitted_at, p.left_at, m.id, m.title, m.created_at, m.started_at, m.ended_at, m.subject, o.display_name`
+const cardCols = `p.card_sha256, p.id, p.identity, p.display_name, p.admitted_at, p.left_at, m.id, m.title, m.created_at, m.started_at, m.ended_at, m.subject, o.display_name`
 
 func scanCard(sc interface{ Scan(...any) error }) (Card, error) {
 	var c Card
 	var admitted, left, started, ended sql.NullInt64
 	var created int64
-	if err := sc.Scan(&c.ParticipantID, &c.Identity, &c.TypedName, &admitted, &left, &c.MeetingID, &c.Title, &created, &started, &ended, &c.Subject, &c.OwnerName); err != nil {
+	var sum string
+	if err := sc.Scan(&sum, &c.ParticipantID, &c.Identity, &c.TypedName, &admitted, &left, &c.MeetingID, &c.Title, &created, &started, &ended, &c.Subject, &c.OwnerName); err != nil {
 		return Card{}, err
 	}
 	c.AdmittedAt, c.LeftAt, c.StartedAt, c.EndedAt = fromMS(admitted), fromMS(left), fromMS(started), fromMS(ended)
 	c.CreatedAt = time.UnixMilli(created).UTC()
+	raw, err := hex.DecodeString(sum)
+	if err != nil || len(raw) != 32 {
+		return Card{}, errors.New("store: a card's hash is not a SHA-256")
+	}
+	c.CardID = base64.RawURLEncoding.EncodeToString(raw)
 	return c, nil
 }
 

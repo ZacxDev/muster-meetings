@@ -6,12 +6,16 @@ package server_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ZacxDev/muster-contacts/contactsapi"
 
 	"github.com/ZacxDev/muster-meetings/internal/contacts"
 	"github.com/ZacxDev/muster-meetings/internal/contactstest"
@@ -321,7 +325,7 @@ func TestCardSendWritesOneOutboxRowAndSkipWritesNone(t *testing.T) {
 	e.server.Outbox().Pass(context.Background())
 	recv := f.Got()
 	if len(recv) != 1 || recv[0].Body.Name != cName || recv[0].Body.Email != cEmail || recv[0].Body.Owner != e.subject(ada) ||
-		recv[0].Body.Meeting.ID != c.ID || recv[0].Body.Participant.TypedName != cName || recv[0].Key != "card:"+e.pidAny(c, cName) {
+		recv[0].Body.Meeting.ID != c.ID || recv[0].Body.Participant.TypedName != cName || recv[0].Key != "card:"+publicCardID(send.ID) || recv[0].Body.CardID != publicCardID(send.ID) {
 		t.Fatalf("contacts got %+v", recv)
 	}
 	if e.outboxRows() != 0 {
@@ -423,7 +427,7 @@ func TestCardAnswerIsUniformWhateverContactsDoes(t *testing.T) {
 
 // ---- limits ----
 
-func TestCardLimitsPerAddressAndPerMeeting(t *testing.T) {
+func TestCardLimitPerAddress(t *testing.T) {
 	e, _ := newCardEnv(t)
 	c := e.meeting(ada)
 	_, s := e.inCall(c, cName)
@@ -438,17 +442,9 @@ func TestCardLimitsPerAddressAndPerMeeting(t *testing.T) {
 	if resp, raw := e.do("POST", "/card", "", bad, "X-Forwarded-For", "203.0.113.9"); resp.StatusCode != 429 || !strings.Contains(string(raw), server.CardTooMany) {
 		t.Fatalf("post %d from one address = %d %s, want 429", server.CardPostsPerAddress+1, resp.StatusCode, raw)
 	}
-	// Per meeting: from fresh addresses, until the meeting's own cap. The
-	// address cap's ten above count against it too.
-	n := server.CardPostsPerAddress
-	for i := 0; n < server.CardPostsPerMeeting; i++ {
-		if resp, _ := e.do("POST", "/card", "", bad, "X-Forwarded-For", fmt.Sprintf("198.51.100.%d", 10+i)); resp.StatusCode != 400 {
-			t.Fatalf("post %d on the meeting = %d", n+1, resp.StatusCode)
-		}
-		n++
-	}
-	if resp, raw := e.do("POST", "/card", "", bad, "X-Forwarded-For", "192.0.2.200"); resp.StatusCode != 429 || !strings.Contains(string(raw), server.CardTooMany) {
-		t.Fatalf("post %d on one meeting from a fresh address = %d %s, want 429", server.CardPostsPerMeeting+1, resp.StatusCode, raw)
+	// Another address is not limited by the first one's posts.
+	if resp, _ := e.do("POST", "/card", "", bad, "X-Forwarded-For", "198.51.100.10"); resp.StatusCode != 400 {
+		t.Fatalf("a fresh address = %d, want 400 (its own bucket)", resp.StatusCode)
 	}
 }
 
@@ -561,5 +557,38 @@ func TestNoContactsURLEmptiesTheOutboxOnBoot(t *testing.T) {
 	ec.server.RunContactsForTest(context.Background())
 	if n := ec.outboxRows(); n != 1 {
 		t.Fatalf("control: a configured boot left %d rows, want 1", n)
+	}
+}
+
+// publicCardID is what meetings names a card to contacts by: the card's
+// SHA-256, base64url (never the secret the guest's page holds).
+func publicCardID(secret string) string {
+	h := sha256.Sum256([]byte(secret))
+	return base64.RawURLEncoding.EncodeToString(h[:])
+}
+
+// The card's fields are the contacts plugin's rules: every name and email
+// of its fields.json is accepted or refused by meetings exactly as the
+// table says, and sent as the table's cleaned name and address.
+func TestCardFieldsFollowTheContractsFieldTable(t *testing.T) {
+	f, err := contactsapi.LoadFields()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Names) < 5 || len(f.Emails) < 20 {
+		t.Fatalf("the field table has %d names and %d emails", len(f.Names), len(f.Emails))
+	}
+	const okEmail, okName = "wren.okafor@example.test", "Wren Okafor"
+	for _, n := range f.Names {
+		got, _, field := server.CardFields(n.Input, okEmail)
+		if n.OK != (field == "") || (n.OK && got != n.Clean) || (!n.OK && field != "name") {
+			t.Errorf("name %q: got %q, refused %q; the contract says ok %v as %q", n.Input, got, field, n.OK, n.Clean)
+		}
+	}
+	for _, m := range f.Emails {
+		_, got, field := server.CardFields(okName, m.Input)
+		if m.OK != (field == "") || (m.OK && got != m.Address) || (!m.OK && field != "email") {
+			t.Errorf("email %q: got %q, refused %q; the contract says ok %v as %q", m.Input, got, field, m.OK, m.Address)
+		}
 	}
 }

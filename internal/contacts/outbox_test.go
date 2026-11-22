@@ -3,6 +3,7 @@ package contacts_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log"
 	"net/http"
@@ -15,6 +16,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/ZacxDev/muster-contacts/contactsapi"
 
 	"github.com/ZacxDev/muster-meetings/internal/contacts"
 	"github.com/ZacxDev/muster-meetings/internal/contactstest"
@@ -56,16 +59,22 @@ type syncBuf struct {
 func (s *syncBuf) Write(p []byte) (int, error) { s.mu.Lock(); defer s.mu.Unlock(); return s.b.Write(p) }
 func (s *syncBuf) String() string              { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }
 
+// pad makes a card id the contract's 43 characters.
+func pad(s string) string { return s + strings.Repeat("x", 43-len(s)) }
+
 // item is a submission row for card cardID, holding the fixture guest.
 func item(t *testing.T, cardID string) store.OutboxItem {
 	t.Helper()
-	sub := contacts.Submission{Owner: fxOwner, CardID: cardID, Meeting: contacts.Meeting{ID: "mEeT1nG0id00bbbb", Title: "Outbox test"},
-		Participant: contacts.Participant{ID: cardID, Identity: "guest-x", TypedName: "Otto"}, Name: fxName, Email: fxEmail}
-	b, err := sub.Body()
+	sub := contactsapi.Submission{Owner: fxOwner, CardID: pad(cardID), Meeting: contactsapi.Meeting{ID: "mEeT1nG0id00bbbb", Title: "Outbox test"},
+		Participant: contactsapi.Participant{ID: cardID, Identity: "guest-x", TypedName: "Otto"}, Name: fxName, Email: fxEmail}
+	if _, _, _, _, err := sub.Check(); err != nil {
+		t.Fatalf("the fixture is not a valid submission: %v", err)
+	}
+	b, err := json.Marshal(sub)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return store.OutboxItem{Key: sub.Key(), Kind: "submission", Path: contacts.PathSubmissions, Body: b}
+	return store.OutboxItem{Key: contactsapi.KeyForCard(sub.CardID), Kind: "submission", Path: contacts.PathSubmissions, Body: b}
 }
 
 type rig struct {
@@ -245,7 +254,7 @@ func TestTheOutboxDeliversInOrderAndOneFailureHoldsNothingBack(t *testing.T) {
 		mu.Lock()
 		order = append(order, k)
 		mu.Unlock()
-		if k == "card:cardBBBBBBBBBBBB" {
+		if k == "card:"+pad("cardBBBBBBBBBBBB") {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
@@ -260,12 +269,12 @@ func TestTheOutboxDeliversInOrderAndOneFailureHoldsNothingBack(t *testing.T) {
 	if n := r.ob.Pass(context.Background()); n != 2 {
 		t.Errorf("delivered %d, want 2", n)
 	}
-	want := []string{"card:cardCCCCCCCCCCCC", "card:cardBBBBBBBBBBBB", "card:cardAAAAAAAAAAAA"}
+	want := []string{"card:" + pad("cardCCCCCCCCCCCC"), "card:" + pad("cardBBBBBBBBBBBB"), "card:" + pad("cardAAAAAAAAAAAA")}
 	if strings.Join(order, " ") != strings.Join(want, " ") {
 		t.Errorf("order %v, want %v (insertion order)", order, want)
 	}
 	due, _ := r.st.DueOutbox(context.Background(), r.clk.Now().Add(time.Hour), 10)
-	if len(due) != 1 || due[0].Key != "card:cardBBBBBBBBBBBB" {
+	if len(due) != 1 || due[0].Key != "card:"+pad("cardBBBBBBBBBBBB") {
 		t.Errorf("left %+v, want the failed row alone", due)
 	}
 }

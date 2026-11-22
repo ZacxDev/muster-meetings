@@ -19,12 +19,11 @@
 // in the outbox and nowhere else; log lines carry event names, statuses and
 // counts only, never a body, a name, an email, a subject or a token.
 //
-// The API meetings calls is the design's ("The contacts API", "Routes"),
-// pinned for this repository by testdata/contract.json: the request shapes
-// meetings sends and the answers it must handle. That file is meetings' own
-// copy of the contract; the contacts plugin's machine-readable contract
-// replaces it when the two are reconciled (contract_test.go reads only the
-// file, so a swap is a file copy).
+// The API is the contacts plugin's own contract, imported at a pinned
+// version (github.com/ZacxDev/muster-contacts/contactsapi in go.mod): its
+// routes, wire types and field checks are what meetings sends and checks,
+// and contract_test.go runs its contract table against internal/contactstest,
+// the fake every other test talks to.
 package contacts
 
 import (
@@ -40,14 +39,16 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ZacxDev/muster-contacts/contactsapi"
 )
 
-// The routes (design: "Routes"). Phase 1b calls the first two.
+// The routes phase 1b calls (contactsapi's).
 const (
 	// PathOwners is GET /v1/owners/{owner}: 200 accepting, 404 not.
-	PathOwners = "/v1/owners/"
+	PathOwners = contactsapi.RouteOwner
 	// PathSubmissions is POST /v1/submissions: a guest's card.
-	PathSubmissions = "/v1/submissions"
+	PathSubmissions = contactsapi.RouteSubmissions
 )
 
 // CallTimeout bounds every call to contacts (design: "with a 3 s timeout").
@@ -156,7 +157,7 @@ func (c *Client) do(ctx context.Context, method, path, key string, body []byte) 
 		req.Header.Set("Content-Type", "application/json")
 	}
 	if key != "" {
-		req.Header.Set("Idempotency-Key", key)
+		req.Header.Set(contactsapi.IdempotencyHeader, key)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {

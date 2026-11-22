@@ -8,8 +8,9 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
+
+	"github.com/ZacxDev/muster-contacts/contactsapi"
 
 	"github.com/ZacxDev/muster-meetings/internal/contacts"
 	"github.com/ZacxDev/muster-meetings/internal/lobby"
@@ -58,14 +59,30 @@ func CardSentMessage(owner string) string {
 	return "Sent to " + owner + "."
 }
 
+// CardEmailError is what the card says of an email contacts' rule refuses.
+const CardEmailError = "Type one email address, like name@example.com."
+
+// CardFields checks the card's two fields with the contacts plugin's own
+// rules (contactsapi.CleanName, contactsapi.CheckEmail, the contract's field
+// table), so nothing meetings accepts is refused by contacts and the other
+// way round. It returns the name and the address as they are sent, or the
+// JSON name of the first field refused.
+func CardFields(name, email string) (cleanName, address, field string) {
+	n, err := contactsapi.CleanName(name)
+	if err != nil {
+		return "", "", "name"
+	}
+	a, _, err := contactsapi.CheckEmail(email)
+	if err != nil {
+		return "", "", "email"
+	}
+	return n, a, ""
+}
+
 // The card limits (design: "Abuse and rate limits").
 const (
 	// CardPostsPerAddress per CardWindow from one source address.
 	CardPostsPerAddress = 10
-	// CardPostsPerMeeting per CardWindow on one meeting's cards: the most a
-	// meeting's admitted guests (at most store.MaxAdmittedGuests at once)
-	// plausibly need, with room for typos.
-	CardPostsPerMeeting = 30
 	CardWindow          = 10 * time.Minute
 	// cardBody is the largest card request.
 	cardBody = 2048
@@ -77,12 +94,11 @@ type contactsSide struct {
 	accepting *contacts.Accepting
 	outbox    *contacts.Outbox
 	byAddr    *lobby.Limiter
-	byMeeting *keyLimiter
 }
 
 func newContactsSide(c *contacts.Client, st *store.Store, cfg Config) *contactsSide {
 	return &contactsSide{client: c, accepting: contacts.NewAccepting(c, cfg.Log, cfg.Now), outbox: contacts.NewOutbox(c, st, cfg.Log, cfg.Now),
-		byAddr: lobby.NewLimiterOf(CardPostsPerAddress, CardWindow), byMeeting: &keyLimiter{max: CardPostsPerMeeting, window: CardWindow}}
+		byAddr: lobby.NewLimiterOf(CardPostsPerAddress, CardWindow)}
 }
 
 // touchContacts asks contacts, in the background and at most once a minute
@@ -148,11 +164,10 @@ func cardIn(w http.ResponseWriter, r *http.Request, v any) bool {
 	return true
 }
 
-// cardLimit counts one card post from r's address and on meeting, and
-// writes the 429 when either is past its limit.
-func (s *Server) cardLimit(w http.ResponseWriter, r *http.Request, meetingID string) bool {
-	now := s.cfg.Now()
-	if !s.contacts.byAddr.Allow(s.clientAddr(r), now) || !s.contacts.byMeeting.Allow(meetingID, now) {
+// cardLimit counts one card post from r's address, and writes the 429 when
+// it is past the limit.
+func (s *Server) cardLimit(w http.ResponseWriter, r *http.Request) bool {
+	if !s.contacts.byAddr.Allow(s.clientAddr(r), s.cfg.Now()) {
 		w.Header().Set("Retry-After", "600")
 		guestErr(w, http.StatusTooManyRequests, CardTooMany)
 		return false
@@ -177,31 +192,26 @@ func (s *Server) handleCard(w http.ResponseWriter, r *http.Request) {
 	if !cardIn(w, r, &in) {
 		return
 	}
-	now := s.cfg.Now()
-	c, err := s.store.CardByID(r.Context(), in.ID, now)
-	if errors.Is(err, store.ErrNotFound) {
-		// Counted against the address all the same: guessing ids costs.
-		if s.cardLimit(w, r, "") {
-			guestErr(w, http.StatusNotFound, CardExpired)
-		}
+	// Every post counts against the address, a guessed id included.
+	if !s.cardLimit(w, r) {
 		return
 	}
-	if err != nil {
+	now := s.cfg.Now()
+	if _, err := s.store.CardByID(r.Context(), in.ID, now); errors.Is(err, store.ErrNotFound) {
+		guestErr(w, http.StatusNotFound, CardExpired)
+		return
+	} else if err != nil {
 		s.cfg.Log.Printf("card: %v", err)
 		guestErr(w, http.StatusInternalServerError, "Something went wrong. Try again in a moment.")
 		return
 	}
-	if !s.cardLimit(w, r, c.MeetingID) {
-		return
-	}
-	name, err := lobby.CleanName(in.Name)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": lobby.ErrName.Error(), "field": "name"})
-		return
-	}
-	email, err := contacts.CleanEmail(in.Email)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": contacts.ErrEmail.Error(), "field": "email"})
+	name, email, field := CardFields(in.Name, in.Email)
+	if field != "" {
+		msg := CardEmailError
+		if field == "name" {
+			msg = lobby.ErrName.Error()
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": msg, "field": field})
 		return
 	}
 	spent, err := s.store.SpendCard(r.Context(), in.ID, store.CardSent, now, func(c store.Card) (store.OutboxItem, error) {
@@ -232,15 +242,10 @@ func (s *Server) handleCardSkip(w http.ResponseWriter, r *http.Request) {
 	if !cardIn(w, r, &in) {
 		return
 	}
-	now := s.cfg.Now()
-	c, err := s.store.CardByID(r.Context(), in.ID, now)
-	meeting := ""
-	if err == nil {
-		meeting = c.MeetingID
-	}
-	if !s.cardLimit(w, r, meeting) {
+	if !s.cardLimit(w, r) {
 		return
 	}
+	now := s.cfg.Now()
 	if _, err := s.store.SpendCard(r.Context(), in.ID, store.CardSkipped, now, nil); errors.Is(err, store.ErrNotFound) {
 		guestErr(w, http.StatusNotFound, CardExpired)
 		return
@@ -250,46 +255,6 @@ func (s *Server) handleCardSkip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// keyLimiter is lobby.Limiter keyed by a string (a meeting id): max posts
-// per window. "" is never limited here (an unknown card has no meeting; the
-// address limit still counts it).
-type keyLimiter struct {
-	max    int
-	window time.Duration
-	mu     sync.Mutex
-	seen   map[string][]time.Time
-}
-
-func (l *keyLimiter) Allow(key string, now time.Time) bool {
-	if key == "" {
-		return true
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.seen == nil {
-		l.seen = map[string][]time.Time{}
-	}
-	if len(l.seen) > 10000 {
-		for k, ts := range l.seen {
-			if len(ts) == 0 || now.Sub(ts[len(ts)-1]) >= l.window {
-				delete(l.seen, k)
-			}
-		}
-	}
-	keep := l.seen[key][:0]
-	for _, t := range l.seen[key] {
-		if now.Sub(t) < l.window {
-			keep = append(keep, t)
-		}
-	}
-	if len(keep) >= l.max {
-		l.seen[key] = keep
-		return false
-	}
-	l.seen[key] = append(keep, now)
-	return true
 }
 
 // runContacts is the contacts side's background work, at Run's start. With

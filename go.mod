@@ -2,7 +2,11 @@ module github.com/ZacxDev/muster-meetings
 
 go 1.26.0
 
-require modernc.org/sqlite v1.62.0
+require (
+	github.com/ZacxDev/muster-contacts v0.0.0-20261122215757-15d715aef779
+	gopkg.in/yaml.v3 v3.0.1
+	modernc.org/sqlite v1.62.0
+)
 
 require (
 	github.com/dustin/go-humanize v1.1.0 // indirect
@@ -13,7 +17,6 @@ require (
 	golang.org/x/net v0.63.0 // indirect
 	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/text v0.44.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 	modernc.org/libc v1.80.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect

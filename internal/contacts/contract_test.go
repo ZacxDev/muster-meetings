@@ -23,6 +23,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -47,7 +49,7 @@ func TestContractRunsAgainstTheFake(t *testing.T) {
 	ran := contactsapi.RunContract(t, contactsapi.Target{URL: f.URL, Token: contractToken, Given: f.Given})
 	// Every case runs: the fake supports every precondition, so a skip here
 	// would be a case the fake is not held to.
-	if ran != len(c.Cases) || ran < 90 {
+	if ran != len(c.Cases) || ran < 70 {
 		t.Fatalf("%d of %d contract cases ran", ran, len(c.Cases))
 	}
 }
@@ -162,6 +164,50 @@ func TestContractTheRequestsMeetingsSends(t *testing.T) {
 // action, and it is the design's: 202 delivered; 400, 409, 413 refused for
 // good; 401 and 429 retried. A status the contract gains that this table
 // does not name fails here.
+// 🔴 Phase 1b enqueues submissions only. contacts_outbox's kind CHECK keeps
+// 'attendance' for phase 1c (migration 5 is one-way), but no code may write
+// one yet: contacts has no attendance route at the pinned contract, so such
+// a row would be refused (404) and dropped. Every non-test Go file of the
+// module is scanned for the kind as a Go string; the positive control is
+// this file, which must be found.
+func TestNothingEnqueuesAnAttendanceRow(t *testing.T) {
+	needle := `"` + "attendance" + `"`
+	var hits []string
+	control := false
+	err := filepath.WalkDir("../..", func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && (d.Name() == "node_modules" || d.Name() == ".git") {
+			return filepath.SkipDir
+		}
+		if d.IsDir() || !strings.HasSuffix(p, ".go") {
+			return nil
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		if strings.HasSuffix(p, "contract_test.go") && strings.Contains(string(b), "needle := `\"` + \"attendance\"") {
+			control = true
+			return nil
+		}
+		if !strings.HasSuffix(p, "_test.go") && strings.Contains(string(b), needle) {
+			hits = append(hits, p)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !control {
+		t.Fatal("the scan did not reach this file: it is reading the wrong tree")
+	}
+	if len(hits) > 0 {
+		t.Errorf("an attendance row can be written in phase 1b: %v", hits)
+	}
+}
+
 func TestContractEveryAnswerMeetingsHandles(t *testing.T) {
 	c, err := contactsapi.LoadContract()
 	if err != nil {

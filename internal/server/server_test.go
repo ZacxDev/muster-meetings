@@ -1378,15 +1378,16 @@ func TestTheAppPageCarriesNoInlineScript(t *testing.T) {
 			t.Errorf("%s page: %d scripts, want the kit's kit.js, ui.js, prefs.js, the LiveKit client, call.js and its own", name, len(scripts))
 		}
 		// The UI kit, from this origin's /kit/v1/ (kit.go), first.
-		if len(scripts) == 0 || string(scripts[0][0]) != `<script src="/kit/v1/kit.js"></script>` {
+		// (Each URL carries its version: assets_test.go.)
+		if len(scripts) == 0 || !regexp.MustCompile(`^<script src="/kit/v1/kit\.js\?v=[0-9a-f]{16}"></script>$`).Match(scripts[0][0]) {
 			t.Errorf("%s page: the first script is not /kit/v1/kit.js", name)
 		}
-		kitCSS := `<link rel="stylesheet" href="/kit/v1/kit.css">`
-		if !bytes.Contains(page, []byte(kitCSS)) || bytes.Index(page, []byte(kitCSS)) > bytes.Index(page, []byte(`href="/static/app.css"`)) {
+		kitCSS := `<link rel="stylesheet" href="/kit/v1/kit.css?v=`
+		if !bytes.Contains(page, []byte(kitCSS)) || bytes.Index(page, []byte(kitCSS)) > bytes.Index(page, []byte(`href="/static/app.css?v=`)) {
 			t.Errorf("%s page: kit.css is not linked from /kit/v1/ before app.css", name)
 		}
 		for _, m := range scripts {
-			if !regexp.MustCompile(`^<script src="/(static|kit/v1)/[a-z0-9./-]+\.js">$`).Match(m[0][:len(m[0])-len(m[1])-len("</script>")]) || len(bytes.TrimSpace(m[1])) != 0 {
+			if !regexp.MustCompile(`^<script src="/(static|kit/v1)/[a-z0-9./-]+\.js\?v=[0-9a-f]{16}">$`).Match(m[0][:len(m[0])-len(m[1])-len("</script>")]) || len(bytes.TrimSpace(m[1])) != 0 {
 				t.Errorf("%s page: script %s is not a file on this origin with no inline body: the CSP would block it", name, m[0])
 			}
 		}

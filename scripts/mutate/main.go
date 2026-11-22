@@ -145,6 +145,7 @@ const (
 	guestJS   = "internal/server/web/static/guest.js"
 	guestHTML = "internal/server/web/guest.html"
 	kitGo     = "internal/server/kit.go"
+	assetsGo  = "internal/server/assets.go"
 	kEgress   = "deploy/kubernetes/egress.yaml"
 	// phase 3c
 	nemGo = "internal/stt/nemotron.go"
@@ -892,8 +893,8 @@ var mutants = []mutant{
 		pkg: "./internal/stt", test: "TestAFallbackThatFailsToOpenIsLogged", want: "the log does not say the fallback failed"},
 
 	// ---- late closing marks (the server's `lead`: the previous line's mark) ----
-	{name: "late mark: the amend dropped", file: trans, from: "if id, changed, err := s.store.AmendLastLine(ctx, t.MeetingID, t.Identity, seg.Lead, stt.Marks); err != nil {",
-		to:  "if id, changed, err := int64(0), false, error(nil); err != nil {",
+	{name: "late mark: the amend dropped", file: trans, from: "id, out, err := s.store.AmendLastLine(ctx, t.MeetingID, t.Identity, seg.Lead, stt.Marks)",
+		to:  "id, out, err := int64(0), store.AmendNoLine, error(nil)",
 		pkg: "./internal/server", test: "TestALateClosingMarkAmendsThePreviousLineEverywhere", want: `the panel stopped short: lines ["Ada L.: Can everyone hear me clearly" "Ada L.: Alice will"]`},
 	{name: "late mark: another participant's line amended", file: segs, from: "WHERE meeting_id = ? AND identity = ? ORDER BY id DESC LIMIT 1`",
 		to:  "WHERE meeting_id = ? AND ? != '' ORDER BY id DESC LIMIT 1`",
@@ -964,7 +965,7 @@ var mutants = []mutant{
 	// ---- the UI pass, Go-side: the kit's CSP, the colour scan, the pinned kit ----
 	{name: "ui kit: the pages' CSP lets in muster's origin", file: srv, from: `src := "'self'"`, to: `src := "'self' " + s.cfg.MusterOrigin`,
 		pkg: "./internal/server", test: "TestNoPageMakesTheBrowserContactMuster", want: "the guest page's script-src"},
-	{name: "ui kit: the guest page links muster's kit", file: guestHTML, from: `<link rel="stylesheet" href="/kit/v1/kit.css">`, to: `<link rel="stylesheet" href="/ui-kit/v1/kit.css">`,
+	{name: "ui kit: the guest page links muster's kit", file: guestHTML, from: `<link rel="stylesheet" href="{{kit "kit.css"}}">`, to: `<link rel="stylesheet" href="/ui-kit/v1/kit.css">`,
 		pkg: "./internal/server", test: "TestNoPageMakesTheBrowserContactMuster", want: "the guest page's HTML references muster's origin or its kit path"},
 	{name: "ui kit: no timeout on the upstream fetch", file: kitGo, from: "ctx, cancel := context.WithTimeout(context.Background(), k.timeout)", to: "ctx, cancel := context.WithCancel(context.Background())",
 		pkg: "./internal/server", test: "TestTheKitFallsBackQuicklyWhenMusterIsDownOrSlow", want: "muster hanging 10 s"},
@@ -1018,6 +1019,39 @@ var mutants = []mutant{
 		e2e: "ui-remember.spec.ts", test: "unanswered camera prompt", want: "pending"},
 	{name: "ui: an amend (a late closing mark) not drawn", file: callJS, from: "if (text) text.textContent = a.text;", to: "if (false) text.textContent = a.text;",
 		e2e: "late-marks.spec.ts", test: "late .* in place on every open panel", want: `Expected: "Can everyone hear me clearly?"`},
+
+	// ---- the lead log (one line per final with a lead: ids and times, never text) ----
+	{name: "lead log: not logged", file: trans, from: "\t\t\ts.logLead(t, seg.Lead, start, end, id, out, err)\n", to: "",
+		pkg: "./internal/server", test: "TestEachLeadIsLoggedWithIdsAndTimesAndNoText", want: "0 lead log lines, want 1"},
+	{name: "lead log: the final's words logged", file: trans, from: "s.logLead(t, seg.Lead, start, end, id, out, err)", to: "s.logLead(t, seg.Lead+\" \"+seg.Text, start, end, id, out, err)",
+		more: []edit{{trans, "stt.CleanLead(lead), t.MeetingID", "lead, t.MeetingID"}},
+		pkg:  "./internal/server", test: "TestEachLeadIsLoggedWithIdsAndTimesAndNoText", want: `the log holds "Xylophone", a word of the transcript`},
+	{name: "lead log: the log site does not clean the lead", file: trans, from: "stt.CleanLead(lead), t.MeetingID", to: "lead, t.MeetingID",
+		pkg: "./internal/server", test: "TestTheLeadLogCleansTheLeadItself", want: "a letter of the lead reached the log"},
+	{name: "lead log: the wrong segment named", file: trans, from: `what := fmt.Sprintf("amended segment %d", id)`, to: `what := fmt.Sprintf("amended segment %d", id+1)`,
+		pkg: "./internal/server", test: "TestEachLeadIsLoggedWithIdsAndTimesAndNoText", want: "amended segment 2"},
+	{name: "lead log: why a lead was dropped not said", file: trans, from: `what = "dropped: " + string(out)`, to: `what = "dropped"`,
+		pkg: "./internal/server", test: "TestEachLeadIsLoggedWithIdsAndTimesAndNoText", want: `ms: dropped": fields`},
+	{name: "lead log: the final's times not the stored line's", file: trans, from: "stt.CleanLead(lead), t.MeetingID, t.Track, start, end, what)", to: "stt.CleanLead(lead), t.MeetingID, t.Track, start+1, end, what)",
+		pkg: "./internal/server", test: "TestEachLeadIsLoggedWithIdsAndTimesAndNoText", want: "fields"},
+
+	// ---- asset versions (a deploy is a new URL; the pages are never cached) ----
+	{name: "asset versions: guest.js unversioned on the guest page", file: guestHTML, from: `<script src="{{asset "guest.js"}}"></script>`, to: `<script src="/static/guest.js"></script>`,
+		pkg: "./internal/server", test: "TestEveryAssetAPageReferencesCarriesItsVersion", want: "the guest's join page: /static/guest.js is not versioned"},
+	{name: "asset versions: kit.css unversioned on the owner's page", file: appHTML, from: `<link rel="stylesheet" href="{{kit "kit.css"}}">`, to: `<link rel="stylesheet" href="/kit/v1/kit.css">`,
+		pkg: "./internal/server", test: "TestEveryAssetAPageReferencesCarriesItsVersion", want: "the owner's app: /kit/v1/kit.css is not versioned"},
+	{name: "asset versions: the guest page served with max-age", file: guest, from: `h.Set("Cache-Control", "no-store")`, to: `h.Set("Cache-Control", "max-age=14400")`,
+		pkg: "./internal/server", test: "TestPagesAreNeverCachedAndAssetsAreRevalidated", want: `the guest's join page: Cache-Control "max-age=14400"`},
+	{name: "asset versions: the owner's page served with max-age", file: srv, from: `h.Set("Cache-Control", "no-store")`, to: `h.Set("Cache-Control", "max-age=14400")`,
+		pkg: "./internal/server", test: "TestPagesAreNeverCachedAndAssetsAreRevalidated", want: `the owner's app: Cache-Control "max-age=14400"`},
+	{name: "asset versions: a static file served with max-age", file: assetsGo, from: `h.Set("Cache-Control", "no-cache")`, to: `h.Set("Cache-Control", "max-age=14400")`,
+		pkg: "./internal/server", test: "TestPagesAreNeverCachedAndAssetsAreRevalidated", want: `Cache-Control "max-age=14400", want 200 no-cache`},
+	{name: "asset versions: no ETag sent", file: assetsGo, from: "\t\t\th.Set(\"ETag\", `\"`+v+`\"`)\n", to: "",
+		pkg: "./internal/server", test: "TestAStaticFileRevalidatesByItsVersion", want: `want 200 with ETag`},
+	{name: "asset versions: a page that cannot render does not stop startup", file: assetsGo, from: "if err := t.ExecuteTemplate(io.Discard, name, d); err != nil {", to: "if err := t.ExecuteTemplate(io.Discard, name, d); false && err != nil {",
+		pkg: "./internal/server", test: "TestAPageThatCannotRenderFailsStartup", want: "a page naming missing.js: checkPages = <nil>"},
+	{name: "asset versions: the version ignores the bytes", file: assetsGo, from: "v := shortHash(b)", to: "v := shortHash(b[:0])",
+		pkg: "./internal/server", test: "TestAssetVersionsFollowTheBytes", want: "app.js versions"},
 
 	// ---- configuration ----
 	{name: "config: the fake engine without MEETINGS_TEST_MODE", file: mainGo, from: `if strings.TrimSpace(getenv("MEETINGS_TEST_MODE")) != "1" {`, to: `if false {`,

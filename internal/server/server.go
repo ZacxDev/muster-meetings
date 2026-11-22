@@ -53,7 +53,9 @@ import (
 //go:embed web
 var webFS embed.FS
 
-var pageTmpl = template.Must(template.ParseFS(webFS, "web/*.html"))
+// pageTmpl is the pages; every asset they reference is named through
+// pageFuncs (assets.go), so it carries its version.
+var pageTmpl = template.Must(template.New("").Funcs(pageFuncs).ParseFS(webFS, "web/*.html"))
 
 // Config is what the server needs to know about where it runs.
 type Config struct {
@@ -343,13 +345,6 @@ func RedactPath(p string) string {
 	return p
 }
 
-func staticHandler(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "no-cache")
-		next.ServeHTTP(w, r)
-	})
-}
-
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
@@ -395,7 +390,10 @@ func (s *Server) renderEnter(w http.ResponseWriter, code int, p enterPage) {
 	h.Set("Cache-Control", "no-store")
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(code)
-	_ = pageTmpl.ExecuteTemplate(w, "app.html", p)
+	if err := pageTmpl.ExecuteTemplate(w, "app.html", p); err != nil {
+		// checkPages makes this unreachable for the pages as shipped.
+		s.cfg.Log.Printf("page app.html: %v", err)
+	}
 }
 
 func (s *Server) refuseEnter(w http.ResponseWriter, code int, msg, why string) {

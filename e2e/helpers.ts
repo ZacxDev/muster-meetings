@@ -26,7 +26,8 @@ export const fakeClient = path.resolve(__dirname, 'fixtures', 'fake-livekit-clie
 // useFakeLiveKit serves the fake client in place of the vendored LiveKit
 // client, for every page and frame of ctx.
 export async function useFakeLiveKit(ctx: BrowserContext) {
-  await ctx.route('**/static/vendor/livekit-client-*.umd.js', (route) => route.fulfill({ path: fakeClient, contentType: 'text/javascript' }));
+  // The page names it with its version (?v=…, internal/server assets.go).
+  await ctx.route(/\/static\/vendor\/livekit-client-[^/?]*\.umd\.js(\?|$)/, (route) => route.fulfill({ path: fakeClient, contentType: 'text/javascript' }));
 }
 
 export async function kitMode(h: Harness, q: string) {

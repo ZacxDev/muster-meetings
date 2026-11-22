@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 	"sync"
@@ -861,9 +862,9 @@ func (s *Server) storeSegment(ctx context.Context, t store.Track, lc *liveConn, 
 		// goes to the same participant's previous line only (store:
 		// AmendLastLine), and every open panel updates that line in place.
 		if seg.Lead != "" {
-			if id, changed, err := s.store.AmendLastLine(ctx, t.MeetingID, t.Identity, seg.Lead, stt.Marks); err != nil {
-				s.cfg.Log.Printf("transcript: a line's closing mark was not stored: %v", err)
-			} else if changed {
+			id, out, err := s.store.AmendLastLine(ctx, t.MeetingID, t.Identity, seg.Lead, stt.Marks)
+			s.logLead(t, seg.Lead, start, end, id, out, err)
+			if err == nil && out == store.Amended {
 				// The panels hear of it only while the meeting is live: an
 				// ended meeting's streams are closing and its log is freed
 				// (freeAmends); the store, which the archive reads, has it.
@@ -895,6 +896,29 @@ func (s *Server) storeSegment(ctx context.Context, t store.Track, lc *liveConn, 
 		s.tr.mu.Unlock()
 	}
 	s.hub.Changed(t.MeetingID)
+}
+
+// logLead is the ONE log line of a final that carried a lead (the previous
+// line's late closing marks): the meeting, the track (ids, never a display
+// name), the marks, the final's meeting time, and the segment amended or
+// why the lead was dropped. 🔴 Never any transcript text: a deployment may
+// hold health information, and neither the final's words nor the amended
+// line's reach a log. The marks are re-cleaned here (stt.CleanLead: closing
+// marks only), so this line holds no letter whatever an engine put in Lead.
+// (A store error is printed as before: the database's own message, which
+// carries no bound value.)
+func (s *Server) logLead(t store.Track, lead string, start, end, id int64, out store.AmendOutcome, err error) {
+	what := fmt.Sprintf("amended segment %d", id)
+	switch {
+	case err != nil:
+		what = "dropped: " + string(store.AmendFailed) + ": " + err.Error()
+	case out != store.Amended:
+		what = "dropped: " + string(out)
+		if id != 0 {
+			what += fmt.Sprintf(" (segment %d)", id)
+		}
+	}
+	s.cfg.Log.Printf("transcript: lead %q meeting %s track %s final %d-%d ms: %s", stt.CleanLead(lead), t.MeetingID, t.Track, start, end, what)
 }
 
 // partialsOf is the meeting's partials, oldest first.

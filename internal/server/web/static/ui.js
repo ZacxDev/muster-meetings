@@ -1,32 +1,11 @@
-// The pages' link to muster's UI kit (docs/ui-kit.md in ZacxDev/muster):
-// kit.css and kit.js are loaded LIVE from muster's origin by the page, so the
-// install's theme reaches this plugin on its next load. This file is the one
-// place that knows whether they arrived.
-//
-// 🔴 The call must work without the kit. The fallback is muster's own kit,
-// bundled (scripts/vendor-ui-kit.sh, the same render the tests pin):
-// - kit.css is render-blocking and has run before this script, so a missing
-//   --mu-bg token here means it did not load (a 404, muster down, a CSP
-//   refusal); this links static/kit-fallback.css, its default theme.
-// - kit.js: the page loads static/vendor/muster-ui-kit-v1.js right after this
-//   script, always. It is kit.js byte for byte, and kit.js installs itself
-//   only when no MusterKit exists, so it is a no-op when the live one loaded.
-//   That is why everything here reads window.MusterKit when called, never at
-//   load.
-//
-// <html data-kit> is "live" (both from muster) or "fallback".
+// The pages' helpers over muster's UI kit (docs/ui-kit.md in ZacxDev/muster).
+// kit.css and kit.js come from this plugin's own origin (/kit/v1/, served by
+// internal/server kit.go: muster's live kit fetched server-side, or the kit
+// bundled with the plugin when muster cannot be reached), so window.MusterKit
+// is always there by the time these run.
 (function () {
   'use strict';
   var doc = document.documentElement;
-  var cssLive = getComputedStyle(doc).getPropertyValue('--mu-bg').trim() !== '';
-  if (!cssLive) {
-    var l = document.createElement('link');
-    l.rel = 'stylesheet';
-    l.href = '/static/kit-fallback.css';
-    l.id = 'kit-fallback';
-    document.head.insertBefore(l, document.head.firstChild);
-  }
-  doc.setAttribute('data-kit', cssLive && window.MusterKit ? 'live' : 'fallback');
   function K() { return window.MusterKit; }
 
   // icon is a decorative <svg class="mu-icon"> drawing the kit's icon name.

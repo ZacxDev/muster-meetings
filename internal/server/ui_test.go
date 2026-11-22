@@ -1,6 +1,7 @@
 package server_test
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -156,4 +157,46 @@ func mustRead(t *testing.T, f string) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// 🔴 No page makes the browser contact muster: neither page's HTML names
+// muster's origin (the owner page's frame-ancestors aside, which is a
+// header, not a request), and both CSPs allow script, style and images from
+// 'self' only. The kit is /kit/v1/ on this origin, and it is served (the
+// bundled kit here: these tests run with no kit upstream).
+func TestNoPageMakesTheBrowserContactMuster(t *testing.T) {
+	e := newEnv(t)
+	resp, owner := e.framed(enterPath(e.fake.MintApp(app.PluginID, ada.ID, ""), app.PluginID))
+	ownerCSP := resp.Header.Get("Content-Security-Policy")
+	c := e.meeting(bea)
+	resp, guest := e.do("GET", "/j/"+c.Code, "", nil)
+	guestCSP := resp.Header.Get("Content-Security-Policy")
+	if !bytes.Contains(guest, []byte(`id="knock-form"`)) || !sessionAttr.Match(owner) {
+		t.Fatal("not the two pages")
+	}
+	for name, p := range map[string]struct {
+		body []byte
+		csp  string
+	}{"guest": {guest, guestCSP}, "owner": {owner, ownerCSP}} {
+		if bytes.Contains(p.body, []byte(musterOrigin)) || bytes.Contains(p.body, []byte("/ui-kit/")) {
+			t.Errorf("the %s page's HTML references muster's origin or its kit path", name)
+		}
+		for _, d := range []string{"script-src", "style-src", "img-src"} {
+			if got := directive(p.csp, d); got != "'self'" {
+				t.Errorf("the %s page's %s = %q, want 'self' only", name, d, got)
+			}
+		}
+		if name == "guest" && strings.Contains(p.csp, musterOrigin) {
+			t.Errorf("the guest page's CSP names muster's origin: %s", p.csp)
+		}
+	}
+	for path, ctype := range map[string]string{"/kit/v1/kit.css": "text/css", "/kit/v1/kit.js": "text/javascript"} {
+		resp, body := e.do("GET", path, "", nil)
+		if resp.StatusCode != 200 || !strings.HasPrefix(resp.Header.Get("Content-Type"), ctype) || len(body) < 1000 || resp.Header.Get("X-Kit-Source") != "bundled" {
+			t.Errorf("%s = %d %q (%d bytes, source %q)", path, resp.StatusCode, resp.Header.Get("Content-Type"), len(body), resp.Header.Get("X-Kit-Source"))
+		}
+	}
+	if resp, _ := e.do("GET", "/kit/v1/icons.svg", "", nil); resp.StatusCode != 404 {
+		t.Errorf("/kit/v1/icons.svg = %d, want 404 (only kit.css and kit.js are served)", resp.StatusCode)
+	}
 }

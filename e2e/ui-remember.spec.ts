@@ -7,7 +7,7 @@
 // an unanswered camera prompt never holds Join (or Ask to join) for good.
 // The fake muster and the fake LiveKit client, as ui-call.spec.ts.
 import { test, expect, type Page } from '@playwright/test';
-import { startHarness, useFakeLiveKit, ownerPrejoin, lk, appFrame, type Harness } from './helpers';
+import { startHarness, useFakeLiveKit, ownerPrejoin, ownerInCall, lk, appFrame, type Harness } from './helpers';
 
 let h: Harness;
 test.beforeAll(async () => { h = await startHarness(); });
@@ -153,5 +153,39 @@ test('an unanswered camera prompt does not hold Join, or Ask to join, for good',
   await guest.locator('#name').fill('Grace');
   await expect(guest.locator('#ask')).toBeDisabled();
   await expect(guest.locator('#ask')).toBeEnabled({ timeout: 10_000 });
+  await g.close();
+});
+
+test('a guest: the consent notice sits above the preview, and nothing leaves the page for LiveKit before the owner admits them', async ({ page, browser }) => {
+  await useFakeLiveKit(page.context());
+  const app = await ownerInCall(page, h);
+  const link = await app.locator('#call-url').inputValue();
+  const g = await browser.newContext();
+  await useFakeLiveKit(g);
+  const guest = await g.newPage();
+  const elsewhere: string[] = [];
+  guest.on('request', (r) => { if (new URL(r.url()).origin !== h.plugin) elsewhere.push(r.url()); });
+  guest.on('websocket', (ws) => elsewhere.push(ws.url()));
+  await guest.goto(link);
+  await expect(guest.locator('#join-view')).toHaveAttribute('data-check', 'ready', { timeout: 15_000 });
+  // The notice first, the camera preview after it.
+  const notice = (await guest.locator('#notice').boundingBox())!;
+  const preview = (await guest.locator('#pre-tile').boundingBox())!;
+  expect(notice.y + notice.height, 'the notice ends above the preview').toBeLessThanOrEqual(preview.y);
+  await expect(guest.locator('#notice')).toContainText('recorded');
+  // Knock and wait: the preview is local only; no room, no publish.
+  await guest.locator('#name').fill('Grace');
+  await guest.locator('#ask').click();
+  await expect(guest.locator('#guest')).toHaveAttribute('data-state', 'waiting');
+  await guest.waitForTimeout(500);
+  expect(await guest.evaluate(() => (window as any).__lk.rooms.length), 'LiveKit rooms made before admission').toBe(0);
+  expect(await guest.evaluate(() => (window as any).__lk.calls), 'tracks published before admission').toEqual([]);
+  expect(elsewhere, 'requests from the guest page to anywhere but the plugin').toEqual([]);
+  // Admitted: now, and only now, the room and the tracks.
+  await app.locator('#btn-people').click();
+  await app.locator('.lobby-row.waiting .admit').click();
+  await expect(guest.locator('#guest')).toHaveAttribute('data-state', 'admitted');
+  await expect.poll(() => guest.evaluate(() => (window as any).__lk.rooms.length)).toBe(1);
+  await expect.poll(() => guest.evaluate(() => (window as any).__lk.calls)).toEqual(expect.arrayContaining(['microphone=true', 'camera=true']));
   await g.close();
 });

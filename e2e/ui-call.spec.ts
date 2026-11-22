@@ -103,6 +103,26 @@ for (const size of sizes) {
       await expect(t.locator('.mu-avatar')).toBeHidden();
     });
 
+    test('tiles that stay put do not blink: a join, a speaker change or a mute starts no entry animation on the others', async ({ page }) => {
+      const { app, f } = await setup(page);
+      await lk(f, 'addRemote', 'guest-a', 'Grace (guest)');
+      const settled = () => f.evaluate(() => document.getAnimations().filter((a) => a.playState === 'running').length);
+      await expect.poll(settled).toBe(0);
+      // tileIns counts running tile-in animations on the tiles that were
+      // already there (marked), whatever else moves.
+      await f.evaluate(() => document.querySelectorAll('.tile').forEach((t) => t.setAttribute('data-was', '')));
+      const tileIns = () => f.evaluate(() => document.getAnimations().filter((a) => (a as CSSAnimation).animationName === 'tile-in' &&
+        ((a.effect as KeyframeEffect).target as Element)?.hasAttribute('data-was')).length);
+      await lk(f, 'addRemote', 'guest-b', 'Linus (guest)');
+      await expect(tileOf(app, 'guest-b')).toBeVisible();
+      expect(await tileIns(), 'existing tiles re-animated on a join').toBe(0);
+      // The new tile did animate in (the control: the count can be non-zero).
+      expect(await f.evaluate(() => document.getAnimations().filter((a) => (a as CSSAnimation).animationName === 'tile-in').length)).toBeGreaterThan(0);
+      await lk(f, 'speakers', ['guest-a']);
+      await lk(f, 'mute', 'guest-a', 'microphone', true);
+      expect(await tileIns(), 'existing tiles re-animated on a speaker change or a mute').toBe(0);
+    });
+
     test('a name that looks like markup is text on the tile', async ({ page }) => {
       const { app, f } = await setup(page);
       await lk(f, 'addRemote', 'guest-m', '<img src=x onerror=alert(1)> (guest)', { cam: false });

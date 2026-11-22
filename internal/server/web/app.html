@@ -5,9 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="referrer" content="no-referrer">
 <title>Meetings</title>
-{{- if .Kit}}
-<link rel="stylesheet" href="{{.Kit}}/kit.css">
-{{- end}}
+<link rel="stylesheet" href="/kit/v1/kit.css">
 <link rel="stylesheet" href="/static/app.css">
 </head>
 <body class="mu-root">
@@ -151,11 +149,8 @@
   </section>
   <noscript><p>Meetings needs JavaScript.</p></noscript>
 </main>
-{{- if .Kit}}
-<script src="{{.Kit}}/kit.js"></script>
-{{- end}}
+<script src="/kit/v1/kit.js"></script>
 <script src="/static/ui.js"></script>
-<script src="/static/vendor/muster-ui-kit-v1.js"></script>
 <script src="/static/prefs.js"></script>
 <script src="/static/vendor/livekit-client-2.25.0.umd.js"></script>
 <script src="/static/call.js"></script>

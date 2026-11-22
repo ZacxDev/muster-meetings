@@ -1374,24 +1374,19 @@ func TestTheAppPageCarriesNoInlineScript(t *testing.T) {
 	}
 	for name, page := range map[string][]byte{"app": body, "guest": guest} {
 		scripts := regexp.MustCompile(`<script[^>]*>([^<]*)</script>`).FindAllSubmatch(page, -1)
-		if len(scripts) != 7 {
-			t.Errorf("%s page: %d scripts, want muster's kit.js, ui.js, the bundled kit (the fallback), prefs.js, the LiveKit client, call.js and its own", name, len(scripts))
+		if len(scripts) != 6 {
+			t.Errorf("%s page: %d scripts, want the kit's kit.js, ui.js, prefs.js, the LiveKit client, call.js and its own", name, len(scripts))
 		}
-		// muster's UI kit, linked live from muster's exact origin (the only
-		// other origin the CSP lets a script or a style come from), first.
-		kitJS := `<script src="` + musterOrigin + `/ui-kit/v1/kit.js"></script>`
-		if len(scripts) == 0 || string(scripts[0][0]) != kitJS {
-			t.Errorf("%s page: the first script is not muster's kit.js (%s)", name, kitJS)
+		// The UI kit, from this origin's /kit/v1/ (kit.go), first.
+		if len(scripts) == 0 || string(scripts[0][0]) != `<script src="/kit/v1/kit.js"></script>` {
+			t.Errorf("%s page: the first script is not /kit/v1/kit.js", name)
 		}
-		kitCSS := `<link rel="stylesheet" href="` + musterOrigin + `/ui-kit/v1/kit.css">`
+		kitCSS := `<link rel="stylesheet" href="/kit/v1/kit.css">`
 		if !bytes.Contains(page, []byte(kitCSS)) || bytes.Index(page, []byte(kitCSS)) > bytes.Index(page, []byte(`href="/static/app.css"`)) {
-			t.Errorf("%s page: kit.css is not linked from muster before app.css (%s)", name, kitCSS)
+			t.Errorf("%s page: kit.css is not linked from /kit/v1/ before app.css", name)
 		}
-		for i, m := range scripts {
-			if i == 0 && string(m[0]) == kitJS {
-				continue
-			}
-			if !regexp.MustCompile(`^<script src="/static/[a-z0-9./-]+\.js">$`).Match(m[0][:len(m[0])-len(m[1])-len("</script>")]) || len(bytes.TrimSpace(m[1])) != 0 {
+		for _, m := range scripts {
+			if !regexp.MustCompile(`^<script src="/(static|kit/v1)/[a-z0-9./-]+\.js">$`).Match(m[0][:len(m[0])-len(m[1])-len("</script>")]) || len(bytes.TrimSpace(m[1])) != 0 {
 				t.Errorf("%s page: script %s is not a file on this origin with no inline body: the CSP would block it", name, m[0])
 			}
 		}

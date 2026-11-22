@@ -480,6 +480,18 @@
     }
 
     // ---- the layout ----
+
+    // place puts els in container, in that order, moving only a tile whose
+    // place differs: re-inserting a tile restarts its entry animation (and
+    // reloads nothing else), so a tile that stays put is left alone. A tile
+    // leaving (its fade-out) keeps its place and is not counted; a tile that
+    // belongs elsewhere is moved there by the other container's place.
+    function place(container, els) {
+      els.forEach(function (want, i) {
+        var cur = Array.prototype.filter.call(container.children, function (c) { return !c.classList.contains('leaving'); });
+        if (cur[i] !== want) container.insertBefore(want, cur[i] || null);
+      });
+    }
     var layoutBtn = $('btn-layout');
     function shares() { return order.filter(function (k) { return tiles[k].source === 'screen_share'; }); }
     function mode() {
@@ -500,14 +512,14 @@
       var els = keys.map(function (k) { return tiles[k].el; });
       UI.flip(els, function () {
         view.setAttribute('data-layout', m);
+        var el = function (k) { return tiles[k].el; };
         if (m === 'grid') {
           // Screens first, then the people in the order they came.
-          screens.concat(keys.filter(function (k) { return screens.indexOf(k) < 0; })).forEach(function (k) { stage.appendChild(tiles[k].el); });
+          place(stage, screens.concat(keys.filter(function (k) { return screens.indexOf(k) < 0; })).map(el));
+          place(strip, []);
         } else {
-          keys.forEach(function (k) {
-            var want = k === featured ? stage : strip;
-            if (tiles[k].el.parentNode !== want || want === strip) want.appendChild(tiles[k].el);
-          });
+          place(stage, featured ? [el(featured)] : []);
+          place(strip, keys.filter(function (k) { return k !== featured; }).map(el));
         }
         Array.prototype.forEach.call(stage.querySelectorAll('.tile'), function (el) { el.classList.toggle('featured', m === 'presentation'); });
       });

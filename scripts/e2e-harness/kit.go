@@ -10,8 +10,10 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // kitFiles are the kit's files under /ui-kit/v1/ and their Content-Type
@@ -33,6 +35,7 @@ type fakeKit struct {
 	mu      sync.Mutex
 	theme   string
 	missing map[string]bool // file -> answer 404
+	slow    time.Duration
 }
 
 // loadKit reads every fixture and checks it against SHA256SUMS: a fixture
@@ -73,8 +76,15 @@ func (k *fakeKit) routes(mux *http.ServeMux) {
 		name := path.Base(r.PathValue("file"))
 		ctype, ok := kitFiles[name]
 		k.mu.Lock()
-		theme, gone := k.theme, k.missing[strings.TrimPrefix(path.Ext(name), ".")]
+		theme, gone, slow := k.theme, k.missing[strings.TrimPrefix(path.Ext(name), ".")], k.slow
 		k.mu.Unlock()
+		if slow > 0 {
+			select {
+			case <-time.After(slow):
+			case <-r.Context().Done():
+				return
+			}
+		}
 		if !ok || gone {
 			http.NotFound(w, r)
 			return
@@ -82,8 +92,13 @@ func (k *fakeKit) routes(mux *http.ServeMux) {
 		b := k.files[theme+"/"+name]
 		sum := sha256.Sum256(b)
 		h := w.Header()
+		etag := `"` + hex.EncodeToString(sum[:])[:16] + `"`
+		if r.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
 		h.Set("Content-Type", ctype)
-		h.Set("ETag", `"`+hex.EncodeToString(sum[:])[:16]+`"`)
+		h.Set("ETag", etag)
 		h.Set("Cache-Control", "no-cache")
 		h.Set("Cross-Origin-Resource-Policy", "cross-origin")
 		h.Set("X-Content-Type-Options", "nosniff")
@@ -101,11 +116,13 @@ func (k *fakeKit) routes(mux *http.ServeMux) {
 			k.theme = th
 		}
 		k.missing = map[string]bool{}
+		ms, _ := strconv.Atoi(q.Get("slow"))
+		k.slow = time.Duration(ms) * time.Millisecond
 		for _, m := range strings.Split(q.Get("missing"), ",") {
 			if m != "" {
 				k.missing[m] = true
 			}
 		}
-		fmt.Fprintf(w, "theme=%s missing=%v\n", k.theme, q.Get("missing"))
+		fmt.Fprintf(w, "theme=%s missing=%v slow=%v\n", k.theme, q.Get("missing"), k.slow)
 	})
 }

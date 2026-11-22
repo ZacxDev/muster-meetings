@@ -37,8 +37,6 @@ type guestPage struct {
 	Message   string
 	OwnerName string
 	Notice    lobby.Notice
-	// Kit is the UI kit's base URL (kitBase).
-	Kit string
 }
 
 func (s *Server) renderGuest(w http.ResponseWriter, code int, p guestPage) {
@@ -47,7 +45,6 @@ func (s *Server) renderGuest(w http.ResponseWriter, code int, p guestPage) {
 	h.Set("Cache-Control", "no-store")
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(code)
-	p.Kit = s.kitBase()
 	_ = pageTmpl.ExecuteTemplate(w, "guest.html", p)
 }
 

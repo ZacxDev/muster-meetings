@@ -546,20 +546,25 @@ database.
 
 ## The meeting UI
 
-The pages draw with **muster's UI kit** (`docs/ui-kit.md` in muster):
-`kit.css` and `kit.js` are linked **live** from `MUSTER_ORIGIN/ui-kit/v1/`,
-so the theme an admin picks in muster (a preset, or their own accent) is the
-plugin's on the next page load, with no rebuild. The pages' CSP adds exactly
-`MUSTER_ORIGIN` to `script-src`, `style-src` and `img-src`, and nothing to
-any other directive. `static/app.css` only places the kit's components and
-writes **no colour** (every colour, radius and duration is a `--mu-*`
-token; `TestThePluginCSSWritesNoColour` fails on a literal). If the kit
-cannot be loaded (muster down, a `404`), the page uses the kit bundled with
-the plugin: `static/vendor/muster-ui-kit-v1.js` is muster's `kit.js` byte for
-byte (loaded after muster's, it installs itself only when muster's did not)
-and `static/kit-fallback.css` is muster's `kit.css` in its default theme,
-both rendered by `scripts/vendor-ui-kit.sh` from the commit the tests pin.
-The call works the same; `<html data-kit>` says `live` or `fallback`.
+The pages draw with **muster's UI kit** (`docs/ui-kit.md` in muster), served
+from the **plugin's own origin** at `/kit/v1/kit.css` and `/kit/v1/kit.js`:
+the plugin fetches them from muster (`MUSTER_URL/ui-kit/v1/`, server-side,
+the same address it already calls), keeps them in memory, revalidates them
+with muster's ETag every minute, and serves them. So the theme an admin
+picks in muster (a preset, or their own accent) reaches the pages on their
+next load, while **no page makes the browser contact muster**: a guest who
+cannot reach muster (a LAN-only muster, a firewall) is never held on it,
+and muster never sees a guest's address. Both pages' CSP allows script,
+style and images from `'self'` only. Each upstream fetch gives up after
+2 s; then the last copy from muster is served if there is one, else the kit
+bundled with the plugin (`static/kit-fallback.css` and
+`static/vendor/muster-ui-kit-v1.js`: muster's own render in its default
+theme, by `scripts/vendor-ui-kit.sh` from the commit the tests pin), and
+muster is asked again 10 s later. `X-Kit-Source` on the response says which
+(`muster`, `muster-stale`, `bundled`). `static/app.css` only places the
+kit's components and writes **no colour** (every colour, radius and
+duration is a `--mu-*` token; `TestThePluginCSSWritesNoColour` fails on a
+literal).
 
 - **Owner, the first time:** New meeting opens the **device check**: the
   camera preview, the microphone's level, the camera and microphone
@@ -793,14 +798,20 @@ shortcuts, reduced motion (every computed transition and animation 0 s, and
 no Web Animation on a layout change), every button's accessible name
 (enumerated), axe (no serious or critical violation) on the pre-join, the
 call, the lobby and the past meetings, and a phone with no screen sharing.
-`ui-remember.spec.ts`: the owner's first New meeting shows the check and the
+`ui-call.spec.ts` also checks that tiles that stay put do not re-animate on a
+join, a speaker change or a mute. `ui-remember.spec.ts`: the owner's first New meeting shows the check and the
 next goes straight in with the link on screen (storage holding only the
 device key), a remembered device gone and a permission refused since, blocked
-storage meaning the check, a guest always checked, and Join (and Ask to
-join) let through after an unanswered camera prompt.
-`ui-kit.spec.ts`: the kit loaded from the configured muster origin, a second
-theme reaching the page on reload, the CSP, and the fallback with
-`kit.css`, `kit.js` or both answering `404`. `ui-real-livekit.spec.ts` runs
+storage meaning the check, a guest always checked, Join (and Ask to join)
+let through after an unanswered camera prompt, and a guest's consent notice
+above their preview with nothing sent to LiveKit (no room, no track, no
+request off the plugin's origin) before they are admitted.
+`ui-kit.spec.ts`: the kit served through the plugin with no request from
+either page to muster, a second theme reaching the page on reload, the
+guest page's CSP, the bundled kit when muster answers `404` for `kit.css`,
+`kit.js` or both, and a page not held on a muster that hangs (the plugin's
+2 s fetch timeout; `kit_internal_test.go` pins the fetch, the ETag
+revalidation, the timeout and which copy is served). `ui-real-livekit.spec.ts` runs
 the indicators and a screen share between two browsers through the real
 `livekit-server`. `ui-visual.spec.ts` compares goldens
 (`e2e/goldens/`: the pre-join, the grid, the presentation view, the lobby

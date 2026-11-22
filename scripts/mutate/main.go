@@ -138,11 +138,13 @@ const (
 	utt     = "internal/stt/utterance.go"
 	callJS  = "internal/server/web/static/call.js"
 	// the UI pass
-	uiJS    = "internal/server/web/static/ui.js"
-	appCSS  = "internal/server/web/static/app.css"
-	appHTML = "internal/server/web/app.html"
-	guestJS = "internal/server/web/static/guest.js"
-	kEgress = "deploy/kubernetes/egress.yaml"
+	uiJS      = "internal/server/web/static/ui.js"
+	appCSS    = "internal/server/web/static/app.css"
+	appHTML   = "internal/server/web/app.html"
+	guestJS   = "internal/server/web/static/guest.js"
+	guestHTML = "internal/server/web/guest.html"
+	kitGo     = "internal/server/kit.go"
+	kEgress   = "deploy/kubernetes/egress.yaml"
 	// phase 3c
 	nemGo = "internal/stt/nemotron.go"
 	wsCl  = "internal/stt/wsclient.go"
@@ -908,8 +910,16 @@ var mutants = []mutant{
 		pkg: "./deploy", test: "TestComposeEgressRedisAndTheIngestNetwork", want: "compose ingest: listen"},
 
 	// ---- the UI pass, Go-side: the kit's CSP, the colour scan, the pinned kit ----
-	{name: "ui csp: the kit's origin widened", file: srv, from: `kit += " " + s.cfg.MusterOrigin`, to: `kit += " https:"`,
-		pkg: "./internal/server", test: "TestThePagesPoliciesArePinned", want: "the owner page's CSP"},
+	{name: "ui kit: the pages' CSP lets in muster's origin", file: srv, from: `src := "'self'"`, to: `src := "'self' " + s.cfg.MusterOrigin`,
+		pkg: "./internal/server", test: "TestNoPageMakesTheBrowserContactMuster", want: "the guest page's script-src"},
+	{name: "ui kit: the guest page links muster's kit", file: guestHTML, from: `<link rel="stylesheet" href="/kit/v1/kit.css">`, to: `<link rel="stylesheet" href="/ui-kit/v1/kit.css">`,
+		pkg: "./internal/server", test: "TestNoPageMakesTheBrowserContactMuster", want: "the guest page's HTML references muster's origin or its kit path"},
+	{name: "ui kit: no timeout on the upstream fetch", file: kitGo, from: "ctx, cancel := context.WithTimeout(context.Background(), k.timeout)", to: "ctx, cancel := context.WithCancel(context.Background())",
+		pkg: "./internal/server", test: "TestTheKitFallsBackQuicklyWhenMusterIsDownOrSlow", want: "muster hanging 10 s"},
+	{name: "ui kit: no fallback on an upstream failure", file: kitGo, from: `e.body, e.source = bundledKit(name), "bundled"`, to: `e.body, e.source = nil, "bundled"`,
+		pkg: "./internal/server", test: "TestTheKitFallsBackQuicklyWhenMusterIsDownOrSlow", want: "muster answering 503"},
+	{name: "config: a wildcard or a CSP separator in an origin", file: mainGo, from: "if !hostPort.MatchString(u.Host) {", to: "if false {",
+		pkg: ".", test: "TestCheckOriginRefusesWildcardsAndCSPSeparators", want: "want a refusal"},
 	{name: "ui css: a colour written in app.css", file: appCSS, from: ".status { min-height: 1.5em; margin: .5rem 0; color: rgb(var(--mu-text2));", to: ".status { min-height: 1.5em; margin: .5rem 0; color: #c3bdd9;",
 		pkg: "./internal/server", test: "TestThePluginCSSWritesNoColour", want: "writes a colour, not a kit token: color: #c3bdd9"},
 	{name: "ui kit: a fixture not checked against SHA256SUMS", file: "scripts/e2e-harness/kit.go", from: `want[rel] == "" || got != want[rel]`, to: `want[rel] == ""`,
@@ -946,19 +956,14 @@ var mutants = []mutant{
 		e2e: "ui-call.spec.ts", test: "1280x800 .* keyboard shortcuts", want: "btn-mic"},
 	{name: "ui: Join before the device check", file: appJS, from: "$('btn-join').disabled = s === 'checking' || s === 'idle';", to: "$('btn-join').disabled = false;",
 		e2e: "ui-call.spec.ts", test: "1280x800 .* pre-join holds Join", want: "toBeDisabled"},
-	{name: "ui: no fallback when the kit does not load", file: uiJS, from: "  if (!cssLive) {\n", to: "  if (false) {\n",
-		e2e: "ui-kit.spec.ts", test: "kit's css,js missing", want: "the fallback stylesheet was linked"},
-	{name: "ui: no bundled kit.js when muster's does not load", file: appHTML, from: `<script src="/static/vendor/muster-ui-kit-v1.js"></script>
-`, to: ``,
-		e2e: "ui-kit.spec.ts", test: "kit's js missing", want: "kit.js (muster's or the bundled one) is installed"},
+	{name: "ui: tiles that stay put are re-inserted (they blink)", file: callJS, from: "if (cur[i] !== want) container.insertBefore(want, cur[i] || null);", to: "if (true) container.insertBefore(want, cur[i] || null);",
+		e2e: "ui-call.spec.ts", test: "1280x800 .* do not blink", want: "existing tiles re-animated on a join"},
 	{name: "ui: the owner never skips the remembered check", file: appJS, from: "root: $('prejoin'), remember: true,", to: "root: $('prejoin'), remember: false,",
 		e2e: "ui-remember.spec.ts", test: "first New meeting shows the check", want: "the finished check was remembered"},
 	{name: "ui: a guest skips the check", file: guestJS, from: "root: $('join-view'), remember: false,", to: "root: $('join-view'), remember: true,",
 		e2e: "ui-remember.spec.ts", test: "a guest always gets the check", want: "remembered"},
 	{name: "ui: Join stuck while the camera prompt is pending", file: callJS, from: "        setState('pending');\n", to: "        return;\n",
 		e2e: "ui-remember.spec.ts", test: "unanswered camera prompt", want: "pending"},
-	{name: "ui: the kit from the wrong origin", file: appHTML, from: `<link rel="stylesheet" href="{{.Kit}}/kit.css">`, to: `<link rel="stylesheet" href="/ui-kit/v1/kit.css">`,
-		e2e: "ui-kit.spec.ts", test: "configured muster origin", want: "kit.css"},
 
 	// ---- configuration ----
 	{name: "config: the fake engine without MEETINGS_TEST_MODE", file: mainGo, from: `if strings.TrimSpace(getenv("MEETINGS_TEST_MODE")) != "1" {`, to: `if false {`,

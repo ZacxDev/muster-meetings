@@ -332,3 +332,21 @@ func TestLoadConfigNemotronNeedsAllFour(t *testing.T) {
 		t.Fatalf("no path: %q, %v", c.StreamURL, err)
 	}
 }
+
+// 🔴 An origin written into the CSP names exactly one host: a wildcard, a
+// directive separator, a source separator or a quote is refused, and the
+// ordinary forms still pass.
+func TestCheckOriginRefusesWildcardsAndCSPSeparators(t *testing.T) {
+	for _, bad := range []string{"https://*", "https://*.example.test", "https://muster.example.test;script-src", "https://muster.example.test,evil.test",
+		"https://muster.example.test'", "https://mu ster.example.test", "https://a;b"} {
+		if got, err := CheckOrigin("MUSTER_ORIGIN", bad); err == nil {
+			t.Errorf("CheckOrigin(%q) = %q, want a refusal", bad, got)
+		}
+	}
+	for raw, want := range map[string]string{"https://Muster.Example.Test": "https://muster.example.test", "https://example.test:8443": "https://example.test:8443",
+		"http://127.0.0.1:9000": "http://127.0.0.1:9000", "http://[::1]:9000": "http://[::1]:9000", "https://xn--mstr-kva.example.test": "https://xn--mstr-kva.example.test"} {
+		if got, err := CheckOrigin("MUSTER_ORIGIN", raw); err != nil || got != want {
+			t.Errorf("CheckOrigin(%q) = %q, %v; want %q", raw, got, err, want)
+		}
+	}
+}

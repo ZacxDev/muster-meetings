@@ -17,10 +17,11 @@
 //
 // The parent's routes, for the test only:
 //
-//	GET /kit-mode?theme=brass|harbor&missing=css,js
+//	GET /kit-mode?theme=brass|harbor&missing=css,js&slow=<ms>
 //	                           the theme the kit is served in (a second preset, so a
-//	                           test sees the theme flow through), and which kit files
-//	                           answer 404 (the pages' fallback)
+//	                           test sees the theme flow through), which kit files
+//	                           answer 404, and a delay before each kit answer (the
+//	                           plugin's bundled kit, on an upstream that fails or hangs)
 //	GET /mint                  a fresh hand-off code, as the person's browser mints one
 //	GET /redeems               how many redeems the fake muster has answered
 //	GET /apps/<id>[?code=…]    muster's page: frames /enter with that code, or a fresh one
@@ -187,7 +188,10 @@ func run(logger *log.Logger) error {
 	if err != nil {
 		return err
 	}
-	srv := server.New(server.Config{PublicURL: pluginURL, MusterOrigin: parentOrigin, Log: logger,
+	// The kit: fetched by the plugin from the parent (muster's role), and
+	// revalidated on every page load (a 1 ms TTL, and a failure retried at
+	// once), so a theme or failure mode a test sets shows on the next load.
+	srv := server.New(server.Config{PublicURL: pluginURL, MusterOrigin: parentOrigin, KitUpstream: parentOrigin, KitTTL: time.Millisecond, KitRetry: time.Millisecond, Log: logger,
 		LiveKit: lkc, LiveKitURL: lkWS, ICE: "all",
 		// The fake engine (MEETINGS_TEST_MODE's) or the nemotron engine
 		// against the fake Nemotron server, and the ingest listener the fake

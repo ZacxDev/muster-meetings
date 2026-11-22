@@ -64,6 +64,18 @@ type Config struct {
 	// https://example.test: the only page allowed to frame the owner app
 	// (CSP frame-ancestors).
 	MusterOrigin string
+	// KitUpstream is muster's base URL as the plugin calls it (MUSTER_URL):
+	// the UI kit is fetched from <KitUpstream>/ui-kit/v1/ server-side and
+	// served at KitRoute (kit.go). "" serves the bundled kit only.
+	KitUpstream string
+	// KitTimeout bounds each upstream kit fetch (default DefaultKitTimeout);
+	// KitTTL is how long a fetched kit is served before muster is asked again
+	// (default DefaultKitTTL).
+	// KitRetry is how soon a failed fetch is tried again (default
+	// DefaultKitRetry).
+	KitTimeout time.Duration
+	KitTTL     time.Duration
+	KitRetry   time.Duration
 	// Now is the clock; default time.Now.
 	Now func() time.Time
 	// Log receives the access log (method, path with any code redacted,
@@ -126,6 +138,7 @@ type Config struct {
 
 // Server is the plugin's public handler.
 type Server struct {
+	kit     *kitProxy
 	cfg     Config
 	store   *store.Store
 	app     *owners.App
@@ -179,12 +192,14 @@ func New(cfg Config, st *store.Store, app *owners.App) *Server {
 	s := &Server{cfg: cfg, store: st, app: app, mux: http.NewServeMux(), hub: lobby.NewHub(), limiter: lobby.NewLimiter(),
 		rtcOrigins: RTCOrigins(cfg.LiveKitURL), streams: newStreamReg(), tr: newTranscriber()}
 	s.bg, s.bgStop = context.WithCancel(context.Background())
+	s.kit = newKitProxy(cfg.KitUpstream, cfg.KitTimeout, cfg.KitTTL, cfg.KitRetry, cfg.Now)
 	s.knocker = lobby.NewKnocker(app.Client, s.hub, st.LobbyCount, cfg.Log, cfg.Now)
 	static, err := fs.Sub(webFS, "web/static")
 	if err != nil {
 		panic(err)
 	}
 	s.mux.HandleFunc("GET /enter", s.handleEnter)
+	s.mux.HandleFunc("GET "+KitRoute+"{file}", s.handleKit)
 	s.mux.Handle("GET /static/", http.StripPrefix("/static/", staticHandler(http.FileServerFS(static))))
 	s.mux.HandleFunc("GET /api/meetings", s.owner(s.handleListMeetings))
 	s.mux.HandleFunc("POST /api/meetings", s.owner(s.handleCreateMeeting))
@@ -225,38 +240,19 @@ func (s *Server) ownerPageCSP() string { return s.pageCSP(s.cfg.MusterOrigin) }
 func (s *Server) guestPageCSP() string { return s.pageCSP("'none'") }
 
 // pageCSP is a page's policy (design: "Every page sets its own strict CSP"):
-// its own script, style and images, and muster's UI kit (kit.css, kit.js and
-// muster's brand images: docs/ui-kit.md, "Your page's Content-Security-
-// Policy") from muster's exact origin in those three directives and no
-// other; its own API and LiveKit's signalling origin (wss, and https for the
-// client's /rtc/validate check) and nothing else; media from itself and
-// blob:; framed by frameAncestors.
+// its own script, style and images ONLY (muster's UI kit is served from this
+// origin, kit.go: no page makes the browser contact muster); its own API and
+// LiveKit's signalling origin (wss, and https for the client's /rtc/validate
+// check) and nothing else; media from itself and blob:; framed by
+// frameAncestors.
 func (s *Server) pageCSP(frameAncestors string) string {
 	connect := "'self'"
 	if s.rtcOrigins != "" {
 		connect += " " + s.rtcOrigins
 	}
-	kit := "'self'"
-	if s.cfg.MusterOrigin != "" {
-		kit += " " + s.cfg.MusterOrigin
-	}
-	return "default-src 'self'; script-src " + kit + "; style-src " + kit + "; img-src " + kit + "; connect-src " + connect + "; media-src 'self' blob:; " +
+	src := "'self'"
+	return "default-src 'self'; script-src " + src + "; style-src " + src + "; img-src " + src + "; connect-src " + connect + "; media-src 'self' blob:; " +
 		"object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors " + frameAncestors
-}
-
-// KitPath is the UI kit's major version on muster (docs/ui-kit.md): the
-// pages link kit.css and kit.js under it, LIVE, so the install's theme
-// reaches them on their next load.
-const KitPath = "/ui-kit/v1"
-
-// kitBase is where the pages load the kit from: muster's origin and
-// KitPath, or "" with no muster origin (the pages then draw the built-in
-// fallback, static/kit-fallback.css).
-func (s *Server) kitBase() string {
-	if s.cfg.MusterOrigin == "" {
-		return ""
-	}
-	return s.cfg.MusterOrigin + KitPath
 }
 
 // RTCOrigins is connect-src's LiveKit part for a signalling URL: its origin
@@ -390,8 +386,6 @@ type enterPage struct {
 	Ref     string
 	Message string
 	Again   bool
-	// Kit is the UI kit's base URL (kitBase).
-	Kit string
 }
 
 func (s *Server) renderEnter(w http.ResponseWriter, code int, p enterPage) {
@@ -401,7 +395,6 @@ func (s *Server) renderEnter(w http.ResponseWriter, code int, p enterPage) {
 	h.Set("Cache-Control", "no-store")
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(code)
-	p.Kit = s.kitBase()
 	_ = pageTmpl.ExecuteTemplate(w, "app.html", p)
 }
 

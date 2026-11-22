@@ -6,8 +6,8 @@
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex">
 <title>Join a meeting</title>
-<link rel="stylesheet" href="/kit/v1/kit.css">
-<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="{{kit "kit.css"}}">
+<link rel="stylesheet" href="{{asset "app.css"}}">
 </head>
 <body class="mu-root">
 {{- if .Message}}
@@ -104,12 +104,12 @@
   </section>
   <noscript><p>Joining a meeting needs JavaScript.</p></noscript>
 </main>
-<script src="/kit/v1/kit.js"></script>
-<script src="/static/ui.js"></script>
-<script src="/static/prefs.js"></script>
-<script src="/static/vendor/livekit-client-2.25.0.umd.js"></script>
-<script src="/static/call.js"></script>
-<script src="/static/guest.js"></script>
+<script src="{{kit "kit.js"}}"></script>
+<script src="{{asset "ui.js"}}"></script>
+<script src="{{asset "prefs.js"}}"></script>
+<script src="{{asset "vendor/livekit-client-2.25.0.umd.js"}}"></script>
+<script src="{{asset "call.js"}}"></script>
+<script src="{{asset "guest.js"}}"></script>
 {{- end}}
 </body>
 </html>

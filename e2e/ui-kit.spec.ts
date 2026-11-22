@@ -118,7 +118,7 @@ test('muster hanging: the page is not held on it (the plugin gives up after its 
   await expect(guest.locator('#ask')).toBeVisible();
   const took = Date.now() - start;
   expect(took, `the guest page took ${took} ms with muster hanging 15 s`).toBeLessThan(6000);
-  const css = w.kit.find((r) => r.url().endsWith('/kit/v1/kit.css'))!;
+  const css = w.kit.find((r) => new URL(r.url()).pathname === '/kit/v1/kit.css')!;
   expect(css.headers()['x-kit-source']).toMatch(/^(bundled|muster-stale)$/);
   await g.close();
   await ctx.close();

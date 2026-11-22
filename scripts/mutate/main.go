@@ -145,6 +145,7 @@ const (
 	guestJS   = "internal/server/web/static/guest.js"
 	guestHTML = "internal/server/web/guest.html"
 	kitGo     = "internal/server/kit.go"
+	assetsGo  = "internal/server/assets.go"
 	kEgress   = "deploy/kubernetes/egress.yaml"
 	// phase 3c
 	nemGo = "internal/stt/nemotron.go"
@@ -1018,6 +1019,22 @@ var mutants = []mutant{
 		e2e: "ui-remember.spec.ts", test: "unanswered camera prompt", want: "pending"},
 	{name: "ui: an amend (a late closing mark) not drawn", file: callJS, from: "if (text) text.textContent = a.text;", to: "if (false) text.textContent = a.text;",
 		e2e: "late-marks.spec.ts", test: "late .* in place on every open panel", want: `Expected: "Can everyone hear me clearly?"`},
+
+	// ---- asset versions (a deploy is a new URL; the pages are never cached) ----
+	{name: "asset versions: guest.js unversioned on the guest page", file: guestHTML, from: `<script src="{{asset "guest.js"}}"></script>`, to: `<script src="/static/guest.js"></script>`,
+		pkg: "./internal/server", test: "TestEveryAssetAPageReferencesCarriesItsVersion", want: "the guest's join page: /static/guest.js is not versioned"},
+	{name: "asset versions: kit.css unversioned on the owner's page", file: appHTML, from: `<link rel="stylesheet" href="{{kit "kit.css"}}">`, to: `<link rel="stylesheet" href="/kit/v1/kit.css">`,
+		pkg: "./internal/server", test: "TestEveryAssetAPageReferencesCarriesItsVersion", want: "the owner's app: /kit/v1/kit.css is not versioned"},
+	{name: "asset versions: the guest page served with max-age", file: guest, from: `h.Set("Cache-Control", "no-store")`, to: `h.Set("Cache-Control", "max-age=14400")`,
+		pkg: "./internal/server", test: "TestPagesAreNeverCachedAndVersionedAssetsAreCachedForAYear", want: `the guest's join page: Cache-Control "max-age=14400"`},
+	{name: "asset versions: the owner's page served with max-age", file: srv, from: `h.Set("Cache-Control", "no-store")`, to: `h.Set("Cache-Control", "max-age=14400")`,
+		pkg: "./internal/server", test: "TestPagesAreNeverCachedAndVersionedAssetsAreCachedForAYear", want: `the owner's app: Cache-Control "max-age=14400"`},
+	{name: "asset versions: any version long-cached", file: assetsGo, from: `v != "" && v == staticVersion(r.URL.Path)`, to: `v != ""`,
+		pkg: "./internal/server", test: "TestPagesAreNeverCachedAndVersionedAssetsAreCachedForAYear", want: `?v=0000000000000000 = 200, Cache-Control "public, max-age=31536000, immutable", want no-cache`},
+	{name: "asset versions: a versioned asset not long-cached", file: assetsGo, from: "\t\t\tcc = AssetCacheControl\n", to: "\t\t\tcc = NoCache\n",
+		pkg: "./internal/server", test: "TestPagesAreNeverCachedAndVersionedAssetsAreCachedForAYear", want: `want "public, max-age=31536000, immutable"`},
+	{name: "asset versions: the version ignores the bytes", file: assetsGo, from: "v := shortHash(b)", to: "v := shortHash(b[:0])",
+		pkg: "./internal/server", test: "TestAssetVersionsFollowTheBytes", want: "app.js versions"},
 
 	// ---- configuration ----
 	{name: "config: the fake engine without MEETINGS_TEST_MODE", file: mainGo, from: `if strings.TrimSpace(getenv("MEETINGS_TEST_MODE")) != "1" {`, to: `if false {`,

@@ -53,7 +53,9 @@ import (
 //go:embed web
 var webFS embed.FS
 
-var pageTmpl = template.Must(template.ParseFS(webFS, "web/*.html"))
+// pageTmpl is the pages; every asset they reference is named through
+// pageFuncs (assets.go), so it carries its version.
+var pageTmpl = template.Must(template.New("").Funcs(pageFuncs).ParseFS(webFS, "web/*.html"))
 
 // Config is what the server needs to know about where it runs.
 type Config struct {
@@ -341,13 +343,6 @@ func RedactPath(p string) string {
 		return "/{redacted}"
 	}
 	return p
-}
-
-func staticHandler(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "no-cache")
-		next.ServeHTTP(w, r)
-	})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

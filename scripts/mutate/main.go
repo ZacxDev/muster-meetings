@@ -1069,7 +1069,7 @@ var mutants = []mutant{
 		pkg: ".", test: "TestLoadConfig", want: "public URL is muster's origin: LoadConfig accepted it"},
 	// ---- 🔴 contacts, phase 1b: the guest card and the outbox ----
 	{name: "contacts card: offered to the owner", file: cardsGo, from: "cardEligible = `p.kind = 'guest' AND ", to: "cardEligible = `",
-		pkg: "./internal/server", test: "TestCardIsNeverOfferedToTheOwner", want: "the owner's row was offered a card"},
+		pkg: "./internal/server", test: "TestCardIsNeverOfferedToTheOwner", want: "OfferCard(owner) = true"},
 	{name: "contacts card: offered to a removed guest", file: cardsGo, from: "p.state IN ('ended', 'left') AND", to: "p.state IN ('ended', 'left', 'removed', 'denied') AND",
 		pkg: "./internal/server", test: "TestCardEligibilityRemovedOrDenied", want: "OfferCard minted a card for Grace H."},
 	{name: "contacts card: offered to a guest never admitted", file: cardsGo, from: "p.admitted_at IS NOT NULL AND ", to: "",
@@ -1140,7 +1140,7 @@ var mutants = []mutant{
 		pkg: "./internal/contacts", test: "TestContractTheRequestsMeetingsSends", want: "Idempotency-Key"},
 	{name: "contacts contract: the submission's times not in UTC", file: "internal/contacts/submission.go", from: "\t\t\tu := (*t).UTC()\n", to: "\t\t\tu := **t\n",
 		pkg: "./internal/contacts", test: "TestContractTheSubmissionMeetingsSends", want: "the body meetings sends"},
-	{name: "contacts validation: an all-digit top-level label", file: ctMail, from: `return strings.Trim(tld, "0123456789") != ""`, to: `return true`,
+	{name: "contacts validation: an all-digit top-level label", file: ctMail, from: `return strings.Trim(tld, "0123456789") != ""`, to: `return tld != ""`,
 		pkg: "./internal/contacts", test: "TestContractTheFieldTable", want: `email "wren@example.123" accepted`},
 	{name: "contacts validation: a space or quote in the local part", file: ctMail, from: "\t\tdefault:\n\t\t\treturn false\n", to: "\t\tdefault:\n",
 		pkg: "./internal/contacts", test: "TestContractTheFieldTable", want: `email "wren o@example.test" accepted`},

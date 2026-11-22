@@ -9,12 +9,14 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/ZacxDev/muster-meetings/internal/egresstest"
 	"github.com/ZacxDev/muster-meetings/internal/ingest"
 	"github.com/ZacxDev/muster-meetings/internal/livekit"
+	"github.com/ZacxDev/muster-meetings/internal/server"
 	"github.com/ZacxDev/muster-meetings/internal/store"
 )
 
@@ -39,7 +41,23 @@ func TestTheTranscriptAgainstARealLiveKitServer(t *testing.T) {
 	keys := livekit.Keys{Key: "APItranscript", Secret: "a-transcript-integration-secret-0123456789"}
 	port := freePort(t, "tcp")
 	api, ws := "http://127.0.0.1:"+strconv.Itoa(port), "ws://127.0.0.1:"+strconv.Itoa(port)
-	e := newEnvWith(t, &liveKitAt{API: api, WS: ws, Keys: keys, RealClock: true})
+	// 🔴 The loop's SECOND retry wait (after attempt 2's refusal) is held
+	// until the test, playing Egress, has connected; every other wait is the
+	// real one. See "The test is Egress now" below for why.
+	held, release := gate(t)
+	inWait := newSignal()
+	var waits atomic.Int32
+	e := newEnvOpts(t, &liveKitAt{API: api, WS: ws, Keys: keys, RealClock: true}, func(c *server.Config) {
+		c.After = func(d time.Duration) <-chan time.Time {
+			if waits.Add(1) != 2 {
+				return time.After(d)
+			}
+			inWait.fire()
+			ch := make(chan time.Time, 1)
+			go func() { <-held; ch <- time.Now() }()
+			return ch
+		}
+	})
 
 	cfg := fmt.Sprintf(`port: %d
 bind_addresses: ["127.0.0.1"]
@@ -98,9 +116,11 @@ logging:
 	if !ingest.ValidTrack(track) || speaker != "Ada L." || state != store.TrackActive {
 		t.Fatalf("the track row: %q %q %q, want a LiveKit track id, Ada L., active", track, speaker, state)
 	}
-	// With no Egress attached LiveKit refuses the start (measured: it waits
-	// 7 s for an Egress, then answers 408 "canceled"): the plugin says so,
-	// retries, and the transcript shows a gap.
+	// With no Egress attached the start never completes: the plugin's own
+	// HTTP client gives up after 10 s (internal/livekit/api.go), and
+	// livekit-server then logs a 408 "request canceled" because the plugin
+	// hung up, not because it refused. The plugin says so, retries, and the
+	// transcript shows a gap.
 	eventually(t, 25*time.Second, "a refused StartTrackEgress is retried", func() bool {
 		return strings.Count(e.log.String(), "transcript: starting a track egress failed") >= 2
 	})
@@ -111,19 +131,33 @@ logging:
 		t.Fatalf("the first segment = %s, want an open gap for Ada L.", gap.Data)
 	}
 
-	// The test is Egress now: the token of the plugin's CURRENT attempt.
-	var meetingExp int64
-	e.dbQuery(`SELECT nonce FROM tracks WHERE track = ?`, track).Scan(&nonce)
-	e.dbQuery(`SELECT created_at FROM meetings WHERE id = ?`, c.ID).Scan(&meetingExp)
-	tok := ingest.Token(ingestKey, c.ID, track, nonce, time.UnixMilli(meetingExp).Add(store.LinkLifetime))
-	code, cl := dialStatus(t, "ws"+strings.TrimPrefix(e.ingest.URL, "http")+ingest.Path(track, tok))
+	// The test is Egress now, for attempt 2, whose refusal the loop is
+	// waiting out (held: it draws no new nonce meanwhile).
+	//
+	// 🔴 Why held. Unheld, the next attempt starts 40 ms after attempt 2's
+	// refusal, and a stream dialled in that moment can pass the token check
+	// on attempt 2's nonce, then register only after attempt 3 has checked
+	// for a stream and drawn a new nonce: a superseded attempt's stream, which
+	// the plugin cuts off by design (TestAStaleStreamDoesNotStopTheRetries;
+	// in production attempt 3's own Egress takes over). Here nothing plays
+	// attempt 3's Egress, so that cut was this test's "connection reset by
+	// peer" (1 run in 20 on main, and once in CI).
+	inWait.wait(t, "the loop waits out attempt 2's refusal")
+	nonce = e.nonceOf(track)
+	code, cl := dialStatus(t, e.ingestURL(c, track, nonce))
 	if code != 101 {
-		// A retry may have drawn a new nonce in between: once more.
-		e.dbQuery(`SELECT nonce FROM tracks WHERE track = ?`, track).Scan(&nonce)
-		tok = ingest.Token(ingestKey, c.ID, track, nonce, time.UnixMilli(meetingExp).Add(store.LinkLifetime))
-		if code, cl = dialStatus(t, "ws"+strings.TrimPrefix(e.ingest.URL, "http")+ingest.Path(track, tok)); code != 101 {
-			t.Fatalf("the ingest refused the current attempt's token: %d", code)
-		}
+		t.Fatalf("the ingest refused the current attempt's token: %d", code)
+	}
+	eventually(t, 5*time.Second, "the stream registers as the current attempt's", func() bool {
+		return e.server.ConnNonceForTest(track) == nonce
+	})
+	fails := strings.Count(e.log.String(), "transcript: starting a track egress failed")
+	release()
+	// Its wait over, the loop sees a current stream and ends: no attempt
+	// draws a new nonce (one would within milliseconds; 300 ms is ample).
+	time.Sleep(300 * time.Millisecond)
+	if n := e.nonceOf(track); n != nonce || e.server.ConnNonceForTest(track) != nonce {
+		t.Fatalf("an attempt after the stream connected superseded it: nonce %q, stream %q, want both %q", n, e.server.ConnNonceForTest(track), nonce)
 	}
 	if err := cl.Stream(egresstest.Script(1000, 1000), 0); err != nil {
 		t.Fatal(err)
@@ -131,6 +165,12 @@ logging:
 	ls := segmentsOf(t, owner, 1)
 	if ls[0].Speaker != "Ada L." || ls[0].Text != fakeScript[0] {
 		t.Fatalf("the line = %+v", ls[0])
+	}
+	// Invariant guard, not proof the loop ended: an attempt started at the
+	// release would log its failure only ~10 s later, after this runs. The
+	// proof is the nonce and registration check above.
+	if now := strings.Count(e.log.String(), "transcript: starting a track egress failed"); now != fails {
+		t.Fatalf("%d failed attempts logged, want %d", now, fails)
 	}
 
 	// The participant leaves: the real track_unpublished ends the track, and

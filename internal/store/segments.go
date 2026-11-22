@@ -5,7 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"strconv"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // ---- tracks: the microphone tracks the plugin transcribes ----
@@ -273,6 +276,50 @@ func (s *Store) AddSegment(ctx context.Context, track, kind string, startMS, end
 		return 0, ErrNotFound
 	}
 	return r.LastInsertId()
+}
+
+// AmendLastLine appends lead (closing marks the STT server decoded only when
+// the participant's next speech began) to the participant's previous line:
+// identity's LATEST segment in the meeting. It answers that segment's id and
+// whether it changed.
+//
+// Nothing changes when lead is empty, when the participant has no segment,
+// when their latest segment is not a line (a gap marker: the mark may belong
+// to speech the gap lost), when its text is empty, or when it already ends
+// with one of marks (🔴 idempotent: a line never ends "??" or ".?", and a
+// lead sent twice adds nothing). Another participant's line is never
+// touched: the row is chosen by meeting AND identity. One transaction, so
+// two amends of one line cannot both see it unmarked.
+func (s *Store) AmendLastLine(ctx context.Context, meetingID, identity, lead, marks string) (int64, bool, error) {
+	if lead == "" {
+		return 0, false, nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, false, err
+	}
+	defer tx.Rollback()
+	var id int64
+	var kind, text string
+	err = tx.QueryRowContext(ctx, `SELECT id, kind, text FROM segments WHERE meeting_id = ? AND identity = ? ORDER BY id DESC LIMIT 1`,
+		meetingID, identity).Scan(&id, &kind, &text)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	text = strings.TrimRightFunc(text, unicode.IsSpace)
+	if kind != SegText || text == "" {
+		return id, false, nil
+	}
+	if last, _ := utf8.DecodeLastRuneInString(text); strings.ContainsRune(marks, last) {
+		return id, false, nil
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE segments SET text = ? WHERE id = ?`, text+lead, id); err != nil {
+		return 0, false, err
+	}
+	return id, true, tx.Commit()
 }
 
 const segCols = `s.id, s.speaker, s.identity != '` + OwnerIdentity + `', s.kind, s.start_ms, s.end_ms, s.text`

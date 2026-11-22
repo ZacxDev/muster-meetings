@@ -3,6 +3,7 @@ package stt_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"slices"
@@ -668,5 +669,87 @@ func TestAFallbackThatFailsToOpenIsLogged(t *testing.T) {
 	n.close()
 	if !strings.Contains(n.log.String(), "the fallback engine did not open a stream (no STT service configured)") {
 		t.Fatalf("the log does not say the fallback failed: %s", n.log.String())
+	}
+}
+
+// finalsSent is the fake server's finals on its first stream, as
+// (text, lead, whether lead was present).
+func finalsSent(t *testing.T, srv *stttest.Server) [][3]string {
+	t.Helper()
+	var out [][3]string
+	for _, m := range srv.Records()[0].Sent {
+		var f struct {
+			Type string  `json:"type"`
+			Text string  `json:"text"`
+			Lead *string `json:"lead"`
+		}
+		if json.Unmarshal([]byte(m), &f) != nil || f.Type != "final" {
+			continue
+		}
+		lead, has := "", "absent"
+		if f.Lead != nil {
+			lead, has = *f.Lead, "present"
+		}
+		out = append(out, [3]string{f.Text, lead, has})
+	}
+	return out
+}
+
+// Late closing marks, as the server measured them: a sentence's mark is
+// decoded only when the NEXT speech begins, so the fake sends it as the
+// next final's `lead` (every final carries `lead`; no partial shows the
+// mark), and the engine hands it on as that Final's Lead, its Text clean. A
+// mark still held when the stream ends comes with the end's final, which
+// has no text: a Final with only a Lead.
+func TestLateMarksComeAsTheNextFinalsLead(t *testing.T) {
+	n := newNem(t)
+	n.srv.Set(func(s *stttest.Server) {
+		s.Lines = []string{"Can everyone hear me clearly?", "Alice will send it, Friday."}
+	})
+	n.open()
+	n.feed(cat(tone(1500, 5000, 0), level(1000, 0), tone(1500, 5000, 0), level(1000, 0)))
+	segs := n.close()
+
+	want := [][3]string{{"Can everyone hear me clearly", "", "present"}, {"Alice will send it, Friday", "?", "present"}, {"", ".", "present"}}
+	if got := finalsSent(t, n.srv); !slices.Equal(got, want) {
+		t.Fatalf("the server's finals %q, want %q", got, want)
+	}
+	for _, m := range n.srv.Records()[0].Sent {
+		if strings.Contains(m, `"partial"`) && (strings.ContainsAny(m, "?") || strings.Contains(m, "lead")) {
+			t.Fatalf("a partial with a late mark or a lead: %s", m)
+		}
+	}
+	var got [][2]string
+	for _, g := range finals(segs) {
+		got = append(got, [2]string{g.Text, g.Lead})
+	}
+	if w := [][2]string{{"Can everyone hear me clearly", ""}, {"Alice will send it, Friday", "?"}, {"", "."}}; !slices.Equal(got, w) {
+		t.Fatalf("the engine's finals %q, want %q", got, w)
+	}
+}
+
+// An older server sends no `lead`: the late mark opens the next final's
+// text (". Thanks"), and its captions may open with it too. The engine
+// moves the marks to Lead, so the line and the caption are clean.
+func TestAnOlderServersLeadingMarksBecomeTheLead(t *testing.T) {
+	n := newNem(t)
+	n.srv.Set(func(s *stttest.Server) { s.LeadInText, s.Lines = true, []string{"We should start.", "? Thanks"} })
+	n.open()
+	n.feed(cat(tone(1500, 5000, 0), level(1000, 0), tone(1500, 5000, 0), level(1000, 0)))
+	segs := n.close()
+	if got := finalsSent(t, n.srv); len(got) < 2 || got[1] != [3]string{". ? Thanks", "", "absent"} {
+		t.Fatalf("the older server's finals %q", got)
+	}
+	var got [][2]string
+	for _, g := range finals(segs) {
+		got = append(got, [2]string{g.Text, g.Lead})
+	}
+	if w := [][2]string{{"We should start", ""}, {"Thanks", ".?"}}; !slices.Equal(got, w) {
+		t.Fatalf("the engine's finals %q, want %q", got, w)
+	}
+	for _, g := range kindsOf(segs, stt.Partial) {
+		if strings.HasPrefix(g.Text, "?") || strings.HasPrefix(g.Text, ".") {
+			t.Fatalf("a caption opens with a mark: %q", g.Text)
+		}
 	}
 }

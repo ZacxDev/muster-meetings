@@ -811,6 +811,16 @@
         reveal();
         unseen();
       },
+      // amend is a line already shown whose text changed (its closing mark
+      // came with the speaker's next words): the text is replaced in place,
+      // the element kept, so it neither moves nor plays its entry again. As
+      // textContent, like every line. A line not shown yet changes nothing:
+      // its segment event will carry the new text.
+      amend: function (a) {
+        var li = list.querySelector('li.line[data-id="' + String(Number(a.id)) + '"]');
+        var text = li && li.querySelector('.text');
+        if (text) text.textContent = a.text;
+      },
       partials: function (ps) {
         follow(function () {
           // A caption that is still the same line keeps its element (no

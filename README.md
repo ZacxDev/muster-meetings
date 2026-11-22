@@ -432,7 +432,7 @@ that does not exist.
 | `GET /api/meetings/{id}` | `{"meeting", "link"}`: `link` is the guest link while the meeting is open and under 24 hours old, `null` otherwise. This is how the page lets you copy an open meeting's link again |
 | `POST /api/meetings/{id}/token` | your LiveKit token for the call (identity `owner`, the owner grant below); `410` once the meeting has ended, `503` "Calls are unavailable" when LiveKit does not answer |
 | `POST /api/meetings/{id}/record` · `/ai` `{"on"}` | the two switches. Off at any time; back on only before any guest has knocked (`409` after) |
-| `GET /api/meetings/{id}/events` | your event stream (read with `fetch`: it needs the bearer): `meeting` events with the meeting, its notice, whether the switches are locked, and the lobby; the transcript (`segment` `{"id", "speaker", "kind": "text"\|"gap", "start_ms", "end_ms", "text"}`, a gap sent again when it closes; `partials`; `transcript` `{"status"}`). While it is open no knock is pushed to your phone |
+| `GET /api/meetings/{id}/events` | your event stream (read with `fetch`: it needs the bearer): `meeting` events with the meeting, its notice, whether the switches are locked, and the lobby; the transcript (`segment` `{"id", "speaker", "kind": "text"\|"gap", "start_ms", "end_ms", "text"}`, a gap sent again when it closes; `amend` `{"id", "text"}`, a line already sent whose text changed: its late closing mark, see [the transcript](#the-transcript); `partials`; `transcript` `{"status"}`). While it is open no knock is pushed to your phone |
 | `POST /api/meetings/{id}/lobby/{pid}/admit` · `/deny` | let a waiting guest in, or not. At most 7 guests in the call (8 with you): past that `429` |
 | `DELETE /api/meetings/{id}/participants/{pid}` | remove a guest from the call |
 | `POST /api/meetings/{id}/end` | End meeting |
@@ -665,6 +665,18 @@ literal).
    zero-padded and `end` carries the **true** sample count. The server's
    `partial`s are the panel's live captions (in italics, replaced by the
    line when its final comes) and are **never stored**; finals are stored.
+   **Late closing marks:** the model emits a sentence's closing mark
+   (`.` `?` `!` `,` …) only when the NEXT speech begins, so the server sends
+   a final at once without it, and the mark comes as the next final's
+   `lead` (`{"text": "Alice will", "lead": "?"}`; `{"text": "", "lead": "."}`
+   when nothing more was said). The plugin appends the `lead` to the same
+   participant's previous line, if that is their latest stored segment, has
+   text and does not already end with a mark (so never `??` or `.?`); it
+   is stored, every open panel updates that line in place (an `amend`
+   event), and the archive and the exports read the amended line. Marks with
+   no such line are dropped; a final with only a `lead` stores no line. An
+   older server that sends no `lead` but opens the next final's text with
+   the mark (`". Thanks"`) is read the same way. No schema change.
    When Egress itself stops delivering for 20 s (under the server's 30 s
    idle close), the plugin ends the stream cleanly rather than invent
    silence, and the next audio opens a new one at its own place in the

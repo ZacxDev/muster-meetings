@@ -890,6 +890,23 @@ var mutants = []mutant{
 		pkg: "./internal/stt", test: "TestADropsGapStartsWhereWordsMayHaveBeenLost", want: "want one from the utterance's start"},
 	{name: "nemotron fallback: a failed open not logged", file: nemGo, from: "} else {\n\t\t\ts.e.logf(\"transcript: the fallback engine did not open", to: "} else if false {\n\t\t\ts.e.logf(\"transcript: the fallback engine did not open",
 		pkg: "./internal/stt", test: "TestAFallbackThatFailsToOpenIsLogged", want: "the log does not say the fallback failed"},
+
+	// ---- late closing marks (the server's `lead`: the previous line's mark) ----
+	{name: "late mark: the amend dropped", file: trans, from: "if id, changed, err := s.store.AmendLastLine(ctx, t.MeetingID, t.Identity, seg.Lead, stt.Marks); err != nil {",
+		to:  "if id, changed, err := int64(0), false, error(nil); err != nil {",
+		pkg: "./internal/server", test: "TestALateClosingMarkAmendsThePreviousLineEverywhere", want: `the panel stopped short: lines ["Ada L.: Can everyone hear me clearly" "Ada L.: Alice will"]`},
+	{name: "late mark: another participant's line amended", file: segs, from: "WHERE meeting_id = ? AND identity = ? ORDER BY id DESC LIMIT 1`",
+		to:  "WHERE meeting_id = ? AND ? != '' ORDER BY id DESC LIMIT 1`",
+		pkg: "./internal/server", test: "TestALeadNeverTouchesAnotherParticipantsLine", want: "Hello from the guest?"},
+	{name: "late mark: no idempotence check (a second mark appended)", file: segs, from: "DecodeLastRuneInString(text); strings.ContainsRune(marks, last) {",
+		to:  "DecodeLastRuneInString(text); false && strings.ContainsRune(marks, last) {",
+		pkg: "./internal/server", test: "TestALineThatAlreadyEndsWithAMarkGetsNoSecond", want: "a fallback line became \"Ada L.: The fallback heard this.?\""},
+	{name: "late mark: no live event (only the store amended)", file: trans, from: "\t\t\t\ts.noteAmend(t.MeetingID, id)\n", to: "\t\t\t\t_ = id\n",
+		pkg: "./internal/server", test: "TestALateClosingMarkAmendsThePreviousLineEverywhere", want: `amends []`},
+	{name: "late mark: a lead-only final stores an empty line", file: trans, from: "if seg.Text != \"\" || seg.Lead == \"\" {", to: "if true {",
+		pkg: "./internal/server", test: "TestALeadOnlyFinalAmendsAndStoresNoLine", want: `"Ada L.: "]`},
+	{name: "late mark: an older server's marks left in the text", file: nemGo, from: "inText, text := SplitLead(m.Text)", to: "inText, text := \"\", strings.TrimSpace(m.Text)",
+		pkg: "./internal/server", test: "TestAnOlderServersMarkInTheTextAmendsThePreviousLine", want: `"Ada L.: . Thanks"`},
 	{name: "Retry-After: an HTTP date not read", file: wsCl, from: "if t, err := http.ParseTime(v); err == nil && t.After(now) {", to: "if t, err := http.ParseTime(v); false && err == nil && t.After(now) {",
 		pkg: "./internal/stt", test: "TestRetryAfterReadsSecondsAndDatesCappedAt24h", want: "a future date: retryAfter"},
 	{name: "Retry-After: seconds not capped", file: wsCl, from: "return time.Duration(min(n, 24*3600)) * time.Second", to: "return time.Duration(n) * time.Second",
@@ -998,6 +1015,8 @@ var mutants = []mutant{
 		e2e: "ui-remember.spec.ts", test: "a guest always gets the check", want: "remembered"},
 	{name: "ui: Join stuck while the camera prompt is pending", file: callJS, from: "        setState('pending');\n", to: "        return;\n",
 		e2e: "ui-remember.spec.ts", test: "unanswered camera prompt", want: "pending"},
+	{name: "ui: an amend (a late closing mark) not drawn", file: callJS, from: "if (text) text.textContent = a.text;", to: "if (false) text.textContent = a.text;",
+		e2e: "late-marks.spec.ts", test: "late .* in place on every open panel", want: `Expected: "Can everyone hear me clearly?"`},
 
 	// ---- configuration ----
 	{name: "config: the fake engine without MEETINGS_TEST_MODE", file: mainGo, from: `if strings.TrimSpace(getenv("MEETINGS_TEST_MODE")) != "1" {`, to: `if false {`,

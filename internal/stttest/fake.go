@@ -18,6 +18,17 @@
 //     bad_end 1003, idle 1001 (no frame for IdleTimeout).
 //   - A segment whose samples are all one value (padding excluded) yields
 //     empty text and no partials, as the server's constant-signal rule.
+//   - Closing marks arrive LATE, as the real model emits them (measured: a
+//     sentence's . ? ! , is decoded only when the NEXT speech begins). A
+//     script line's trailing marks ("Can everyone hear me clearly?") are not
+//     in its own final: they are the `lead` of the stream's next final that
+//     has speech ({"text": "Alice will", "lead": "?"}), or of the end's final
+//     (with or without speech; {"text": "", "lead": "?"}). A flush over
+//     silence keeps them back; a dead capture's final (one constant non-zero
+//     value) has `lead` "" and keeps them back too. Every final carries
+//     `lead` ("" when none); partials never do, and never show the marks.
+//     LeadInText is an OLDER server instead: no `lead` field, and the marks
+//     open the next final's text (". Thanks").
 //
 // It records every stream: the frames' sizes, the sample count at each
 // flush, the end's samples, and the bearer it was opened with; and it can
@@ -90,6 +101,9 @@ type Server struct {
 	// Hangup cuts every upgrade's connection with no answer at all: a
 	// failed connect, not a refusal.
 	Hangup bool
+	// LeadInText is an older server: finals carry no `lead`, and the late
+	// marks open the next final's text instead.
+	LeadInText bool
 
 	hangups int
 
@@ -249,7 +263,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	s.upgrades++
 	rec := &Record{ID: s.upgrades, Auth: auth, End: -1}
 	s.records = append(s.records, rec)
-	idle, every, lines, delay := s.IdleTimeout, s.PartialEvery, append([]string(nil), s.Lines...), s.FinalDelay
+	idle, every, lines, delay, old := s.IdleTimeout, s.PartialEvery, append([]string(nil), s.Lines...), s.FinalDelay, s.LeadInText
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
@@ -282,7 +296,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	fc.serve(idle, every, lines, delay)
+	fc.serve(idle, every, lines, delay, old)
 }
 
 // fconn is one accepted stream.
@@ -332,25 +346,69 @@ func (sg *segment) constant() bool {
 	return !any || lo == hi
 }
 
-func (f *fconn) serve(idle time.Duration, every int, lines []string, delay time.Duration) {
+// dead is a dead capture: every sample one constant NON-ZERO value (digital
+// silence, all zeros, is not).
+func (sg *segment) dead() bool {
+	if !sg.constant() {
+		return false
+	}
+	for _, v := range sg.pending {
+		return v != 0
+	}
+	return sg.any && sg.lo != 0
+}
+
+// marks is the server's strip_leading_punct set.
+const marks = ".,;:!?…"
+
+// splitMarks is a script line without its trailing closing marks, and those
+// marks (whitespace dropped, in order).
+func splitMarks(line string) (body, tail string) {
+	body = strings.TrimRightFunc(line, func(r rune) bool { return strings.ContainsRune(marks, r) || r == ' ' })
+	for _, r := range line[len(body):] {
+		if r != ' ' {
+			tail += string(r)
+		}
+	}
+	return body, tail
+}
+
+func (f *fconn) serve(idle time.Duration, every int, lines []string, delay time.Duration, old bool) {
 	var total int64
 	sg := &segment{}
+	// held is the closing marks decoded late: the last line's, not yet sent.
+	held := ""
 	wordsFor := func() string {
 		if len(lines) == 0 {
 			return ""
 		}
-		return lines[sg.nonempty%len(lines)]
+		body, _ := splitMarks(lines[sg.nonempty%len(lines)])
+		return body
 	}
-	final := func(end int64) {
-		text := ""
-		if !sg.constant() && sg.frames > 0 {
+	final := func(end int64, atEnd bool) {
+		text, lead := "", ""
+		speech := !sg.constant() && sg.frames > 0
+		// The held marks come with the next speech, or at the end unless
+		// the last segment is a dead capture (whose output is not trusted).
+		if speech || (atEnd && !sg.dead()) {
+			lead, held = held, ""
+		}
+		if speech {
 			text = wordsFor()
+			if len(lines) > 0 {
+				_, held = splitMarks(lines[sg.nonempty%len(lines)])
+			}
 			sg.nonempty++
 		}
 		if delay > 0 {
 			time.Sleep(delay)
 		}
-		f.send(map[string]any{"type": "final", "text": text, "start_ms": sg.start * 1000 / 16000, "end_ms": end * 1000 / 16000})
+		m := map[string]any{"type": "final", "text": text, "lead": lead, "start_ms": sg.start * 1000 / 16000, "end_ms": end * 1000 / 16000}
+		if old {
+			delete(m, "lead")
+			m["text"] = strings.TrimSpace(lead + " " + text)
+		}
+		f.send(m)
 		*sg = segment{start: end, nonempty: sg.nonempty}
 	}
 	for {
@@ -413,7 +471,7 @@ func (f *fconn) serve(idle time.Duration, every int, lines []string, delay time.
 					sg.fold(sg.pending)
 					sg.pending = nil
 				}
-				final(total)
+				final(total, false)
 			case "end":
 				var n int64
 				ok := m.Samples != nil && json.Unmarshal(*m.Samples, &n) == nil && !strings.ContainsAny(string(*m.Samples), ".eE\"")
@@ -429,7 +487,7 @@ func (f *fconn) serve(idle time.Duration, every int, lines []string, delay time.
 					sg.fold(sg.pending[:int64(len(sg.pending))-pad])
 					sg.pending = nil
 				}
-				final(n)
+				final(n, true)
 				f.closeWith(1000)
 				return
 			default:

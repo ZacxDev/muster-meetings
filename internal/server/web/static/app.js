@@ -307,6 +307,7 @@
       return MeetingsCall.readEvents(res, function (name, data) {
         if (name === 'meeting') renderSnapshot(data);
         else if (name === 'segment') transcript.segment(data);
+        else if (name === 'amend') transcript.amend(data);
         else if (name === 'partials') transcript.partials(data.partials);
         else if (name === 'transcript') transcript.status(data.status);
       });

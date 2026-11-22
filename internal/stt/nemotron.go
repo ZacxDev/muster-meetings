@@ -684,6 +684,10 @@ type serverMsg struct {
 	StartMS int64  `json:"start_ms"`
 	EndMS   int64  `json:"end_ms"`
 	Code    string `json:"code"`
+	// Lead, on a final: the marks the segment's raw text opened with (the
+	// previous line's closing mark; Segment.Lead). Absent from an older
+	// server's finals.
+	Lead string `json:"lead"`
 }
 
 // read is c's reader: partials and finals at c's offset; its end, unless
@@ -721,7 +725,9 @@ func (s *nemStream) read(c *nemConn) {
 		}
 		switch m.Type {
 		case "partial":
-			if m.Text = strings.TrimSpace(m.Text); m.Text == "" {
+			// An older server's caption may open with the previous line's
+			// closing mark: it is not this caption's.
+			if _, m.Text = SplitLead(m.Text); m.Text == "" {
 				continue
 			}
 			s.words.Store(true)
@@ -732,14 +738,22 @@ func (s *nemStream) read(c *nemConn) {
 			if c.unanswered.Load() > 0 {
 				c.unanswered.Add(-1)
 			}
-			if m.Text = strings.TrimSpace(m.Text); m.Text == "" {
+			// The previous line's closing marks: the server's `lead`, then
+			// any an older server left at the start of the text.
+			inText, text := SplitLead(m.Text)
+			lead := CleanLead(m.Lead) + inText
+			if text == "" && lead == "" {
 				// Nothing was said (or a constant signal): no line, and
 				// the caption in progress, if any, clears.
 				s.emit(Segment{Kind: Partial, StartMS: off + m.StartMS, EndMS: off + m.EndMS})
 				continue
 			}
-			s.words.Store(true)
-			s.emit(Segment{Kind: Final, StartMS: off + m.StartMS, EndMS: off + m.EndMS, Text: m.Text, Engine: s.e.Name()})
+			if text != "" {
+				s.words.Store(true)
+			}
+			// A final with only a lead stores no line: it amends the
+			// previous one (and clears the caption, as every final does).
+			s.emit(Segment{Kind: Final, StartMS: off + m.StartMS, EndMS: off + m.EndMS, Text: text, Lead: lead, Engine: s.e.Name()})
 		case "error":
 			// The close follows; the code says why (bad_frame is a bug in
 			// the plugin, never expected).

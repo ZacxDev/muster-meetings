@@ -390,7 +390,10 @@ func (s *Server) renderEnter(w http.ResponseWriter, code int, p enterPage) {
 	h.Set("Cache-Control", "no-store")
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(code)
-	_ = pageTmpl.ExecuteTemplate(w, "app.html", p)
+	if err := pageTmpl.ExecuteTemplate(w, "app.html", p); err != nil {
+		// checkPages makes this unreachable for the pages as shipped.
+		s.cfg.Log.Printf("page app.html: %v", err)
+	}
 }
 
 func (s *Server) refuseEnter(w http.ResponseWriter, code int, msg, why string) {

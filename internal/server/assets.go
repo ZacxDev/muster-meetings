@@ -3,12 +3,16 @@ package server
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"html/template"
+	"io"
 	"io/fs"
 	"net/http"
 	"slices"
 	"strings"
+
+	"github.com/ZacxDev/muster-meetings/internal/lobby"
 )
 
 // Asset versions. Every file a page references names a version in its URL,
@@ -26,7 +30,13 @@ import (
 //     muster and re-themed while the plugin runs (kit.go), so its bytes are
 //     not known when a page is drawn. It carries the build's version (every
 //     embedded file's, together: the bundled kit is among them), which
-//     changes on a deploy, and stays `no-cache` + ETag.
+//     changes on a deploy of THIS plugin only, and stays `no-cache` + ETag.
+//     🔴 So behind a CDN that overrides the origin's `no-cache` with its own
+//     browser cache TTL (measured: `max-age=14400` on /kit/v1/kit.css and
+//     kit.js), a muster re-theme or a new muster kit.js can reach a browser
+//     up to that TTL late: the URL does not move for it. The fix is at the
+//     CDN, a rule for /kit/v1/* that respects the origin's headers, not
+//     here.
 //   - The pages themselves are `no-store` (they hold the owner's session).
 //
 // The scripts are classic <script src> files that load nothing else (no ES
@@ -105,20 +115,61 @@ var pageFuncs = template.FuncMap{
 // staticHandler serves web/static, always revalidated (`no-cache`); the
 // pages' ?v= is what keeps a browser off an old file after a deploy. The
 // file's version is its strong ETag (the embedded files carry no
-// modification time, so without it every revalidation was a full download):
-// an If-None-Match naming it is a 304 with no body; any other is the file.
+// modification time, so without it every revalidation was a full download).
+// The file server (http.ServeContent) answers an If-None-Match naming it
+// with a 304 and no body, and any other with the file.
 func staticHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("Cache-Control", "no-cache")
 		if v := staticVersion(r.URL.Path); v != "" {
-			etag := `"` + v + `"`
-			h.Set("ETag", etag)
-			if r.Header.Get("If-None-Match") == etag {
-				w.WriteHeader(http.StatusNotModified)
-				return
-			}
+			h.Set("ETag", `"`+v+`"`)
 		}
 		next.ServeHTTP(w, r)
 	})
 }
+
+// pageSamples is what each page template is drawn with at startup
+// (checkPages): every branch that names an asset. A template under web/
+// with no samples here fails the check, so a new page cannot skip it.
+var pageSamples = map[string][]any{
+	"app.html":   {enterPage{Session: "mmo_sample", Ref: "sample"}, enterPage{Message: "sample", Again: true}},
+	"guest.html": {guestPage{OwnerName: "sample", Notice: lobby.Notice{Record: true, AI: true, Transcribed: true, Text: []string{"sample"}, Badge: "sample"}}, guestPage{Message: "sample"}},
+}
+
+// checkPages draws every page of t with its samples and answers the first
+// error: a page that cannot render (a file that is not embedded, a field
+// that does not exist) fails the plugin's start, not a guest's request,
+// where the error would come after the 200 and truncate the page.
+func checkPages(t *template.Template) error {
+	n := 0
+	for _, p := range t.Templates() {
+		name := p.Name()
+		if !strings.HasSuffix(name, ".html") {
+			continue
+		}
+		samples, ok := pageSamples[name]
+		if !ok {
+			return fmt.Errorf("page %s has no samples in pageSamples", name)
+		}
+		for _, d := range samples {
+			if err := t.ExecuteTemplate(io.Discard, name, d); err != nil {
+				return fmt.Errorf("page %s: %w", name, err)
+			}
+		}
+		n++
+	}
+	if n == 0 {
+		return errors.New("no page templates")
+	}
+	return nil
+}
+
+// The pages are checked when the plugin starts: it does not start with one
+// that cannot render.
+var _ = func() bool {
+	if err := checkPages(pageTmpl); err != nil {
+		panic("meetings: " + err.Error())
+	}
+	return true
+}()

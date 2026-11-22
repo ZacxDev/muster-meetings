@@ -45,7 +45,10 @@ func (s *Server) renderGuest(w http.ResponseWriter, code int, p guestPage) {
 	h.Set("Cache-Control", "no-store")
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(code)
-	_ = pageTmpl.ExecuteTemplate(w, "guest.html", p)
+	if err := pageTmpl.ExecuteTemplate(w, "guest.html", p); err != nil {
+		// checkPages makes this unreachable for the pages as shipped.
+		s.cfg.Log.Printf("page guest.html: %v", err)
+	}
 }
 
 // handleGuestPage is the link itself. It names whose meeting it is and,

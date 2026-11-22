@@ -1,6 +1,8 @@
 package server
 
 import (
+	"html/template"
+	"strings"
 	"testing"
 	"testing/fstest"
 )
@@ -49,5 +51,22 @@ func TestAPageCannotNameAnAssetThatIsNotEmbedded(t *testing.T) {
 	kit := pageFuncs["kit"].(func(string) (string, error))
 	if u, err := kit("icons.svg"); err == nil {
 		t.Fatalf("kit(icons.svg) = %q, want an error", u)
+	}
+}
+
+// 🔴 The plugin does not start with a page that cannot render: checkPages
+// (run at package init on pageTmpl) refuses a template naming a file that is
+// not embedded, and a page with no samples. The shipped pages pass it.
+func TestAPageThatCannotRenderFailsStartup(t *testing.T) {
+	if err := checkPages(pageTmpl); err != nil {
+		t.Fatalf("the shipped pages: %v", err)
+	}
+	bad := template.Must(template.New("").Funcs(pageFuncs).Parse(`{{define "guest.html"}}<script src="{{asset "missing.js"}}"></script>{{end}}`))
+	if err := checkPages(bad); err == nil || !strings.Contains(err.Error(), `asset "missing.js" is not in web/static`) {
+		t.Fatalf("a page naming missing.js: checkPages = %v, want the missing asset named", err)
+	}
+	unsampled := template.Must(template.New("").Funcs(pageFuncs).Parse(`{{define "new.html"}}hi{{end}}`))
+	if err := checkPages(unsampled); err == nil || !strings.Contains(err.Error(), "new.html has no samples") {
+		t.Fatalf("a page with no samples: checkPages = %v", err)
 	}
 }

@@ -769,6 +769,8 @@ var mutants = []mutant{
 	// ---- 3a: a connected stream ends the start retries (CI, real LiveKit) ----
 	{name: "egress retry: the check before an attempt removed", file: trans, from: "\t\tif s.streamingCurrent(ctx, track) {\n\t\t\treturn\n\t\t}\n\t\troom := store.RoomName(t.MeetingID)", to: "\t\troom := store.RoomName(t.MeetingID)",
 		pkg: "./internal/server", test: "TestAStreamThatConnectsDuringAFailingStartEndsTheLoop", want: "phase 2:"},
+	{name: "egress retry (real LiveKit): the check before an attempt removed", file: trans, from: "\t\tif s.streamingCurrent(ctx, track) {\n\t\t\treturn\n\t\t}\n\t\troom := store.RoomName(t.MeetingID)", to: "\t\troom := store.RoomName(t.MeetingID)", realLiveKit: true,
+		pkg: "./internal/server", test: "TestTheTranscriptAgainstARealLiveKitServer", want: "an attempt after the stream connected superseded it"},
 	{name: "egress retry: the check after a failed attempt removed", file: trans, from: "s.tr.gapMu.Lock()\n\t\tif s.streamingCurrent(ctx, track) {\n\t\t\ts.tr.gapMu.Unlock()\n\t\t\treturn\n\t\t}\n", to: "s.tr.gapMu.Lock()\n",
 		pkg: "./internal/server", test: "TestAStreamThatConnectsDuringAFailingStartEndsTheLoop", want: "phase 1:"},
 	{name: "egress retry: a stale stream counts as current", file: trans, from: "return err == nil && t.Nonce == lc.nonce", to: "return err == nil && (t.Nonce == lc.nonce || lc != nil)",

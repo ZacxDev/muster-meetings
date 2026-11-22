@@ -3,7 +3,7 @@ module github.com/ZacxDev/muster-meetings
 go 1.26.0
 
 require (
-	github.com/ZacxDev/muster-contacts v0.0.0-20261122222956-a08d4d007408
+	github.com/ZacxDev/muster-contacts v0.0.0-20261122234622-806d0bd3cbff
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.62.0
 )

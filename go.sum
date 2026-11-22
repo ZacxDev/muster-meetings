@@ -1,7 +1,5 @@
-github.com/ZacxDev/muster-contacts v0.0.0-20261122215757-15d715aef779 h1:Ri+tql3OSGRF7PaPepZO9tWl3kRF7+Nbc3rV++OUUVI=
-github.com/ZacxDev/muster-contacts v0.0.0-20261122215757-15d715aef779/go.mod h1:EmzEXPGtJWZ4EfqhJjIhKc2Hk3c6pPChS1YkJfa7kIU=
-github.com/ZacxDev/muster-contacts v0.0.0-20261122222956-a08d4d007408 h1:bbL19ue19G17xwZB9FYaG1WqL3ba4pfxwEz3So952uo=
-github.com/ZacxDev/muster-contacts v0.0.0-20261122222956-a08d4d007408/go.mod h1:EmzEXPGtJWZ4EfqhJjIhKc2Hk3c6pPChS1YkJfa7kIU=
+github.com/ZacxDev/muster-contacts v0.0.0-20261122234622-806d0bd3cbff h1:W6dLi17LepiGz2PTIr354sVrGGLwhIAcP+4U+zTOVT4=
+github.com/ZacxDev/muster-contacts v0.0.0-20261122234622-806d0bd3cbff/go.mod h1:EmzEXPGtJWZ4EfqhJjIhKc2Hk3c6pPChS1YkJfa7kIU=
 github.com/dustin/go-humanize v1.1.0 h1:dbKTrvD0klcbBV/h4AWJdMuZogJACoMlvWIWZ5b2xWg=
 github.com/dustin/go-humanize v1.1.0/go.mod h1:hc1CvRkJMsgxqjmjMQF3QNRAZBwY8AXBAzKYoSX9sFI=
 github.com/google/pprof v0.0.0-20261016150608-1facf8f91b50 h1:PlNWJRxu5APSV0pWqfIsZ0qt9OOGHSWfZQ4zvx+WgWs=

@@ -27,8 +27,9 @@
 //     silence keeps them back; a dead capture's final (one constant non-zero
 //     value) has `lead` "" and keeps them back too. Every final carries
 //     `lead` ("" when none); partials never do, and never show the marks.
-//     LeadInText is an OLDER server instead: no `lead` field, and the marks
-//     open the next final's text (". Thanks").
+//     A script line that OPENS with marks ("? Alice will": a segment that
+//     began mid-sentence) has them stripped into its final's `lead`, after
+//     any held ones, as the server's strip_leading_punct does.
 //
 // It records every stream: the frames' sizes, the sample count at each
 // flush, the end's samples, and the bearer it was opened with; and it can
@@ -101,9 +102,6 @@ type Server struct {
 	// Hangup cuts every upgrade's connection with no answer at all: a
 	// failed connect, not a refusal.
 	Hangup bool
-	// LeadInText is an older server: finals carry no `lead`, and the late
-	// marks open the next final's text instead.
-	LeadInText bool
 
 	hangups int
 
@@ -263,7 +261,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	s.upgrades++
 	rec := &Record{ID: s.upgrades, Auth: auth, End: -1}
 	s.records = append(s.records, rec)
-	idle, every, lines, delay, old := s.IdleTimeout, s.PartialEvery, append([]string(nil), s.Lines...), s.FinalDelay, s.LeadInText
+	idle, every, lines, delay := s.IdleTimeout, s.PartialEvery, append([]string(nil), s.Lines...), s.FinalDelay
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
@@ -296,7 +294,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	fc.serve(idle, every, lines, delay, old)
+	fc.serve(idle, every, lines, delay)
 }
 
 // fconn is one accepted stream.
@@ -361,19 +359,19 @@ func (sg *segment) dead() bool {
 // marks is the server's strip_leading_punct set.
 const marks = ".,;:!?…"
 
-// splitMarks is a script line without its trailing closing marks, and those
-// marks (whitespace dropped, in order).
-func splitMarks(line string) (body, tail string) {
-	body = strings.TrimRightFunc(line, func(r rune) bool { return strings.ContainsRune(marks, r) || r == ' ' })
-	for _, r := range line[len(body):] {
-		if r != ' ' {
-			tail += string(r)
-		}
-	}
-	return body, tail
+// splitMarks is a script line as the server sees it: the marks it opens
+// with (head), its words (body), and its trailing closing marks (tail),
+// each run of marks with whitespace dropped, in order.
+func splitMarks(line string) (head, body, tail string) {
+	isMark := func(r rune) bool { return strings.ContainsRune(marks, r) || r == ' ' }
+	body = strings.TrimRightFunc(line, isMark)
+	tail = strings.ReplaceAll(line[len(body):], " ", "")
+	rest := strings.TrimLeftFunc(body, isMark)
+	head = strings.ReplaceAll(body[:len(body)-len(rest)], " ", "")
+	return head, rest, tail
 }
 
-func (f *fconn) serve(idle time.Duration, every int, lines []string, delay time.Duration, old bool) {
+func (f *fconn) serve(idle time.Duration, every int, lines []string, delay time.Duration) {
 	var total int64
 	sg := &segment{}
 	// held is the closing marks decoded late: the last line's, not yet sent.
@@ -382,7 +380,7 @@ func (f *fconn) serve(idle time.Duration, every int, lines []string, delay time.
 		if len(lines) == 0 {
 			return ""
 		}
-		body, _ := splitMarks(lines[sg.nonempty%len(lines)])
+		_, body, _ := splitMarks(lines[sg.nonempty%len(lines)])
 		return body
 	}
 	final := func(end int64, atEnd bool) {
@@ -393,22 +391,18 @@ func (f *fconn) serve(idle time.Duration, every int, lines []string, delay time.
 		if speech || (atEnd && !sg.dead()) {
 			lead, held = held, ""
 		}
+		if speech && len(lines) > 0 {
+			var head string
+			head, text, held = splitMarks(lines[sg.nonempty%len(lines)])
+			lead += head
+		}
 		if speech {
-			text = wordsFor()
-			if len(lines) > 0 {
-				_, held = splitMarks(lines[sg.nonempty%len(lines)])
-			}
 			sg.nonempty++
 		}
 		if delay > 0 {
 			time.Sleep(delay)
 		}
-		m := map[string]any{"type": "final", "text": text, "lead": lead, "start_ms": sg.start * 1000 / 16000, "end_ms": end * 1000 / 16000}
-		if old {
-			delete(m, "lead")
-			m["text"] = strings.TrimSpace(lead + " " + text)
-		}
-		f.send(m)
+		f.send(map[string]any{"type": "final", "text": text, "lead": lead, "start_ms": sg.start * 1000 / 16000, "end_ms": end * 1000 / 16000})
 		*sg = segment{start: end, nonempty: sg.nonempty}
 	}
 	for {

@@ -33,7 +33,6 @@ import (
 	"context"
 	"errors"
 	"strings"
-	"unicode"
 )
 
 // Rate is the sample rate every engine takes: 16 kHz mono.
@@ -83,9 +82,8 @@ type Segment struct {
 	// end the PREVIOUS line of the same participant, which the server had
 	// already finalised without them (the model emits a sentence's closing
 	// mark only when the next speech begins). The server sends it as the
-	// final's `lead`; an older server sends it at the start of `text`, and
-	// the engine moves it here. A Final may carry a Lead and no Text: it
-	// stores no line, it only amends the previous one.
+	// final's `lead`. A Final may carry a Lead and no Text: it stores no
+	// line, it only amends the previous one.
 	Lead string
 	// Engine is the engine that produced it ("" is the configured one): a
 	// nemotron stream's fallback lines are stored as the utterance
@@ -121,24 +119,6 @@ const Marks = ".,;:!?…"
 
 // IsMark says r is one of Marks.
 func IsMark(r rune) bool { return strings.ContainsRune(Marks, r) }
-
-// SplitLead splits text into the run of marks it opens with (whitespace
-// between them ignored, the marks kept in order) and the rest, trimmed. An
-// older Nemotron server sent a segment's leading marks in its text: ". Thanks"
-// is ("." , "Thanks").
-func SplitLead(text string) (lead, rest string) {
-	var b strings.Builder
-	for i, r := range text {
-		switch {
-		case IsMark(r):
-			b.WriteRune(r)
-		case unicode.IsSpace(r):
-		default:
-			return b.String(), strings.TrimSpace(text[i:])
-		}
-	}
-	return b.String(), ""
-}
 
 // CleanLead is a server's `lead` as stored: its marks, in order; anything
 // else (whitespace, or a character that is not a mark) is dropped, so a lead

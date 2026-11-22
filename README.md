@@ -674,9 +674,8 @@ literal).
    text and does not already end with a mark (so never `??` or `.?`); it
    is stored, every open panel updates that line in place (an `amend`
    event), and the archive and the exports read the amended line. Marks with
-   no such line are dropped; a final with only a `lead` stores no line. An
-   older server that sends no `lead` but opens the next final's text with
-   the mark (`". Thanks"`) is read the same way. No schema change.
+   no such line are dropped; a final with only a `lead` stores no line. No
+   schema change.
    When Egress itself stops delivering for 20 s (under the server's 30 s
    idle close), the plugin ends the stream cleanly rather than invent
    silence, and the next audio opens a new one at its own place in the

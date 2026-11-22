@@ -193,8 +193,8 @@ func TestALeadOnlyFinalAmendsAndStoresNoLine(t *testing.T) {
 }
 
 // A participant's first line has no previous line: its leading marks are
-// dropped, never stored as the start of the line. (Here an older server's
-// way, "? Alice will" in the text; a `lead` takes the same path.)
+// dropped, never stored as the start of the line. (The segment began
+// mid-sentence: the fake server sends {"text": "Alice will", "lead": "?"}.)
 func TestMarksWithNoPreviousLineAreDropped(t *testing.T) {
 	e, srv := newNemEnv(t)
 	srv.Set(func(s *stttest.Server) { s.Lines = []string{"? Alice will"} })
@@ -268,21 +268,5 @@ func TestALineThatAlreadyEndsWithAMarkGetsNoSecond(t *testing.T) {
 		if !strings.HasPrefix(a.Text, "Alice will") {
 			t.Fatalf("an amend of a line that already ended with a mark: %+v", a)
 		}
-	}
-}
-
-// An older server (no `lead`; the late mark opens the next final's text,
-// ". Thanks") is read the same way: line 1 gets the ".", line 2 is "Thanks".
-func TestAnOlderServersMarkInTheTextAmendsThePreviousLine(t *testing.T) {
-	e, srv := newNemEnv(t)
-	srv.Set(func(s *stttest.Server) { s.LeadInText, s.Lines = true, []string{"We should start.", "Thanks"} })
-	e.lk.EgressAudio = func(room, identity, track string) []byte { return speech }
-	e.lk.EgressPace = time.Millisecond
-	c := e.meeting(ada)
-	e.started(c)
-	e.publish(c, store.OwnerIdentity, "MICROPHONE")
-	e.settled(c, srv, 2, []string{"Ada L.: We should start.", "Ada L.: Thanks"})
-	if s := srv.Records()[0].Sent; !slices.ContainsFunc(s, func(m string) bool { return strings.Contains(m, `"text":". Thanks"`) }) {
-		t.Fatalf("the older server's finals: %q", s)
 	}
 }

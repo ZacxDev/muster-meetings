@@ -905,8 +905,6 @@ var mutants = []mutant{
 		pkg: "./internal/server", test: "TestALateClosingMarkAmendsThePreviousLineEverywhere", want: `amends []`},
 	{name: "late mark: a lead-only final stores an empty line", file: trans, from: "if seg.Text != \"\" || seg.Lead == \"\" {", to: "if true {",
 		pkg: "./internal/server", test: "TestALeadOnlyFinalAmendsAndStoresNoLine", want: `"Ada L.: "]`},
-	{name: "late mark: an older server's marks left in the text", file: nemGo, from: "inText, text := SplitLead(m.Text)", to: "inText, text := \"\", strings.TrimSpace(m.Text)",
-		pkg: "./internal/server", test: "TestAnOlderServersMarkInTheTextAmendsThePreviousLine", want: `"Ada L.: . Thanks"`},
 	{name: "Retry-After: an HTTP date not read", file: wsCl, from: "if t, err := http.ParseTime(v); err == nil && t.After(now) {", to: "if t, err := http.ParseTime(v); false && err == nil && t.After(now) {",
 		pkg: "./internal/stt", test: "TestRetryAfterReadsSecondsAndDatesCappedAt24h", want: "a future date: retryAfter"},
 	{name: "Retry-After: seconds not capped", file: wsCl, from: "return time.Duration(min(n, 24*3600)) * time.Second", to: "return time.Duration(n) * time.Second",

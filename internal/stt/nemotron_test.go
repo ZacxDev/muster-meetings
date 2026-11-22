@@ -727,29 +727,3 @@ func TestLateMarksComeAsTheNextFinalsLead(t *testing.T) {
 		t.Fatalf("the engine's finals %q, want %q", got, w)
 	}
 }
-
-// An older server sends no `lead`: the late mark opens the next final's
-// text (". Thanks"), and its captions may open with it too. The engine
-// moves the marks to Lead, so the line and the caption are clean.
-func TestAnOlderServersLeadingMarksBecomeTheLead(t *testing.T) {
-	n := newNem(t)
-	n.srv.Set(func(s *stttest.Server) { s.LeadInText, s.Lines = true, []string{"We should start.", "? Thanks"} })
-	n.open()
-	n.feed(cat(tone(1500, 5000, 0), level(1000, 0), tone(1500, 5000, 0), level(1000, 0)))
-	segs := n.close()
-	if got := finalsSent(t, n.srv); len(got) < 2 || got[1] != [3]string{". ? Thanks", "", "absent"} {
-		t.Fatalf("the older server's finals %q", got)
-	}
-	var got [][2]string
-	for _, g := range finals(segs) {
-		got = append(got, [2]string{g.Text, g.Lead})
-	}
-	if w := [][2]string{{"We should start", ""}, {"Thanks", ".?"}}; !slices.Equal(got, w) {
-		t.Fatalf("the engine's finals %q, want %q", got, w)
-	}
-	for _, g := range kindsOf(segs, stt.Partial) {
-		if strings.HasPrefix(g.Text, "?") || strings.HasPrefix(g.Text, ".") {
-			t.Fatalf("a caption opens with a mark: %q", g.Text)
-		}
-	}
-}

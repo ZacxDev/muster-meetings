@@ -685,8 +685,7 @@ type serverMsg struct {
 	EndMS   int64  `json:"end_ms"`
 	Code    string `json:"code"`
 	// Lead, on a final: the marks the segment's raw text opened with (the
-	// previous line's closing mark; Segment.Lead). Absent from an older
-	// server's finals.
+	// previous line's closing mark; Segment.Lead).
 	Lead string `json:"lead"`
 }
 
@@ -725,9 +724,7 @@ func (s *nemStream) read(c *nemConn) {
 		}
 		switch m.Type {
 		case "partial":
-			// An older server's caption may open with the previous line's
-			// closing mark: it is not this caption's.
-			if _, m.Text = SplitLead(m.Text); m.Text == "" {
+			if m.Text = strings.TrimSpace(m.Text); m.Text == "" {
 				continue
 			}
 			s.words.Store(true)
@@ -738,10 +735,9 @@ func (s *nemStream) read(c *nemConn) {
 			if c.unanswered.Load() > 0 {
 				c.unanswered.Add(-1)
 			}
-			// The previous line's closing marks: the server's `lead`, then
-			// any an older server left at the start of the text.
-			inText, text := SplitLead(m.Text)
-			lead := CleanLead(m.Lead) + inText
+			// The previous line's closing marks: the server's `lead` (the
+			// server strips them from the text; contract with stt-nemotron).
+			text, lead := strings.TrimSpace(m.Text), CleanLead(m.Lead)
 			if text == "" && lead == "" {
 				// Nothing was said (or a constant signal): no line, and
 				// the caption in progress, if any, clears.

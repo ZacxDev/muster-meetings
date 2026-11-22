@@ -1,0 +1,47 @@
+/* muster UI kit v1.0.0 (docs/ui-kit.md). The theme block is this server's theme. */
+:root:root {
+  color-scheme: dark;
+  --mu-bg: 17 15 28;
+  --mu-s1: 25 22 42;
+  --mu-s2: 34 30 55;
+  --mu-s3: 45 40 70;
+  --mu-line: 47 42 72;
+  --mu-edge: 110 103 144;
+  --mu-text: 238 235 247;
+  --mu-text2: 195 189 217;
+  --mu-muted: 154 147 181;
+  --mu-accent: 110 176 245;
+  --mu-on-accent: 14 23 32;
+  --mu-focus: 154 200 248;
+  --mu-danger: 209 59 69;
+  --mu-on-danger: 255 255 255;
+  --mu-st-open-fg: 185 179 211;
+  --mu-st-open-bg: 36 32 58;
+  --mu-st-progress-fg: 143 184 255;
+  --mu-st-progress-bg: 27 37 71;
+  --mu-st-review-fg: 215 166 255;
+  --mu-st-review-bg: 46 31 69;
+  --mu-st-complete-fg: 127 214 164;
+  --mu-st-complete-bg: 22 52 40;
+  --mu-st-error-fg: 255 143 143;
+  --mu-st-error-bg: 61 26 34;
+  --mu-st-warning-fg: 255 174 94;
+  --mu-st-warning-bg: 58 38 21;
+  --mu-st-running-fg: 95 224 192;
+  --mu-st-running-bg: 18 51 47;
+  --mu-radius-sm: .375rem;
+  --mu-radius-md: .5rem;
+  --mu-radius-lg: 1rem;
+  --mu-radius-full: 9999px;
+  --mu-font-sans: ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+  --mu-font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  --mu-dur-fast: 120ms;
+  --mu-dur-base: 200ms;
+  --mu-dur-slow: 320ms;
+  --mu-ease-standard: cubic-bezier(.2, 0, 0, 1);
+  --mu-ease-enter: cubic-bezier(0, 0, 0, 1);
+  --mu-ease-exit: cubic-bezier(.3, 0, 1, 1);
+}
+@media (prefers-reduced-motion: reduce) {
+  :root:root { --mu-dur-fast: 0ms; --mu-dur-base: 0ms; --mu-dur-slow: 0ms; }
+}

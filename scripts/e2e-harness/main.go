@@ -8,8 +8,20 @@
 // and serves until its standard input closes or it is signalled. The two
 // origins are different sites, as meet.<muster host> and muster are.
 //
+// The parent is also muster's UI kit (docs/ui-kit.md): it serves
+// /ui-kit/v1/{kit.css,theme.css,kit.js,icons.svg} from e2e/fixtures/ui-kit,
+// muster's own render of the kit at one pinned commit (scripts/vendor-ui-kit.sh;
+// SHA256SUMS is checked at start), with muster's headers. So the plugin's
+// pages load the kit from the configured muster origin exactly as in
+// production, and CI never depends on a live muster.
+//
 // The parent's routes, for the test only:
 //
+//	GET /kit-mode?theme=brass|harbor&missing=css,js&slow=<ms>
+//	                           the theme the kit is served in (a second preset, so a
+//	                           test sees the theme flow through), which kit files
+//	                           answer 404, and a delay before each kit answer (the
+//	                           plugin's bundled kit, on an upstream that fails or hangs)
 //	GET /mint                  a fresh hand-off code, as the person's browser mints one
 //	GET /redeems               how many redeems the fake muster has answered
 //	GET /apps/<id>[?code=…]    muster's page: frames /enter with that code, or a fresh one
@@ -176,7 +188,10 @@ func run(logger *log.Logger) error {
 	if err != nil {
 		return err
 	}
-	srv := server.New(server.Config{PublicURL: pluginURL, MusterOrigin: parentOrigin, Log: logger,
+	// The kit: fetched by the plugin from the parent (muster's role), and
+	// revalidated on every page load (a 1 ms TTL, and a failure retried at
+	// once), so a theme or failure mode a test sets shows on the next load.
+	srv := server.New(server.Config{PublicURL: pluginURL, MusterOrigin: parentOrigin, KitUpstream: parentOrigin, KitTTL: time.Millisecond, KitRetry: time.Millisecond, Log: logger,
 		LiveKit: lkc, LiveKitURL: lkWS, ICE: "all",
 		// The fake engine (MEETINGS_TEST_MODE's) or the nemotron engine
 		// against the fake Nemotron server, and the ingest listener the fake
@@ -193,6 +208,11 @@ func run(logger *log.Logger) error {
 	go ingestSrv.Serve(ingestLn)
 
 	mux := http.NewServeMux()
+	kit, err := loadKit(filepath.Join("e2e", "fixtures", "ui-kit"))
+	if err != nil {
+		return err
+	}
+	kit.routes(mux)
 	mux.HandleFunc("GET /mint", func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, fake.MintApp(app.PluginID, ada.ID, ""))
 	})

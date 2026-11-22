@@ -857,13 +857,15 @@ func TestEndingAMeetingKillsTheLinkDeletesTheRoomAndEndsEveryToken(t *testing.T)
 }
 
 // Both pages' policies, pinned whole (design: "Every page sets its own
-// strict CSP"): their own script, style and images; their own API and
-// LiveKit's signalling origin, wss and https, and nothing else; framed by
-// muster's origin (owner) or by nobody (guest).
+// strict CSP"): their own script, style and images ONLY (muster's UI kit is
+// served from the plugin's origin: no page makes the browser contact
+// muster); their own API and LiveKit's signalling origin, wss and https, and
+// nothing else; framed by muster's origin (owner) or by nobody (guest).
 func TestThePagesPoliciesArePinned(t *testing.T) {
 	e := newEnv(t)
 	host := strings.TrimPrefix(e.lk.WSURL(), "ws://")
-	rest := "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self' ws://" + host + " http://" + host +
+	kit := "'self'"
+	rest := "default-src 'self'; script-src " + kit + "; style-src " + kit + "; img-src " + kit + "; connect-src 'self' ws://" + host + " http://" + host +
 		"; media-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors "
 	resp, _ := e.framed(enterPath(e.fake.MintApp(app.PluginID, ada.ID, ""), app.PluginID))
 	if got := resp.Header.Get("Content-Security-Policy"); got != rest+musterOrigin {
@@ -1045,7 +1047,7 @@ func TestNoPageScriptInterpretsMarkup(t *testing.T) {
 				t.Errorf("%s uses %s", f, bad)
 			}
 		}
-		if !strings.Contains(string(b), "textContent") {
+		if b := filepath.Base(f); b != "prefs.js" && b != "ui.js" && !strings.Contains(string(mustRead(t, f)), "textContent") { // those two write no text
 			t.Errorf("%s never uses textContent: is this the right file?", f)
 		}
 	}

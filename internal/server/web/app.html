@@ -5,89 +5,158 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="referrer" content="no-referrer">
 <title>Meetings</title>
+<link rel="stylesheet" href="/kit/v1/kit.css">
 <link rel="stylesheet" href="/static/app.css">
 </head>
-<body>
+<body class="mu-root">
 {{- if .Session}}
 <main id="app" data-session="{{.Session}}"{{if .Ref}} data-ref="{{.Ref}}"{{end}}>
-  <section id="list-view">
+  <section id="list-view" class="page">
     <header class="bar">
       <h1>Meetings</h1>
-      <button id="new-meeting" type="button" class="primary">New meeting</button>
+      <button id="new-meeting" type="button" class="mu-btn mu-btn--primary" data-icon="plus">New meeting</button>
     </header>
     <p id="status" class="status" role="status" aria-live="polite"></p>
-    <section id="link-panel" class="link-panel" hidden aria-labelledby="link-title">
-      <h2 id="link-title">Meeting link</h2>
-      <p>Send this link to the people you want to meet. They ask to join, and you let them in.</p>
-      <div class="link-row">
-        <input id="join-url" type="text" readonly aria-label="Meeting link">
-        <button id="copy-link" type="button" class="primary">Copy link</button>
-        <button id="share-link" type="button" hidden>Share</button>
-      </div>
-    </section>
-    <section aria-labelledby="list-title">
-      <h2 id="list-title">Meetings</h2>
-      <p id="empty" class="muted" hidden>No meetings yet. Press <strong>New meeting</strong> to start one.</p>
+    <section aria-label="Past meetings">
+      <div id="empty" class="empty" hidden><span data-icon="people"></span>No meetings yet.</div>
       <ul id="meetings" class="meetings"></ul>
-      <button id="more" type="button" hidden>Show older meetings</button>
+      <button id="more" type="button" class="mu-btn mu-btn--secondary mu-btn--block more" hidden>Show older meetings</button>
     </section>
   </section>
 
-  <section id="archive-view" class="archive" hidden aria-labelledby="archive-title">
+  <section id="archive-view" class="page archive" hidden aria-labelledby="archive-title">
     <header class="bar">
-      <h1 id="archive-title">Transcript</h1>
-      <button id="archive-back" type="button">Back</button>
+      <div class="bar__start">
+        <button id="archive-back" type="button" class="mu-icon-btn" aria-label="Back to meetings" data-icon="chevron-left"></button>
+        <h1 id="archive-title">Transcript</h1>
+      </div>
     </header>
     <p id="archive-meta" class="muted"></p>
-    <div class="link-row">
-      <button id="dl-txt" type="button">Download text</button>
-      <button id="dl-vtt" type="button">Download WebVTT</button>
+    <div class="downloads">
+      <button id="dl-txt" type="button" class="mu-btn mu-btn--secondary mu-btn--sm" data-icon="transcript">Text</button>
+      <button id="dl-vtt" type="button" class="mu-btn mu-btn--secondary mu-btn--sm" data-icon="captions">WebVTT</button>
     </div>
     <p id="archive-status" class="status" role="status" aria-live="polite"></p>
-    <p id="archive-empty" class="muted" hidden>Nothing was transcribed in this meeting.</p>
+    <p id="archive-empty" class="empty" hidden>Nothing was transcribed in this meeting.</p>
     <ol id="archive-lines" class="transcript"></ol>
   </section>
 
-  <section id="call-view" class="call" hidden aria-label="Meeting" data-conn="none">
-    <div class="call-top">
-      <div id="lobby" class="lobby" aria-live="polite"></div>
-      <div class="call-link">
-        <input id="call-url" type="text" readonly aria-label="Meeting link">
-        <button id="call-copy" type="button" class="primary">Copy link</button>
+  <!-- Pre-join: the camera preview, the microphone's level, the devices and
+       the two toggles, and the meeting's link to share. Join waits for the
+       device check (granted, or refused: then it joins without them). -->
+  <section id="prejoin" class="prejoin" hidden aria-labelledby="prejoin-title" data-check="idle">
+    <header class="bar">
+      <div class="bar__start">
+        <button id="prejoin-back" type="button" class="mu-icon-btn" aria-label="Back to meetings" data-icon="chevron-left"></button>
+        <h1 id="prejoin-title">New meeting</h1>
       </div>
-      <p id="badge" class="badge" role="status"></p>
-      <div class="switches">
-        <label class="switch"><input id="sw-record" type="checkbox"> Record</label>
-        <label class="switch"><input id="sw-ai" type="checkbox"> AI action items <span class="muted">(sends the transcript text, never audio, to an AI service)</span></label>
+    </header>
+    <figure id="pre-tile" class="mu-tile preview" data-video="off">
+      <video id="preview" class="mirror" autoplay muted playsinline></video>
+      <span id="pre-avatar" class="mu-avatar mu-avatar--lg" aria-hidden="true"></span>
+      <div id="pre-checking" class="preview__checking"><span class="mu-spinner mu-spinner--lg" role="status" aria-label="Checking your camera and microphone"></span></div>
+      <div class="meter" id="mic-meter"><span data-icon="mic"></span><span id="mic-level" class="meter__track" role="meter" aria-label="Microphone level" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span class="meter__fill"></span></span></div>
+      <div class="preview__toggles">
+        <button id="pre-mic" type="button" class="mu-icon-btn mu-toggle mu-toggle--alert" aria-label="Mute" aria-pressed="false" data-icon="mic"></button>
+        <button id="pre-cam" type="button" class="mu-icon-btn mu-toggle mu-toggle--alert" aria-label="Turn camera off" aria-pressed="false" data-icon="camera"></button>
       </div>
-      <p id="call-status" class="status" role="status" aria-live="polite"></p>
-      <button id="btn-use-here" type="button" class="primary" hidden>Use here</button>
+    </figure>
+    <p id="pre-status" class="status" role="status" aria-live="polite"></p>
+    <div class="devices">
+      <label class="device"><span data-icon="camera"></span><span class="mu-visually-hidden">Camera</span><select id="pick-cam" class="mu-select" disabled></select></label>
+      <label class="device"><span data-icon="mic"></span><span class="mu-visually-hidden">Microphone</span><select id="pick-mic" class="mu-select" disabled></select></label>
     </div>
-    <div class="stage-wrap">
-      <div id="stage" class="stage"></div>
-      <div id="strip" class="strip"></div>
+    <div class="linkrow">
+      <input id="join-url" class="mu-input" type="text" readonly aria-label="Meeting link">
+      <button id="copy-link" type="button" class="mu-icon-btn" aria-label="Copy link" data-icon="copy"></button>
+      <button id="share-link" type="button" class="mu-icon-btn" aria-label="Share link" data-icon="share" hidden></button>
     </div>
-    <!-- The live transcript; the action items join it in phase 4. -->
-    <aside id="panels" class="panels" hidden aria-label="Transcript">
-      <h2 class="panel-title">Transcript <span id="transcript-status" class="tstatus" role="status"></span></h2>
-      <ol id="transcript" class="transcript" aria-live="polite"></ol>
-    </aside>
+    <button id="btn-join" type="button" class="mu-btn mu-btn--primary mu-btn--block" data-icon="phone" disabled>Join</button>
+  </section>
+
+  <section id="call-view" class="call" hidden aria-label="Meeting" data-conn="none" data-layout="grid">
+    <header class="call-top">
+      <div class="call-top__start">
+        <button id="consent-btn" type="button" class="mu-chip consent" data-icon="record"><span id="badge"></span><span id="badge-off" hidden>Not recorded</span></button>
+        <div id="consent-pop" class="mu-card mu-card--raised pop" role="dialog" aria-label="Recording and AI" hidden>
+          <div id="consent-text"></div>
+          <label class="switchrow">Record <input id="sw-record" class="mu-switch" type="checkbox" role="switch"></label>
+          <label class="switchrow">AI action items <input id="sw-ai" class="mu-switch" type="checkbox" role="switch"></label>
+          <p class="mu-help">AI action items send the transcript text, never audio, to an AI service.</p>
+        </div>
+        <span id="presenting" class="mu-chip mu-chip--running" data-icon="screen-share" hidden>You are presenting</span>
+      </div>
+      <p id="call-status" class="call-status" role="status" aria-live="polite"></p>
+      <div class="call-top__end">
+        <button id="call-copy" type="button" class="mu-icon-btn" aria-label="Copy meeting link" data-icon="link"></button>
+        <button id="btn-settings" type="button" class="mu-icon-btn" aria-label="Camera and microphone" data-icon="settings"></button>
+        <div id="settings-pop" class="mu-card mu-card--raised pop" role="dialog" aria-label="Camera and microphone" hidden>
+          <label class="device"><span data-icon="camera"></span><span class="mu-visually-hidden">Camera</span><select id="set-cam" class="mu-select"></select></label>
+          <label class="device"><span data-icon="mic"></span><span class="mu-visually-hidden">Microphone</span><select id="set-mic" class="mu-select"></select></label>
+        </div>
+      </div>
+    </header>
+    <div class="call-body">
+      <div class="stage-wrap">
+        <div id="stage" class="stage"></div>
+        <div id="strip" class="strip" aria-label="Participants"></div>
+        <div id="invite" class="mu-card mu-card--raised invite" hidden>
+          <div class="invite__head"><span class="mu-card__title">Invite people</span>
+            <button id="invite-close" type="button" class="mu-icon-btn" aria-label="Close" data-icon="close"></button></div>
+          <div class="linkrow">
+            <input id="call-url" class="mu-input" type="text" readonly aria-label="Meeting link">
+            <button id="invite-copy" type="button" class="mu-icon-btn" aria-label="Copy link" data-icon="copy"></button>
+            <button id="invite-share" type="button" class="mu-icon-btn" aria-label="Share link" data-icon="share" hidden></button>
+          </div>
+        </div>
+        <button id="btn-use-here" type="button" class="mu-btn mu-btn--primary overlay-action" data-icon="phone" hidden>Use here</button>
+      </div>
+      <aside id="side" class="side" hidden>
+        <section id="lobby-panel" class="panel" hidden aria-labelledby="lobby-title">
+          <div class="panel__head"><h2 id="lobby-title">People</h2>
+            <button id="admit-all" type="button" class="mu-btn mu-btn--primary mu-btn--sm admit-all" hidden>Admit all</button>
+            <button type="button" class="mu-icon-btn panel-close" aria-label="Close people" data-icon="close"></button></div>
+          <div class="panel__body">
+            <div id="lobby" class="lobby" aria-live="polite"></div>
+            <p id="lobby-empty" class="empty">No one is waiting.</p>
+          </div>
+        </section>
+        <!-- The live transcript; the action items join it in phase 4. -->
+        <section id="panels" class="panel" hidden aria-labelledby="transcript-title">
+          <div class="panel__head"><h2 id="transcript-title">Transcript</h2>
+            <span id="transcript-status" class="mu-chip mu-chip--warning" role="status"></span>
+            <button type="button" class="mu-icon-btn panel-close" aria-label="Close transcript" data-icon="close"></button></div>
+          <ol id="transcript" class="transcript" aria-live="polite"></ol>
+        </section>
+      </aside>
+    </div>
     <div id="audio" hidden></div>
-    <nav class="controls" aria-label="Call controls">
-      <button id="btn-mic" type="button" aria-pressed="true">Mute</button>
-      <button id="btn-cam" type="button" aria-pressed="true">Camera off</button>
-      <button id="btn-share" type="button" aria-pressed="false">Share screen</button>
-      <button id="btn-back" type="button">Back</button>
-      <button id="btn-end" type="button" class="danger">End meeting</button>
-    </nav>
+    <div class="controls mu-toolbar" role="toolbar" aria-label="Call controls">
+      <button id="btn-mic" type="button" class="mu-icon-btn mu-toggle mu-toggle--alert" aria-label="Mute" data-mu-tooltip="Mute (M)" aria-keyshortcuts="M" aria-pressed="false" data-icon="mic"></button>
+      <button id="btn-cam" type="button" class="mu-icon-btn mu-toggle mu-toggle--alert" aria-label="Turn camera off" data-mu-tooltip="Turn camera off (V)" aria-keyshortcuts="V" aria-pressed="false" data-icon="camera"></button>
+      <button id="btn-share" type="button" class="mu-icon-btn mu-toggle" aria-label="Share screen" data-mu-tooltip="Share screen (S)" aria-keyshortcuts="S" aria-pressed="false" data-icon="screen-share"></button>
+      <button id="btn-layout" type="button" class="mu-icon-btn mu-toggle" aria-label="Presentation view" aria-pressed="false" data-icon="fullscreen"></button>
+      <span class="sep" aria-hidden="true"></span>
+      <button id="btn-transcript" type="button" class="mu-icon-btn mu-toggle" aria-label="Transcript" aria-pressed="false" aria-controls="panels" data-icon="transcript"><span id="transcript-new" class="dot" hidden></span></button>
+      <button id="btn-people" type="button" class="mu-icon-btn mu-toggle" aria-label="People" aria-pressed="false" aria-controls="lobby-panel" data-icon="people"><span id="lobby-count" class="mu-badge mu-badge--accent" hidden></span></button>
+      <button id="btn-leave" type="button" class="mu-icon-btn mu-icon-btn--danger" aria-label="Leave" aria-haspopup="menu" data-icon="leave"></button>
+    </div>
+    <div id="leave-menu" class="mu-menu leave-menu" role="menu" aria-label="Leave" hidden>
+      <button id="btn-back" type="button" class="mu-menu__item" role="menuitem" data-icon="chevron-left">Leave the call</button>
+      <div class="mu-menu__sep" role="separator"></div>
+      <button id="btn-end" type="button" class="mu-menu__item mu-menu__item--danger" role="menuitem" data-icon="close">End meeting for everyone</button>
+    </div>
   </section>
   <noscript><p>Meetings needs JavaScript.</p></noscript>
 </main>
+<script src="/kit/v1/kit.js"></script>
+<script src="/static/ui.js"></script>
+<script src="/static/prefs.js"></script>
 <script src="/static/vendor/livekit-client-2.25.0.umd.js"></script>
 <script src="/static/call.js"></script>
 <script src="/static/app.js"></script>
 {{- else}}
-<main class="notice">
+<main class="page notice">
   <h1>Meetings</h1>
   <p id="message">{{.Message}}</p>
 </main>

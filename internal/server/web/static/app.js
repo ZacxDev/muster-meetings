@@ -3,9 +3,14 @@
 // removed, and it is never written to storage or a cookie. A reload finds no
 // token and the server says "Open Meetings from muster again".
 //
-// The whole owner flow: New meeting, which puts you in the call with the
-// link to copy. Guests who knock appear at the top of the call; one tap
-// admits them. Every name a guest typed is rendered with textContent only.
+// The whole owner flow: New meeting, then share the link. The FIRST time,
+// New meeting opens the pre-join (the camera check, and the link to copy
+// or share) and Join; the check's result is remembered (static/prefs.js),
+// and from then on New meeting goes straight into the call with the link on
+// screen. Storage that is blocked just means the check again. Guests who knock are a
+// count on the People button and a toast with Admit; one tap admits them.
+// Every name a guest typed is rendered as text only (textContent, or an
+// attribute value).
 (function () {
   'use strict';
   var root = document.getElementById('app');
@@ -18,20 +23,22 @@
   // Take muster's one-time code out of the address bar and the history.
   try { history.replaceState(null, '', location.pathname); } catch (e) { /* not fatal */ }
 
+  var UI = window.MeetingsUI;
   var $ = function (id) { return document.getElementById(id); };
   var list = $('meetings'), empty = $('empty'), more = $('more'), status = $('status');
   var next = null;
-  var call = null; // the open call: {id, abort, conn, ended}
+  var call = null; // the open meeting: {id, url, abort, conn, ended, joined}
 
   function say(text) { status.textContent = text || ''; }
   function callSay(text) { $('call-status').textContent = text || ''; }
+  function preSay(text) { $('pre-status').textContent = text || ''; }
 
   function ended() {
     token = null;
     if (call) closeCall();
     document.body.textContent = '';
     var m = document.createElement('main');
-    m.className = 'notice';
+    m.className = 'page notice';
     var h = document.createElement('h1');
     h.textContent = 'Meetings';
     var p = document.createElement('p');
@@ -79,10 +86,10 @@
   function linkLive(m) { return m.state === 'open' && new Date(m.link_expires_at) > new Date(); }
 
   // copyText copies, or falls back to selecting the given field.
-  function copyText(text, input, sayFn) {
-    var fallback = function () { input.select(); sayFn('Press Ctrl+C (or ⌘C) to copy the link.'); };
+  function copyText(text, input) {
+    var fallback = function () { if (input) input.select(); UI.toast('Press Ctrl+C (or ⌘C) to copy the link.'); };
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      return navigator.clipboard.writeText(text).then(function () { sayFn('Link copied.'); }, fallback);
+      return navigator.clipboard.writeText(text).then(function () { UI.toast('Link copied.', { kind: 'success', timeout: 2500 }); }, fallback);
     }
     fallback();
     return Promise.resolve();
@@ -95,15 +102,6 @@
       if (!b.link) throw new Error("this meeting's link has expired");
       return b.link;
     });
-  }
-
-  function button(text, cls, onClick) {
-    var b = document.createElement('button');
-    b.type = 'button';
-    b.textContent = text;
-    if (cls) b.className = cls;
-    b.addEventListener('click', onClick);
-    return b;
   }
 
   function row(m) {
@@ -128,20 +126,26 @@
     li.appendChild(text);
     var actions = document.createElement('div');
     actions.className = 'actions';
+    var title = t.textContent;
     if (linkLive(m)) {
-      actions.appendChild(button('Open', 'primary open-row', function () {
-        linkOf(m.id).then(function (url) { openCall(m.id, url); })
+      actions.appendChild(UI.iconButton('phone', 'Open ' + title, 'open-row', function () {
+        linkOf(m.id).then(function (url) { openMeeting(m.id, url); })
           .catch(function (e) { if (token) say('Could not open the meeting: ' + e.message); });
       }));
-      actions.appendChild(button('Copy link', 'copy-row', function () {
+      actions.appendChild(UI.iconButton('link', 'Copy link to ' + title, 'copy-row', function () {
         say('');
-        linkOf(m.id).then(function (url) { showLink(url); return copyText(url, $('join-url'), say); })
+        linkOf(m.id).then(function (url) { $('join-url').value = url; return copyText(url, null); })
           .catch(function (e) { if (token) say('Could not get the link: ' + e.message); });
       }));
     }
-    actions.appendChild(button('Transcript', 'transcript-row', function () { openArchive(m); }));
+    actions.appendChild(UI.iconButton('transcript', 'Transcript of ' + title, 'transcript-row', function () { openArchive(m); }));
     li.appendChild(actions);
     return li;
+  }
+
+  // show puts one of the four views on screen.
+  function show(view) {
+    ['list-view', 'archive-view', 'prejoin', 'call-view'].forEach(function (id) { $(id).hidden = id !== view; });
   }
 
   // ---- the archive: one meeting's transcript, and its downloads ----
@@ -152,8 +156,7 @@
 
   function openArchive(m) {
     archived = m;
-    $('list-view').hidden = true;
-    $('archive-view').hidden = false;
+    show('archive-view');
     $('archive-lines').textContent = '';
     $('archive-empty').hidden = true;
     var meta = [when(m.created_at), m.state === 'open' ? 'Open' : 'Ended'];
@@ -165,16 +168,16 @@
     api('GET', '/api/meetings/' + encodeURIComponent(m.id) + '/transcript').then(function (b) {
       if (archived !== m) return;
       archiveSay('');
-      var list = $('archive-lines');
-      b.segments.forEach(function (g) { list.appendChild(MeetingsCall.lineEl(g)); });
+      var l = $('archive-lines');
+      b.segments.forEach(function (g) { l.appendChild(MeetingsCall.lineEl(g)); });
       $('archive-empty').hidden = b.segments.length > 0;
     }).catch(function (e) { if (token && archived === m) archiveSay('Could not load the transcript: ' + e.message); });
+    $('archive-back').focus();
   }
 
   function closeArchive() {
     archived = null;
-    $('archive-view').hidden = true;
-    $('list-view').hidden = false;
+    show('list-view');
   }
 
   // download fetches the export with the bearer (a link cannot carry it) and
@@ -212,41 +215,43 @@
     }).catch(function (e) { if (token) say('Could not load your meetings: ' + e.message); });
   }
 
-  function showLink(url) {
-    $('join-url').value = url;
-    $('link-panel').hidden = false;
-    $('share-link').hidden = !navigator.share;
+  // ---- the lobby: a count on People, a toast per new knock, the panel ----
+
+  var side = MeetingsCall.Side();
+  side.add('people', $('lobby-panel'), $('btn-people'));
+  var transcript = MeetingsCall.transcriptPanel(side, function () { return waiting.length > 0; });
+  var knocked = {}; // participant ids already announced
+  var waiting = [];
+
+  function act(method, path, b) {
+    if (b) b.disabled = true;
+    return api(method, path).catch(function (e) { if (token) UI.toast(e.message, { kind: 'error' }); if (b) b.disabled = false; });
   }
 
-  // ---- the call ----
-
-  function lobbyRow(meetingID, p, waitingCount) {
+  function lobbyRow(meetingID, p) {
     var div = document.createElement('div');
     div.className = 'lobby-row ' + p.state;
     div.setAttribute('data-pid', p.id);
+    var text = document.createElement('div');
+    text.className = 'text';
     var name = document.createElement('span');
     name.className = 'who';
     name.textContent = p.name + ' (guest)';
     var what = document.createElement('span');
     what.className = 'what';
-    what.textContent = p.state === 'waiting' ? ' wants to join' : ' is in the call';
-    div.appendChild(name); div.appendChild(what);
+    what.textContent = p.state === 'waiting' ? 'Wants to join' : 'In the call';
+    text.appendChild(name); text.appendChild(what);
+    div.appendChild(text);
     var base = '/api/meetings/' + encodeURIComponent(meetingID);
-    var act = function (method, path, b) {
-      return function () {
-        b.disabled = true;
-        api(method, path).catch(function (e) { if (token) callSay(e.message); b.disabled = false; });
-      };
-    };
     if (p.state === 'waiting') {
-      var admit = button('Admit', 'primary admit', null);
-      admit.addEventListener('click', act('POST', base + '/lobby/' + p.id + '/admit', admit));
-      var deny = button('Deny', 'deny', null);
-      deny.addEventListener('click', act('POST', base + '/lobby/' + p.id + '/deny', deny));
+      var admit = UI.iconButton('check', 'Admit ' + p.name, 'admit');
+      admit.addEventListener('click', function () { act('POST', base + '/lobby/' + p.id + '/admit', admit); });
+      var deny = UI.iconButton('close', 'Deny ' + p.name, 'deny');
+      deny.addEventListener('click', function () { act('POST', base + '/lobby/' + p.id + '/deny', deny); });
       div.appendChild(admit); div.appendChild(deny);
     } else {
-      var rm = button('Remove', 'remove', null);
-      rm.addEventListener('click', act('DELETE', base + '/participants/' + p.id, rm));
+      var rm = UI.iconButton('minus', 'Remove ' + p.name, 'remove');
+      rm.addEventListener('click', function () { act('DELETE', base + '/participants/' + p.id, rm); });
       div.appendChild(rm);
     }
     return div;
@@ -256,18 +261,25 @@
     if (!call) return;
     var lobby = $('lobby');
     lobby.textContent = '';
-    var waiting = s.lobby.filter(function (p) { return p.state === 'waiting'; });
-    if (waiting.length > 1) {
-      var all = button('Admit all (' + waiting.length + ')', 'primary admit-all', function () {
-        all.disabled = true;
-        waiting.reduce(function (pr, p) {
-          return pr.then(function () { return api('POST', '/api/meetings/' + encodeURIComponent(call.id) + '/lobby/' + p.id + '/admit'); });
-        }, Promise.resolve()).catch(function (e) { if (token) callSay(e.message); });
-      });
-      lobby.appendChild(all);
-    }
-    s.lobby.forEach(function (p) { lobby.appendChild(lobbyRow(call.id, p, waiting.length)); });
-    MeetingsCall.showBadge(s.notice);
+    waiting = s.lobby.filter(function (p) { return p.state === 'waiting'; });
+    s.lobby.forEach(function (p) { lobby.appendChild(lobbyRow(call.id, p)); });
+    $('lobby-empty').hidden = s.lobby.length > 0;
+    $('admit-all').hidden = waiting.length < 2;
+    var count = $('lobby-count');
+    count.textContent = waiting.length ? String(waiting.length) : '';
+    count.hidden = !waiting.length;
+    UI.label($('btn-people'), waiting.length ? 'People, ' + waiting.length + ' waiting' : 'People');
+    // A new knock: a toast with Admit, unless the lobby is open already.
+    waiting.forEach(function (p) {
+      if (knocked[p.id]) return;
+      knocked[p.id] = true;
+      if (side.isOpen('people')) return;
+      var id = call.id;
+      UI.toast(p.name + ' wants to join', { timeout: 10000, action: { label: 'Admit', onClick: function () {
+        act('POST', '/api/meetings/' + encodeURIComponent(id) + '/lobby/' + p.id + '/admit');
+      } } });
+    });
+    MeetingsCall.showBadge(s.notice, { owner: true });
     [['sw-record', s.notice.record], ['sw-ai', s.notice.ai]].forEach(function (x) {
       var box = $(x[0]);
       box.checked = x[1];
@@ -277,10 +289,17 @@
     if (s.meeting.state !== 'open') meetingOver('This meeting has ended.');
   }
 
-  // The live transcript panel. Each event stream sends the transcript from
-  // its start, so a new stream redraws it.
-  var transcript = MeetingsCall.Transcript($('transcript'), $('transcript-status'), $('panels'));
+  $('admit-all').addEventListener('click', function () {
+    if (!call) return;
+    var b = this, id = call.id;
+    b.disabled = true;
+    waiting.reduce(function (pr, p) {
+      return pr.then(function () { return api('POST', '/api/meetings/' + encodeURIComponent(id) + '/lobby/' + p.id + '/admit'); });
+    }, Promise.resolve()).catch(function (e) { if (token) UI.toast(e.message, { kind: 'error' }); }).then(function () { b.disabled = false; });
+  });
 
+  // The meeting's event stream: the lobby, the notice, the live transcript.
+  // Each stream sends the transcript from its start, so a new one redraws it.
   function watch(id, abort) {
     return request('GET', '/api/meetings/' + encodeURIComponent(id) + '/events', undefined, abort.signal).then(function (res) {
       if (!res.ok) throw new Error('the server answered ' + res.status);
@@ -292,25 +311,90 @@
         else if (name === 'transcript') transcript.status(data.status);
       });
     }).then(function () {
-      // The stream ended. While the call view is still this meeting's and it
-      // has not ended, open it again.
+      // The stream ended. While this meeting is still open here and has not
+      // ended, open it again.
       if (call && call.id === id && !call.ended && token) setTimeout(function () { if (call && call.id === id) watch(id, abort).catch(function () {}); }, 2000);
     });
   }
 
   function connState(s) { $('call-view').setAttribute('data-conn', s); }
 
+  // ---- pre-join ----
+
+  var pre = MeetingsCall.prejoin({ root: $('prejoin'), remember: true, onState: function (s) {
+    $('btn-join').disabled = s === 'checking' || s === 'idle';
+  } });
+
+  // The invite card: the link on the stage while you are alone in the call.
+  var inviteClosed = false;
+  function invite(alone) { $('invite').hidden = inviteClosed || !alone || !call; }
+  $('invite-close').addEventListener('click', function () { inviteClosed = true; invite(false); });
+  $('invite-copy').addEventListener('click', function () { copyText($('call-url').value, $('call-url')); });
+  $('invite-share').addEventListener('click', function () {
+    navigator.share({ title: 'Join my meeting', url: $('call-url').value }).catch(function () { /* dismissed */ });
+  });
+
+  // enterCall goes into the call with media (the check's choice, or the
+  // remembered one, minus any device that is gone).
+  function enterCall(media) {
+    if (!call || call.joined) return;
+    call.joined = true;
+    pre.stop();
+    show('call-view');
+    inviteClosed = false;
+    invite(true);
+    var id = call.id;
+    // Connecting from this moment: the device lookup below is part of it.
+    connState('connecting');
+    MeetingsCall.usable(media).then(function (m) { if (call && call.id === id) connect(id, m); });
+  }
+
+  // openMeeting opens a meeting's pre-join: the device check, and the link.
+  // The meeting's event stream starts here, so a knock is shown (and the
+  // owner holds the stream: no knock notification) before Join.
+  function openMeeting(id, url) {
+    if (call) closeCall();
+    if (archived) closeArchive();
+    call = { id: id, url: url || '', abort: new AbortController(), conn: null, ended: false, joined: false };
+    knocked = {};
+    $('join-url').value = url || '';
+    $('call-url').value = url || '';
+    $('share-link').hidden = $('invite-share').hidden = !navigator.share;
+    $('lobby').textContent = '';
+    $('btn-use-here').hidden = true;
+    callSay('');
+    preSay('');
+    pre.start();
+    if (pre.state() === 'remembered') enterCall(pre.choice());
+    else show('prejoin');
+    watch(id, call.abort).catch(function (e) { if (token && call && call.id === id && e.name !== 'AbortError') preSay('Lost touch with the meeting: ' + e.message); });
+  }
+
+  $('btn-join').addEventListener('click', function () {
+    if (!call || call.joined) return;
+    pre.keep();
+    enterCall(pre.choice());
+  });
+  $('prejoin-back').addEventListener('click', function () { closeCall(); load(false); });
+
   // connect joins the call. You are one identity ("owner") in your meeting,
   // so opening it on a second device makes the newer join win: LiveKit
   // disconnects this page with DUPLICATE_IDENTITY, and it says so, with Use
   // here to take the call back (which in turn moves the other device here),
   // instead of rejoining on its own and kicking the other back and forth.
-  function connect(id) {
+  function connect(id, media) {
     $('btn-use-here').hidden = true;
     connState('connecting');
+    call.media = media;
     api('POST', '/api/meetings/' + encodeURIComponent(id) + '/token').then(function (t) {
       if (!call || call.id !== id) return;
-      return MeetingsCall.join({ url: t.livekit_url, token: t.token, ice: t.ice, media: true, onStatus: callSay,
+      return MeetingsCall.join({ url: t.livekit_url, token: t.token, ice: t.ice, media: media, onStatus: callSay,
+        onRoster: function (n) { invite(n === 0); },
+        // A device picked in the call's settings is the remembered one.
+        onDevice: function (field, devId) {
+          var p = window.MeetingsPrefs && window.MeetingsPrefs.load();
+          if (p) { p[field] = devId; window.MeetingsPrefs.save(p); }
+        },
         onGone: function (reason) {
           if (!call || call.id !== id || call.ended) return;
           call.conn = null;
@@ -321,7 +405,7 @@
             return;
           }
           connState('none');
-          callSay('The call disconnected. Press Back, then Open, to rejoin.');
+          callSay('The call disconnected. Leave, then open the meeting again to rejoin.');
         } })
         .then(function (conn) { if (call && call.id === id) { call.conn = conn; connState('connected'); } else conn.leave(); });
     }).catch(function (e) {
@@ -333,27 +417,16 @@
     return e && e.status === 410 ? 'This meeting has ended.' : (e && e.message ? e.message : "Can't connect media. Check your connection and try again.");
   }
 
-  function openCall(id, url) {
-    if (call) closeCall();
-    if (archived) closeArchive();
-    call = { id: id, abort: new AbortController(), conn: null, ended: false };
-    $('list-view').hidden = true;
-    $('call-view').hidden = false;
-    $('call-url').value = url || '';
-    $('lobby').textContent = '';
-    $('btn-use-here').hidden = true;
-    callSay('');
-    watch(id, call.abort).catch(function (e) { if (token && call && call.id === id && e.name !== 'AbortError') callSay('Lost touch with the meeting: ' + e.message); });
-    connect(id);
-  }
-
   function closeCall() {
     if (!call) return;
     call.abort.abort();
     if (call.conn) call.conn.leave();
     call = null;
-    $('call-view').hidden = true;
-    $('list-view').hidden = false;
+    pre.stop();
+    invite(false);
+    side.close(false);
+    UI.closePop(false);
+    show('list-view');
   }
 
   function meetingOver(text) {
@@ -364,6 +437,7 @@
     callSay(text);
   }
 
+  UI.popover($('btn-leave'), $('leave-menu'));
   $('btn-back').addEventListener('click', function () { closeCall(); load(false); });
   $('btn-end').addEventListener('click', function () {
     if (!call) return;
@@ -380,38 +454,35 @@
       if (!call) return;
       var box = this;
       api('POST', '/api/meetings/' + encodeURIComponent(call.id) + '/' + x[1], { on: box.checked })
-        .then(function (b) { MeetingsCall.showBadge(b.notice); })
+        .then(function (b) { MeetingsCall.showBadge(b.notice, { owner: true }); })
         .catch(function (e) { box.checked = !box.checked; if (token) callSay(e.message); });
     });
   });
-  $('btn-use-here').addEventListener('click', function () { if (call && !call.ended) connect(call.id); });
-  $('call-copy').addEventListener('click', function () { copyText($('call-url').value, $('call-url'), callSay); });
+  $('btn-use-here').addEventListener('click', function () { if (call && !call.ended) connect(call.id, call.media); });
+  $('call-copy').addEventListener('click', function () { copyText($('join-url').value, null); });
+  $('copy-link').addEventListener('click', function () { copyText($('join-url').value, $('join-url')); });
+  $('share-link').addEventListener('click', function () {
+    navigator.share({ title: 'Join my meeting', url: $('join-url').value }).catch(function () { /* dismissed */ });
+  });
 
   $('new-meeting').addEventListener('click', function () {
     var btn = this;
     btn.disabled = true;
     say('');
     api('POST', '/api/meetings', {}).then(function (b) {
-      showLink(b.join_url);
       list.insertBefore(row(b.meeting), list.firstChild);
       empty.hidden = true;
-      openCall(b.id, b.join_url);
+      openMeeting(b.id, b.join_url);
     }).catch(function (e) { if (token) say('Could not make a meeting: ' + e.message); })
       .then(function () { btn.disabled = false; });
-  });
-
-  $('copy-link').addEventListener('click', function () { copyText($('join-url').value, $('join-url'), say); });
-
-  $('share-link').addEventListener('click', function () {
-    navigator.share({ title: 'Join my meeting', url: $('join-url').value }).catch(function () { /* dismissed */ });
   });
 
   more.addEventListener('click', function () { load(true); });
 
   load(false);
-  // Opened for one meeting (a knock notification's tap): open its call at
-  // once, while it is open.
+  // Opened for one meeting (a knock notification's tap): open its pre-join
+  // at once, while it is open.
   if (ref) {
-    linkOf(ref).then(function (url) { showLink(url); openCall(ref, url); }).catch(function () { /* ended: the list says so */ });
+    linkOf(ref).then(function (url) { openMeeting(ref, url); }).catch(function () { /* ended: the list says so */ });
   }
 })();

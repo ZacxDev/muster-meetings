@@ -60,14 +60,18 @@ test('the owner and a guest see the same transcript lines from the fake engine, 
   await owner.goto(`${parent}/apps/${pluginID}`);
   const app: FrameLocator = owner.frameLocator('#app');
   await app.locator('#new-meeting').click();
+  const link = await app.locator('#join-url').inputValue();
+  await expect(app.locator('#btn-join')).toBeEnabled({ timeout: 15_000 });
+  await app.locator('#btn-join').click();
   await expect(app.locator('#call-view')).toBeVisible();
-  const link = await app.locator('#call-url').inputValue();
 
   const guestCtx = await browser.newContext();
   const guest = await guestCtx.newPage();
   await guest.goto(link);
   await guest.locator('#name').fill('Grace');
+  await expect(guest.locator('#ask')).toBeEnabled({ timeout: 15_000 });
   await guest.locator('#ask').click();
+  await app.locator('#btn-people').click();
   await app.locator('.lobby-row.waiting .admit').click();
   await expect(guest.locator('#guest')).toHaveAttribute('data-state', 'admitted');
 
@@ -108,6 +112,7 @@ test('the owner and a guest see the same transcript lines from the fake engine, 
 
   // The owner ends the meeting; the guest is told; the archive keeps the
   // lines, and the text download is the same transcript.
+  await app.locator('#btn-leave').click();
   await app.locator('#btn-end').click();
   await expect(guest.locator('#message')).toHaveText('This meeting has ended.');
   await expect(app.locator('#list-view')).toBeVisible();

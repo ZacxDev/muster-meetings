@@ -335,6 +335,10 @@ func checkClientIPHeader(raw string, haveTrusted bool) (string, error) {
 	return v, nil
 }
 
+// hostPort is a URL's host: a DNS name or IPv4 address, or a bracketed IPv6
+// address, with an optional port.
+var hostPort = regexp.MustCompile(`^(?i:(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*\.?|\[[0-9a-f:.]+\])(?::[0-9]{1,5})?$`)
+
 // CheckURL validates a URL variable whose scheme is secure, or insecure only
 // to a loopback host: no user, query or fragment, no path. It returns
 // scheme://host.
@@ -348,6 +352,12 @@ func checkURL(name, raw, secure, insecure string, insecureAnyHost bool) (string,
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.Host == "" {
 		return "", fmt.Errorf("%s is not set to an absolute %s:// URL", name, secure)
+	}
+	// 🔴 A host name or an address, nothing else: these values are written
+	// into the pages' CSP (frame-ancestors), where a wildcard (*, *.x) widens
+	// it and ';' ',' or a quote starts another directive or source.
+	if !hostPort.MatchString(u.Host) {
+		return "", fmt.Errorf("%s must name one host (letters, digits, '-' and '.', or an [IPv6] address, and a port): no wildcard and no ; , or quotes", name)
 	}
 	h := u.Hostname()
 	loopback := h == "localhost" || h == "127.0.0.1" || h == "::1"
@@ -440,7 +450,7 @@ func run(logger *log.Logger) error {
 
 // serverConfig is the server's part of cfg.
 func (cfg Config) serverConfig(logger *log.Logger, lk *livekit.Client) server.Config {
-	return server.Config{PublicURL: cfg.PublicURL, MusterOrigin: cfg.MusterOrigin, Log: logger,
+	return server.Config{PublicURL: cfg.PublicURL, MusterOrigin: cfg.MusterOrigin, KitUpstream: cfg.URL, Log: logger,
 		LiveKit: lk, LiveKitURL: cfg.LiveKitURL, ICE: cfg.ICE, TrustedProxies: cfg.TrustedProxies,
 		ClientIPHeader: cfg.ClientIPHeader, IngestURL: cfg.IngestURL, IngestKey: cfg.IngestKey}
 }

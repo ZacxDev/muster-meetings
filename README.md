@@ -539,9 +539,73 @@ database.
   Again only when the count of waiting guests rises above the last count
   pushed, which follows the count down, so 2 → 1 → 2 is pushed again;
   withdrawn when you open the meeting or nobody waits any more.
-- **Mobile:** below 40rem the call is one column: the active speaker or a
-  shared screen on top, the others in a strip, the controls in a bottom bar
-  of 44 px targets, the lobby rows and the badge pinned at the top.
+- **Mobile:** below 40rem the call is one column: the tiles (or a shared
+  screen on top, the others in a strip), the controls in a bottom bar of
+  44 px targets within thumb reach, the consent badge pinned at the top, and
+  the lobby and the transcript as a sheet over the stage.
+
+## The meeting UI
+
+The pages draw with **muster's UI kit** (`docs/ui-kit.md` in muster), served
+from the **plugin's own origin** at `/kit/v1/kit.css` and `/kit/v1/kit.js`:
+the plugin fetches them from muster (`MUSTER_URL/ui-kit/v1/`, server-side,
+the same address it already calls), keeps them in memory, revalidates them
+with muster's ETag every minute, and serves them. So the theme an admin
+picks in muster (a preset, or their own accent) reaches the pages on their
+next load, while **no page makes the browser contact muster**: a guest who
+cannot reach muster (a LAN-only muster, a firewall) is never held on it,
+and muster never sees a guest's address. Both pages' CSP allows script,
+style and images from `'self'` only. Each upstream fetch gives up after
+2 s; then the last copy from muster is served if there is one, else the kit
+bundled with the plugin (`static/kit-fallback.css` and
+`static/vendor/muster-ui-kit-v1.js`: muster's own render in its default
+theme, by `scripts/vendor-ui-kit.sh` from the commit the tests pin), and
+muster is asked again 10 s later. `X-Kit-Source` on the response says which
+(`muster`, `muster-stale`, `bundled`). `static/app.css` only places the
+kit's components and writes **no colour** (every colour, radius and
+duration is a `--mu-*` token; `TestThePluginCSSWritesNoColour` fails on a
+literal).
+
+- **Owner, the first time:** New meeting opens the **device check**: the
+  camera preview, the microphone's level, the camera and microphone
+  pickers, mute and camera toggles, and the meeting's link with Copy (and
+  Share where the browser has it). **Join** waits for the check (refused or
+  missing devices join without them; a browser prompt left unanswered for
+  5 s lets Join go ahead without them). A finished check is remembered in
+  the browser (`static/prefs.js`: one `localStorage` key on the plugin's
+  origin, holding which camera and microphone and whether each is on;
+  nothing else is ever stored).
+- **Owner, after that:** New meeting goes straight into the call, with the
+  link on an invite card until someone joins. A remembered device that is
+  gone, or a permission refused since, joins anyway with what works and
+  says so. The camera and microphone pickers stay in the call (the settings
+  button), and a device picked there is the remembered one. Storage that
+  is blocked means the check again.
+- **Guest:** always the check, after the consent notice (in full: this is
+  where they agree to it), then their name and **Ask to join**.
+- **The call:** a control bar of icon buttons (each with a tooltip and an
+  `aria-label`): mute, camera, share screen, the layout, the transcript,
+  People (the owner's, with the waiting count as a badge), and leave (the
+  owner's opens Leave or End meeting for everyone). A knock is also a toast
+  with **Admit**; the People panel admits, denies and removes with icon
+  buttons. The consent notice is a compact badge; its popover has the full
+  notice and, for the owner, the two switches.
+- **Tiles** name each person (as text) and show a muted microphone, a camera
+  that is off (with their initials in place of the picture) and LiveKit's
+  connection quality as a signal icon; the active speaker's tile has the
+  theme's ring.
+- **Layouts:** a grid, and a presentation view (one tile on the stage, the
+  rest in a filmstrip) that the call switches to by itself when anyone
+  shares a screen, and back when the last share stops; the layout button
+  overrides it. Your own share shows "You are presenting" with Stop, and the
+  browser's own Stop sharing ends it the same way. Where the browser cannot
+  share (`getDisplayMedia` missing: phones) the button is not drawn.
+- **Keyboard:** M mutes, V turns the camera off, S shares (each button's
+  tooltip names its key); never while typing in a field.
+- **Motion:** tiles fade and scale in and out, layout changes move tiles
+  (FLIP), panels and rows rise in, and toggles animate their pressed state,
+  all in the kit's duration tokens, so `prefers-reduced-motion` (which sets
+  them to 0) turns every one of them off.
 
 ## The transcript
 
@@ -718,6 +782,46 @@ after End meeting. A fifth and sixth (`captions.spec.ts`, at 390×844 and
 Nemotron server (`scripts/e2e-harness -stt=nemotron`): a partial caption
 appears in the panel and is then replaced by the final line.
 
+**The UI** (`ui-*.spec.ts`, at 390×844 and 1280×800) runs against the fake
+muster, which also serves muster's UI kit from `e2e/fixtures/ui-kit`
+(muster's own render at a pinned commit, by `scripts/vendor-ui-kit.sh`;
+the harness refuses a fixture that does not match `SHA256SUMS`), so no test
+depends on a live muster. `ui-call.spec.ts` serves a **fake LiveKit client**
+(`e2e/fixtures/fake-livekit-client.js`, the slice of livekit-client 2.25's
+API the page uses) and plays the room's other people: the pre-join (Join
+held during the device check, the preview, the level, the pickers, the
+toggles), a remote mute and camera-off on the tile within 1 s and unmute
+restoring it, the speaking ring following the speaker, the connection
+indicator following the quality, a share switching to presentation and back
+with the toggle overriding, your own share and the browser's Stop, the
+shortcuts, reduced motion (every computed transition and animation 0 s, and
+no Web Animation on a layout change), every button's accessible name
+(enumerated), axe (no serious or critical violation) on the pre-join, the
+call, the lobby and the past meetings, and a phone with no screen sharing.
+`ui-call.spec.ts` also checks that tiles that stay put do not re-animate on a
+join, a speaker change or a mute. `ui-remember.spec.ts`: the owner's first New meeting shows the check and the
+next goes straight in with the link on screen (storage holding only the
+device key), a remembered device gone and a permission refused since, blocked
+storage meaning the check, a guest always checked, Join (and Ask to join)
+let through after an unanswered camera prompt, and a guest's consent notice
+above their preview with nothing sent to LiveKit (no room, no track, no
+request off the plugin's origin) before they are admitted.
+`ui-kit.spec.ts`: the kit served through the plugin with no request from
+either page to muster, a second theme reaching the page on reload, the
+guest page's CSP, the bundled kit when muster answers `404` for `kit.css`,
+`kit.js` or both, and a page not held on a muster that hangs (the plugin's
+2 s fetch timeout; `kit_internal_test.go` pins the fetch, the ETag
+revalidation, the timeout and which copy is served). `ui-real-livekit.spec.ts` runs
+the indicators and a screen share between two browsers through the real
+`livekit-server`. `ui-visual.spec.ts` compares goldens
+(`e2e/goldens/`: the pre-join, the grid, the presentation view, the lobby
+and the transcript at both sizes); pixels depend on fonts, so it runs only
+in the pinned Playwright image (CI's `visual` job; remake them with
+`scripts/update-goldens.sh`, which needs docker). `go run ./scripts/mutate
+-e2e` is the UI's mutation sweep: each mutant (an indicator not updated, the
+ring not following, presentation not switching, an `aria-label` missing,
+reduced motion ignored, …) must turn its named Playwright test red.
+
 **Against a real LiveKit:** `internal/server/livekit_integration_test.go`
 starts `livekit-server` and joins with LiveKit's CLI (`lk room join`): the
 plugin's rooms, tokens and webhook verification against the real server; two
@@ -812,7 +916,8 @@ phase 2d's click path, with TURN, after 2c deploys it.
 | `compose.meetings.yml` | the fragment for muster's Compose stack |
 | `deploy/deploy_test.go` | the rendered objects and both LiveKit configs, pinned |
 | `scripts/mutate` | the security-gate mutation sweep |
-| `scripts/e2e-harness`, `e2e/` | the browser tests: the `/enter` frame gate, the lobby at 390×844, two owner devices, and the transcript in both panels |
+| `scripts/e2e-harness`, `e2e/` | the browser tests: the `/enter` frame gate, the lobby at 390×844, two owner devices, the transcript in both panels, live captions, and the UI (`ui-*.spec.ts`, goldens in `e2e/goldens/`); the harness also serves muster's UI kit from `e2e/fixtures/ui-kit` |
+| `scripts/vendor-ui-kit.sh`, `scripts/update-goldens.sh` | render muster's UI kit at a pinned commit (the fixtures and the built-in fallback); remake the visual goldens in the pinned Playwright image |
 
 ## Licence
 

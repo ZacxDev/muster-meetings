@@ -59,17 +59,22 @@ test('a second owner device takes the call, and Use here takes it back', async (
   await first.goto(`${parent}/apps/${pluginID}`);
   const a = first.frameLocator('#app');
   await a.locator('#new-meeting').click();
+  await expect(a.locator('#btn-join')).toBeEnabled({ timeout: 15_000 });
+  await a.locator('#btn-join').click();
   await connected(a, 'the first page');
   const rowID = await a.locator('.meeting').first().getAttribute('id');
   const meetingID = rowID!.replace(/^meeting-/, '');
 
   // The second device: muster's page opened with ?ref=, as a knock
-  // notification's tap opens it, goes straight into the call.
+  // notification's tap opens it, goes straight to that meeting's pre-join.
   const ctx2 = await browser.newContext();
   const second = await ctx2.newPage();
   second.on('console', (m) => console.log(`[second page] ${m.type()}: ${m.text()}`));
   await second.goto(`${parent}/apps/${pluginID}?ref=${encodeURIComponent(meetingID)}`);
   const b = second.frameLocator('#app');
+  await expect(b.locator('#prejoin')).toBeVisible();
+  await expect(b.locator('#btn-join')).toBeEnabled({ timeout: 15_000 });
+  await b.locator('#btn-join').click();
   await connected(b, 'the second page');
 
   // The older page says so, and does not rejoin by itself.

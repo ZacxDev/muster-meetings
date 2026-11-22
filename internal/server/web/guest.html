@@ -6,61 +6,107 @@
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex">
 <title>Join a meeting</title>
+<link rel="stylesheet" href="/kit/v1/kit.css">
 <link rel="stylesheet" href="/static/app.css">
 </head>
-<body>
+<body class="mu-root">
 {{- if .Message}}
-<main class="notice">
+<main class="page notice">
   <h1>Meetings</h1>
   <p id="message">{{.Message}}</p>
 </main>
 {{- else}}
 <main id="guest" data-state="start" data-owner="{{.OwnerName}}" data-record="{{.Notice.Record}}" data-ai="{{.Notice.AI}}" data-transcribed="{{.Notice.Transcribed}}">
-  <section id="join-view" class="join">
+  <!-- Pre-join. 🔴 The consent notice comes first (design: "before anything
+       else the notice"), in full: this is where a guest agrees to it. In the
+       call it is the compact badge. -->
+  <section id="join-view" class="prejoin" aria-labelledby="whose" data-check="idle">
     <h1 id="whose">{{if .OwnerName}}{{.OwnerName}}’s meeting{{else}}Join the meeting{{end}}</h1>
-    <div id="notice" class="notice-box" role="note">
+    {{- if .Notice.Text}}
+    <div id="notice" class="mu-card notice-card" role="note">
       {{- range .Notice.Text}}
       <p>{{.}}</p>
       {{- end}}
     </div>
-    <div class="preview">
-      <video id="preview" autoplay muted playsinline></video>
-      <button id="btn-preview" type="button">Turn on camera and microphone</button>
+    {{- else}}
+    <div id="notice" class="mu-card notice-card" role="note" hidden></div>
+    {{- end}}
+    <figure id="pre-tile" class="mu-tile preview" data-video="off">
+      <video id="preview" class="mirror" autoplay muted playsinline></video>
+      <span id="pre-avatar" class="mu-avatar mu-avatar--lg" aria-hidden="true"></span>
+      <div id="pre-checking" class="preview__checking"><span class="mu-spinner mu-spinner--lg" role="status" aria-label="Checking your camera and microphone"></span></div>
+      <div class="meter" id="mic-meter"><span data-icon="mic"></span><span id="mic-level" class="meter__track" role="meter" aria-label="Microphone level" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span class="meter__fill"></span></span></div>
+      <div class="preview__toggles">
+        <button id="pre-mic" type="button" class="mu-icon-btn mu-toggle mu-toggle--alert" aria-label="Mute" aria-pressed="false" data-icon="mic"></button>
+        <button id="pre-cam" type="button" class="mu-icon-btn mu-toggle mu-toggle--alert" aria-label="Turn camera off" aria-pressed="false" data-icon="camera"></button>
+      </div>
+    </figure>
+    <div class="devices">
+      <label class="device"><span data-icon="camera"></span><span class="mu-visually-hidden">Camera</span><select id="pick-cam" class="mu-select" disabled></select></label>
+      <label class="device"><span data-icon="mic"></span><span class="mu-visually-hidden">Microphone</span><select id="pick-mic" class="mu-select" disabled></select></label>
     </div>
     <form id="knock-form" class="knock" novalidate>
-      <label for="name">Your name</label>
-      <input id="name" name="name" type="text" maxlength="40" autocomplete="name" required>
-      <button id="ask" type="submit" class="primary">Ask to join</button>
+      <div class="mu-field">
+        <label class="mu-label" for="name">Your name</label>
+        <input id="name" name="name" class="mu-input" type="text" maxlength="40" autocomplete="name" required>
+      </div>
+      <button id="ask" type="submit" class="mu-btn mu-btn--primary mu-btn--block" data-icon="hand" disabled>Ask to join</button>
     </form>
-    <p id="guest-status" class="status" role="status" aria-live="polite"></p>
+    <div id="waiting" class="waiting" hidden><span class="mu-spinner" role="status" aria-label="Waiting"></span><span id="guest-status" role="status" aria-live="polite"></span></div>
+    <p id="pre-status" class="status" role="status" aria-live="polite"></p>
   </section>
 
-  <section id="call-view" class="call" hidden aria-label="Meeting">
-    <div class="call-top">
-      <p id="badge" class="badge" role="status"></p>
-      <p id="call-status" class="status" role="status" aria-live="polite"></p>
-      <button id="btn-retry" type="button" class="primary" hidden>Retry</button>
+  <section id="call-view" class="call" hidden aria-label="Meeting" data-layout="grid">
+    <header class="call-top">
+      <div class="call-top__start">
+        <button id="consent-btn" type="button" class="mu-chip consent" data-icon="record" hidden><span id="badge"></span></button>
+        <div id="consent-pop" class="mu-card mu-card--raised pop" role="dialog" aria-label="Recording and AI" hidden>
+          <div id="consent-text"></div>
+        </div>
+        <span id="presenting" class="mu-chip mu-chip--running" data-icon="screen-share" hidden>You are presenting</span>
+      </div>
+      <p id="call-status" class="call-status" role="status" aria-live="polite"></p>
+      <div class="call-top__end">
+        <button id="btn-settings" type="button" class="mu-icon-btn" aria-label="Camera and microphone" data-icon="settings"></button>
+        <div id="settings-pop" class="mu-card mu-card--raised pop" role="dialog" aria-label="Camera and microphone" hidden>
+          <label class="device"><span data-icon="camera"></span><span class="mu-visually-hidden">Camera</span><select id="set-cam" class="mu-select"></select></label>
+          <label class="device"><span data-icon="mic"></span><span class="mu-visually-hidden">Microphone</span><select id="set-mic" class="mu-select"></select></label>
+        </div>
+      </div>
+    </header>
+    <div class="call-body">
+      <div class="stage-wrap">
+        <div id="stage" class="stage"></div>
+        <div id="strip" class="strip" aria-label="Participants"></div>
+        <button id="btn-retry" type="button" class="mu-btn mu-btn--primary overlay-action" data-icon="phone" hidden>Retry</button>
+      </div>
+      <aside id="side" class="side" hidden>
+        <!-- The same live transcript as the owner's; the action items join it
+             in phase 4, without Make task or Dismiss. -->
+        <section id="panels" class="panel" hidden aria-labelledby="transcript-title">
+          <div class="panel__head"><h2 id="transcript-title">Transcript</h2>
+            <span id="transcript-status" class="mu-chip mu-chip--warning" role="status"></span>
+            <button type="button" class="mu-icon-btn panel-close" aria-label="Close transcript" data-icon="close"></button></div>
+          <ol id="transcript" class="transcript" aria-live="polite"></ol>
+        </section>
+      </aside>
     </div>
-    <div class="stage-wrap">
-      <div id="stage" class="stage"></div>
-      <div id="strip" class="strip"></div>
-    </div>
-    <!-- The same live transcript as the owner's; the action items join it in
-         phase 4, without Make task or Dismiss. -->
-    <aside id="panels" class="panels" hidden aria-label="Transcript">
-      <h2 class="panel-title">Transcript <span id="transcript-status" class="tstatus" role="status"></span></h2>
-      <ol id="transcript" class="transcript" aria-live="polite"></ol>
-    </aside>
     <div id="audio" hidden></div>
-    <nav class="controls" aria-label="Call controls">
-      <button id="btn-mic" type="button" aria-pressed="true">Mute</button>
-      <button id="btn-cam" type="button" aria-pressed="true">Camera off</button>
-      <button id="btn-share" type="button" aria-pressed="false">Share screen</button>
-      <button id="btn-leave" type="button" class="danger">Leave</button>
-    </nav>
+    <div class="controls mu-toolbar" role="toolbar" aria-label="Call controls">
+      <button id="btn-mic" type="button" class="mu-icon-btn mu-toggle mu-toggle--alert" aria-label="Mute" data-mu-tooltip="Mute (M)" aria-keyshortcuts="M" aria-pressed="false" data-icon="mic"></button>
+      <button id="btn-cam" type="button" class="mu-icon-btn mu-toggle mu-toggle--alert" aria-label="Turn camera off" data-mu-tooltip="Turn camera off (V)" aria-keyshortcuts="V" aria-pressed="false" data-icon="camera"></button>
+      <button id="btn-share" type="button" class="mu-icon-btn mu-toggle" aria-label="Share screen" data-mu-tooltip="Share screen (S)" aria-keyshortcuts="S" aria-pressed="false" data-icon="screen-share"></button>
+      <button id="btn-layout" type="button" class="mu-icon-btn mu-toggle" aria-label="Presentation view" aria-pressed="false" data-icon="fullscreen"></button>
+      <span class="sep" aria-hidden="true"></span>
+      <button id="btn-transcript" type="button" class="mu-icon-btn mu-toggle" aria-label="Transcript" aria-pressed="false" aria-controls="panels" data-icon="transcript"><span id="transcript-new" class="dot" hidden></span></button>
+      <button id="btn-leave" type="button" class="mu-icon-btn mu-icon-btn--danger" aria-label="Leave" data-icon="leave"></button>
+    </div>
   </section>
   <noscript><p>Joining a meeting needs JavaScript.</p></noscript>
 </main>
+<script src="/kit/v1/kit.js"></script>
+<script src="/static/ui.js"></script>
+<script src="/static/prefs.js"></script>
 <script src="/static/vendor/livekit-client-2.25.0.umd.js"></script>
 <script src="/static/call.js"></script>
 <script src="/static/guest.js"></script>

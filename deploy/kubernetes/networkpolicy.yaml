@@ -23,6 +23,11 @@
 #   redis-meetings   in:  :6379 from LiveKit and Egress alone
 #                    out: nothing
 #
+# Contacts (optional) is NOT in the plugin's egress here: a deployment that
+# sets contacts-url adds one rule, to the contacts plugin's pods on its
+# internal port, with a patch (README "Contacts (optional)";
+# deploy/example-overlay does it). Without it the base reaches nothing new.
+#
 # The object store and the internet (OpenRouter) join the plugin's egress
 # in the phases that use them; muster's own pods gain no egress to any of
 # these. muster's own NetworkPolicy, if it has one, must admit the plugin's

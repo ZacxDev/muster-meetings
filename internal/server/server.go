@@ -41,6 +41,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ZacxDev/muster-meetings/internal/contacts"
 	"github.com/ZacxDev/muster-meetings/internal/ingest"
 	"github.com/ZacxDev/muster-meetings/internal/livekit"
 	"github.com/ZacxDev/muster-meetings/internal/lobby"
@@ -136,6 +137,12 @@ type Config struct {
 	// After is the timer the egress start and restart waits use; default
 	// time.After (a test records the waits).
 	After func(time.Duration) <-chan time.Time
+
+	// Contacts is the contacts plugin's API (MEETINGS_CONTACTS_URL and
+	// _TOKEN; internal/contacts), or nil. 🔴 nil is meetings exactly as it
+	// was before contacts: no card route, no card, no outbox worker, no
+	// call (card.go).
+	Contacts *contacts.Client
 }
 
 // Server is the plugin's public handler.
@@ -160,6 +167,9 @@ type Server struct {
 	tr     *transcriber
 	bg     context.Context
 	bgStop context.CancelFunc
+	// contacts is the guest card's side (card.go); nil without
+	// Config.Contacts.
+	contacts *contactsSide
 }
 
 // New builds the handler.
@@ -220,6 +230,15 @@ func New(cfg Config, st *store.Store, app *owners.App) *Server {
 	s.mux.HandleFunc("POST /j/{code}/wait", s.handleWait)
 	s.mux.HandleFunc("POST /j/{code}/events", s.handleGuestEvents)
 	s.mux.HandleFunc("POST /j/{code}/leave", s.handleLeave)
+	if cfg.Contacts != nil {
+		s.contacts = newContactsSide(cfg.Contacts, st, s.cfg)
+	}
+	// 🔴 The card's routes exist only with contacts (card.go): without it
+	// /card is the 404 every unknown path is.
+	if s.contacts != nil {
+		s.mux.HandleFunc("POST /card", s.handleCard)
+		s.mux.HandleFunc("POST /card/skip", s.handleCardSkip)
+	}
 	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
 	})

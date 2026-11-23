@@ -63,3 +63,9 @@ configMapGenerator:
       # needs stt-url (its fallback) and MEETINGS_STREAM_STT_TOKEN in the
       # Secret, or the plugin refuses to boot.
       - stream-stt-url=ws://stt-nemotron:8000/v1/stream
+      # Contacts (optional): the contacts plugin's INTERNAL listener, e.g.
+      # http://muster-contacts:8081. Empty: no guest card, meetings exactly
+      # as without contacts. Set it together with MEETINGS_CONTACTS_TOKEN in
+      # the Secret AND the NetworkPolicy patch that lets the plugin reach it
+      # (README "Contacts (optional)"; deploy/example-overlay shows both).
+      - contacts-url=

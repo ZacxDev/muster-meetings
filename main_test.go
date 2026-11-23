@@ -350,3 +350,42 @@ func TestCheckOriginRefusesWildcardsAndCSPSeparators(t *testing.T) {
 		}
 	}
 }
+
+// Contacts (phase 1b) is optional: neither variable is today's config, both
+// configure the client, one alone refuses to start, and the token is never
+// shown. The startup line gains a contacts clause only when configured (the
+// no-contacts line is pinned literally by TestTheStartupLineNamesTheHostOnly).
+func TestContactsConfigIsOptionalBothOrNeither(t *testing.T) {
+	const tok = "ctk_main_fixture_token_00112233445566778899"
+	c, err := LoadConfig(env(base()))
+	if err != nil || c.Contacts != nil {
+		t.Fatalf("no contacts variables: %v, %v; want no client", c.Contacts, err)
+	}
+	for _, x := range []struct {
+		url, token string
+		ok         bool
+	}{
+		{"http://muster-contacts:8081", tok, true},
+		{"http://muster-contacts:8081", "", false},
+		{"", tok, false},
+		{"http://muster-contacts:8081/v1", tok, false},
+		{"http://muster-contacts:8081", "mpl_x", false},
+		{"http://muster-contacts:8081", "short", false},
+	} {
+		m := base()
+		m["MEETINGS_CONTACTS_URL"], m["MEETINGS_CONTACTS_TOKEN"] = x.url, x.token
+		c, err := LoadConfig(env(m))
+		if (err == nil) != x.ok || (err == nil && c.Contacts == nil) {
+			t.Errorf("(%q, %q): %v, %v; want ok %v", x.url, x.token, c.Contacts, err, x.ok)
+		}
+		if err != nil && strings.Contains(err.Error(), tok) {
+			t.Errorf("the error shows the token: %v", err)
+		}
+		if x.ok {
+			line := startupLine(c, "meet", 1, false)
+			if !strings.HasSuffix(line, "; contacts: http://muster-contacts:8081 (the guest card is offered)") || strings.Contains(line, tok) {
+				t.Errorf("startup line with contacts: %q", line)
+			}
+		}
+	}
+}

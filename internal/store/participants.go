@@ -135,6 +135,7 @@ func cutoff(now time.Time) int64 { return ms(now.Add(-LinkLifetime)) }
 type GuestMeeting struct {
 	ID        string
 	Room      string
+	Subject   string // the meeting's owner
 	OwnerName string
 	Notice    Notice
 }
@@ -149,9 +150,9 @@ func (s *Store) MeetingByCode(ctx context.Context, code string, now time.Time) (
 	var state string
 	var created int64
 	var rec, ai int
-	err := s.db.QueryRowContext(ctx, `SELECT m.id, m.room, m.state, m.created_at, m.record, m.ai, o.display_name
+	err := s.db.QueryRowContext(ctx, `SELECT m.id, m.room, m.subject, m.state, m.created_at, m.record, m.ai, o.display_name
 		FROM meetings m JOIN owners o ON o.subject = m.subject WHERE m.join_code_sha256 = ?`, Hash(code)).
-		Scan(&g.ID, &g.Room, &state, &created, &rec, &ai, &g.OwnerName)
+		Scan(&g.ID, &g.Room, &g.Subject, &state, &created, &rec, &ai, &g.OwnerName)
 	if errors.Is(err, sql.ErrNoRows) {
 		return GuestMeeting{}, ErrNotFound
 	}

@@ -175,6 +175,8 @@ Read from the environment only; `.env.example` lists them.
 | `MEETINGS_INGEST_SECRET` | with an engine | 32 or more random bytes, base64 (`openssl rand -base64 32`): the key of every ingest URL's token (below). Never logged |
 | `MEETINGS_INGEST_URL` | with an engine | the ingest listener as **Egress** reaches it, e.g. `ws://muster-meetings:8082`; each track egress streams to `<this>/stt/ingest/<track>/<token>` |
 | `MEETINGS_INGEST_LISTEN` | no | the ingest listener; default `:8082`. Egress's alone: never route it |
+| `MEETINGS_CONTACTS_URL` | no (with `_TOKEN`) | the **contacts** plugin's internal API, `http(s)://host[:port]`, e.g. `http://muster-contacts:8081` ([Contacts (optional)](#contacts-optional)). Unset: no guest card, exactly as before contacts |
+| `MEETINGS_CONTACTS_TOKEN` | with `MEETINGS_CONTACTS_URL` | its bearer: a **copy** of the contacts plugin's `CONTACTS_API_TOKEN`, 32+ characters, never `MUSTER_PLUGIN_TOKEN`. Never logged. 🔴 Both or neither: one alone refuses to start |
 
 The plugin refuses to start when muster answers the token `401`
 (uninstalled or rotated away; it ends every session and open meeting
@@ -362,6 +364,91 @@ Compose: set `MEETINGS_STT_ENGINE=nemotron`, `MEETINGS_STREAM_STT_URL` and `MEET
 
 **LiveKit now depends on `redis-meetings`**: one replica, persisting nothing. What a Redis restart does to a running LiveKit and Egress (whether LiveKit refuses to start without it, and whether rooms and egresses survive the restart) is **UNVERIFIED**: it was not measured. Treat a Redis restart as one that may drop the calls and transcripts in progress. The plugin's own meetings, links and transcripts are in its SQLite and are not affected.
 
+### Contacts (optional)
+
+With the **muster-contacts** plugin deployed beside it (muster's
+`docs/design/contacts.md`, phase 1), Meetings offers each admitted guest an
+optional card when the meeting ends for them, by **End** or by their own
+**Leave**: their name (prefilled from the knock) and email, the sentence
+"Your name and email go to *owner*, who will see that you were in this
+meeting. Nothing else is shared.", **Send** and **Skip**. Once per guest per
+meeting; never the owner; never a guest who only waited, was denied or was
+removed; only while contacts says it accepts that owner (asked in the
+background at most once a minute; a failed ask keeps the last answer for up
+to 24 h, and with no answer there is no card). The card's id lives in the
+guest page's memory and is spent once (30 minutes at most). "Once per guest"
+means once per knock: a guest who leaves and knocks again is a new
+participant, and is offered a new card when that visit ends.
+
+🔴 **No URL, no change.** With `MEETINGS_CONTACTS_URL` and
+`MEETINGS_CONTACTS_TOKEN` both unset, no card route exists (`/card` is a
+`404` like any unknown path), no card is minted, the guest's `ended` event
+and the Leave answer (`204`) are byte for byte what they were before, no
+call is made to anything new, and any outbox rows left by an earlier
+configured boot are **deleted** at start (their names and emails have
+nowhere to go). `TestNoContactsURLChangesNothing` compares all of this with
+goldens taken at the commit before contacts.
+
+**Sending is never on the call's path.** Send writes the submission to the
+plugin's own `contacts_outbox` table in the transaction that spends the
+card, and answers at once with one message ("Sent to *owner*."), whatever
+contacts later does with it. A worker delivers it to `POST /v1/submissions`
+(the contacts plugin's own wire types and field checks:
+`github.com/ZacxDev/muster-contacts/contactsapi`, pinned in `go.mod`) with
+an `Idempotency-Key` of `card:<card id>` (the card's public id: its SHA-256,
+never the secret the guest's page holds), RFC 3339 UTC times, a 3 s
+timeout, and a backoff of 5 s doubling to 10 minutes: `2xx` delete the row
+(contacts answers a card for an owner who is not accepting with the same
+`202`, and drops it), `400`/`409`/`413` (and any other `4xx` but `401` and
+`429`) delete it and log the event, and `401`, `429` (its `Retry-After`), `5xx`
+and no answer retry. A row 72 h old is deleted undelivered and counted in
+the log (`meetings_contacts_outbox_dropped_total`). Knock, admit, the token
+and End never wait on contacts: with it black-holed they take as long as
+without it. Log lines name events, statuses and row ids, never a name, an
+email, a card id or the token.
+
+**Limits:** 10 card posts per source address per 10 minutes (`429`; the
+cards a meeting can mint are bounded by the guests the owner admitted, and
+contacts caps each owner's cards a day), 2 KiB bodies, and the contacts
+plugin's own field rules (`contactsapi.CleanName`, `contactsapi.CheckEmail`):
+a name as at the knock (1–40 characters), one plain email address (no
+display name, no list).
+
+To turn it on (Kubernetes):
+
+1. Deploy muster-contacts and install it linked to Meetings (its README).
+2. Add `MEETINGS_CONTACTS_TOKEN` (a copy of its `CONTACTS_API_TOKEN`) to the
+   `muster-meetings` Secret, and set `contacts-url` in the params to its
+   internal listener (e.g. `http://muster-contacts:8081`).
+3. Let the plugin reach it: append one rule to the `muster-meetings`
+   NetworkPolicy's egress, **last**, so the patches by index keep their
+   targets (the base adds nothing; `deploy/example-overlay` shows it):
+
+   ```yaml
+   - op: add
+     path: /spec/egress/-
+     value:
+       to: [{podSelector: {matchLabels: {app.kubernetes.io/name: muster-contacts}}}]
+       ports: [{protocol: TCP, port: 8081}]
+   ```
+
+   The contacts plugin's own NetworkPolicy must admit the plugin's pods on
+   that port.
+4. Redeploy. The startup line ends `; contacts: http://… (the guest card is
+   offered)`.
+
+Compose: set `MEETINGS_CONTACTS_URL` and `MEETINGS_CONTACTS_TOKEN` in
+muster's `.env`, with the contacts service on a network the plugin joins.
+
+**Rollback.** Unset both variables (or empty `contacts-url` and remove the
+Secret key) and redeploy: no card from then on, and the outbox is emptied
+at start. 🔴 **Do not roll back by running an older image**: this release
+adds migration **5** (three nullable `participants` columns for the card,
+and the `contacts_outbox` table), and migrations here are one-way. An older
+build refuses a database at schema 5 ("newer than this build"); the added
+columns and table are unused when contacts is unset. To go back to an older
+image anyway, restore the volume from a backup taken before this release.
+
 ### Capacity and limits
 
 - **About 100 concurrent participants per LiveKit pod.** Each relayed
@@ -441,7 +528,9 @@ that does not exist.
 | `POST /j/{code}/knock` `{"name", "notice": {"record", "ai", "transcribed"}}` | `201 {"ticket"}`. `notice` is what the page showed; another one (or one without `transcribed`) is `409 {"notice": <the current one>}` |
 | `POST /j/{code}/wait` `{"ticket"}` | an event stream: `waiting` (with the current notice), then `admitted {"livekit_url", "token", "identity", "ice"}`, `denied` or `ended` |
 | `POST /j/{code}/events` `{"ticket"}` | an admitted guest's stream: a fresh `token` (the reconnect after a drop), the current notice (its badge), the same transcript events as the owner's, then `removed` or `ended` |
-| `POST /j/{code}/leave` `{"ticket"}` | the guest's own Leave: `204`, dropped from the room, the ticket spent |
+| `POST /j/{code}/leave` `{"ticket"}` | the guest's own Leave: `204`, dropped from the room, the ticket spent. With contacts configured and a card offered, `200 {"card": {"id", "name", "owner"}}` instead |
+| `POST /card` `{"id", "name", "email"}` | contacts only ([Contacts (optional)](#contacts-optional)): the card's Send. `200 {"message"}`, the same whatever contacts does; `400 {"error", "field"}` spends nothing; `404` for a spent, unknown or expired card; `429` past the limits. The `ended` event carries the card as `"card"` |
+| `POST /card/skip` `{"id"}` | contacts only: Skip. `204`; nothing is sent anywhere |
 | `POST /livekit/webhook` | internal listener only: LiveKit's signed webhook |
 | `WS /stt/ingest/{track}/{token}` | the ingest listener only: one track egress's audio (above) |
 | `GET /healthz` | internal listener only |
@@ -729,7 +818,9 @@ name typed, the LiveKit identity, the ticket's hash, its state and times; no
 address), the transcribed tracks (the track id, the egress, the current
 nonce, the speaker's name) and the transcript itself (finals and gap
 markers, with the speaker's name and the meeting time; partials are never
-stored), and an audit trail
+stored), with contacts configured each guest card's state and its
+id's hash, and until it is delivered (72 h at most) each card's submission,
+guest name and email included, in `contacts_outbox`, and an audit trail
 of what happened, which never holds a code, a token, a display name,
 transcript text or a guest's name. Every owner-facing query goes through one
 repository layer that filters by the session's subject.
@@ -756,7 +847,10 @@ None. The plugin talks only to the muster at `MUSTER_URL`, to your
 LiveKit, and (with the transcript on) to your own STT service at
 `MEETINGS_STT_URL`, which gets each utterance's audio, and (with the
 `nemotron` engine) your own Nemotron server at `MEETINGS_STREAM_STT_URL`,
-which gets each microphone's audio as it is spoken. Audio and video go
+which gets each microphone's audio as it is spoken, and (with contacts
+configured) your own contacts plugin at `MEETINGS_CONTACTS_URL`, which gets
+the name and email a guest chose to send on the card, the meeting's id,
+title and times, and that guest's knock name and times. Audio and video go
 between browsers and your LiveKit; only the microphones' audio reaches the
 plugin, from your Egress, and it is not stored. Later phases send transcript **text** (never audio) to an AI
 service for action items, on by default and off per meeting, as the notice
@@ -832,6 +926,26 @@ in the pinned Playwright image (CI's `visual` job; remake them with
 -e2e` is the UI's mutation sweep: each mutant (an indicator not updated, the
 ring not following, presentation not switching, an `aria-label` missing,
 reduced motion ignored, …) must turn its named Playwright test red.
+
+**Contacts** (`contacts-card.spec.ts`, at 390×844 and 1280×800, against the
+fake contacts API, `scripts/e2e-harness -contacts=fake`): the card after
+End, prefilled, with the whole consent sentence, an invalid email refused
+in place, Send reaching contacts once, and none in the owner's frame; the
+card after the guest's own Leave, Skip sending nothing, and no second card
+at End; the same answer with contacts down and delivery once it is back;
+no card for an owner contacts is not accepting; no rise or fade under
+reduced motion; and, with no contacts URL, no card on either path and no
+card route. In Go, `internal/contacts` runs the contacts plugin's own
+contract (`contactsapi.RunContract`, every case of its `routes.json`)
+against `internal/contactstest`, the fake every other test talks to, and
+checks the body meetings sends against `contactsapi.Submission`'s check and
+the outbox's action for every status the contract answers;
+`internal/server` checks the card's fields against its `fields.json`; the outbox (each answer class, the backoff, the 72 h
+drop, a retry after a lost answer making exactly one submission, insertion
+order with one failure holding nothing back, no PII in its log), and
+`internal/server`'s `card_test.go` and `nourl_test.go` the eligibility (each
+condition alone false, and all true), the spending, the uniform answer, the
+limits, contacts black-holed, and the no-URL goldens.
 
 **Against a real LiveKit:** `internal/server/livekit_integration_test.go`
 starts `livekit-server` and joins with LiveKit's CLI (`lk room join`): the

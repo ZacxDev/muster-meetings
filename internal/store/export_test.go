@@ -12,3 +12,7 @@ func (s *Store) SetUserVersionForTest(v int) error {
 
 // Migration1ForTest is the phase 2a schema, to build a 2a database with.
 var Migration1ForTest = migrations[0]
+
+// MigrationsBeforeContactsForTest are migrations 1–4: the schema before
+// contacts (migration 5).
+var MigrationsBeforeContactsForTest = append([]string(nil), migrations[:4]...)

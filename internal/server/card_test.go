@@ -242,6 +242,25 @@ func TestCardIsNeverOfferedToTheOwner(t *testing.T) {
 	}
 }
 
+// The knock itself asks contacts (in the background), so an answer is
+// cached before any event stream opens: here no stream ever opens, and the
+// only ask is the knock's.
+func TestTheKnockWarmsTheAcceptingCache(t *testing.T) {
+	e, f := newCardEnv(t)
+	c := e.meeting(ada)
+	if e.server.Accepting().Get(c.Subject) || f.Count("GET", contacts.PathOwners) != 0 {
+		t.Fatal("an answer is cached before anything asked")
+	}
+	e.knock(c.Code, cName)
+	e.server.Accepting().Wait()
+	if n := f.Count("GET", contacts.PathOwners); n != 1 {
+		t.Fatalf("the knock sent %d owners checks, want 1", n)
+	}
+	if !e.server.Accepting().Get(c.Subject) {
+		t.Fatal("after a knock with no stream open, the knock did not warm the accepting cache")
+	}
+}
+
 // ---- the Leave path, and once only ----
 
 func TestCardOnLeaveAndOnlyOnce(t *testing.T) {

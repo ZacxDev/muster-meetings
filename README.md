@@ -376,7 +376,9 @@ meeting; never the owner; never a guest who only waited, was denied or was
 removed; only while contacts says it accepts that owner (asked in the
 background at most once a minute; a failed ask keeps the last answer for up
 to 24 h, and with no answer there is no card). The card's id lives in the
-guest page's memory and is spent once (30 minutes at most).
+guest page's memory and is spent once (30 minutes at most). "Once per guest"
+means once per knock: a guest who leaves and knocks again is a new
+participant, and is offered a new card when that visit ends.
 
 🔴 **No URL, no change.** With `MEETINGS_CONTACTS_URL` and
 `MEETINGS_CONTACTS_TOKEN` both unset, no card route exists (`/card` is a

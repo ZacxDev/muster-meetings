@@ -1112,6 +1112,8 @@ var mutants = []mutant{
 	{name: "contacts down: End delivers the outbox first", file: calls, from: "\ts.hub.Changed(id)\n\ts.knocker.Kick(id)\n\ts.stopTranscription",
 		to:  "\ts.hub.Changed(id)\n\ts.knocker.Kick(id)\n\tif ob := s.Outbox(); ob != nil {\n\t\tob.Pass(r.Context())\n\t}\n\ts.stopTranscription",
 		pkg: "./internal/server", test: "TestContactsDownLeavesTheCallAndEndAsFast", want: "End took"},
+	{name: "contacts accepting: the knock does not ask contacts", file: guest, from: "\ts.touchContacts(gm.Subject)\n", to: "",
+		pkg: "./internal/server", test: "TestTheKnockWarmsTheAcceptingCache", want: "the knock sent 0 owners checks"},
 	{name: "contacts down: the knock waits for contacts", file: cardGo, from: "\ts.contacts.accepting.Refresh(subject)\n", to: "\ts.contacts.accepting.Refresh(subject)\n\ts.contacts.accepting.Wait()\n",
 		pkg: "./internal/server", test: "TestContactsDownLeavesTheCallAndEndAsFast", want: "knock took"},
 	{name: "contacts accepting: a failed refresh drops the last answer", file: ctAcc, from: "\t\te.inflight = false\n\t\tif err != nil {\n", to: "\t\te.inflight = false\n\t\tif err != nil {\n\t\t\te.ok = false\n",

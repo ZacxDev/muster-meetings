@@ -257,32 +257,45 @@ func (s *Server) stopUnwanted(ctx context.Context, ref store.RecordingRef, egres
 }
 
 // onRecordingEgress acts on an egress webhook (or a reconcile's ListEgress
-// answer) if the egress records a part, and answers whether it did. A part
-// is found by its egress id, else by its file's key (a start that LiveKit
-// timed out at but Egress ran: its key names the part it was asked for).
-func (s *Server) onRecordingEgress(ctx context.Context, info livekit.EgressInfo) bool {
+// answer) if the egress records a part. It answers owned (a part's egress,
+// acted on), or not owned (no part's: a track egress, or none of the
+// plugin's), or an error when the database could not say, and then NOTHING
+// is decided about the egress (🔴 above all, it is not stopped as unowned).
+// A part is found by its egress id, else by its file's key (a start that
+// LiveKit timed out at but Egress ran: its key names the part it was asked
+// for).
+func (s *Server) onRecordingEgress(ctx context.Context, info livekit.EgressInfo) (owned bool, err error) {
 	if !s.Recording() {
-		return false
+		return false, nil
 	}
 	now := s.cfg.Now()
+	if testHookRecordingLookup != nil {
+		if err := testHookRecordingLookup(); err != nil {
+			return false, err
+		}
+	}
 	ref, err := s.store.RecordingByEgress(ctx, info.EgressID, now)
 	if errors.Is(err, store.ErrNotFound) && len(info.Files) > 0 && info.Files[0].Filename != "" {
 		ref, err = s.store.RecordingByKey(ctx, info.Files[0].Filename, now)
 		if err == nil && ref.EgressID != "" && ref.EgressID != info.EgressID {
-			return true // the key is another egress's part: not this one's
+			return true, nil // the key is another egress's part: not this one's
 		}
 		if err == nil && ref.EgressID == "" {
 			_ = s.store.SetRecordingEgress(ctx, ref.ID, info.EgressID)
 			ref.EgressID = info.EgressID
 		}
 	}
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
 	if err != nil {
-		return false
+		s.cfg.Log.Printf("recording: an egress's part could not be read: %v", err)
+		return false, err
 	}
 	switch {
 	case info.Ended():
 		s.onRecordingEnded(ctx, ref, info)
-		return true
+		return true, nil
 	case fileOf(info) != nil && ref.State != store.RecFailed:
 		// (A failed part's egress beginning is no part of the recording:
 		// it closes no gap.)
@@ -297,8 +310,12 @@ func (s *Server) onRecordingEgress(ctx context.Context, info livekit.EgressInfo)
 	if (ref.State == store.RecFailed || !wanted(ref)) && info.Status != "EGRESS_ENDING" {
 		s.stopUnwanted(ctx, ref, info.EgressID)
 	}
-	return true
+	return true, nil
 }
+
+// testHookRecordingLookup, when set (by tests only), fails the part lookup
+// of onRecordingEgress: a database that cannot answer.
+var testHookRecordingLookup func() error
 
 // onRecordingBegan records the part's file start, in meeting time, from the
 // egress's OWN report (its file's started_at): the badge's gap closes there.
@@ -394,15 +411,20 @@ const LostEgress = 2 * time.Minute
 //
 //   - a part with an egress id: its egress is reported (onRecordingEgress:
 //     ended, began, or stopped while unwanted, again every pass until its
-//     end is seen); one LiveKit does not know is gone after LostEgress.
+//     end is seen); one LiveKit has not listed for LostEgress, counted from
+//     the first pass that missed it, is gone.
 //   - a part with NO egress id (its start timed out, or the plugin stopped
 //     mid-start): LiveKit's egresses in the meeting's room are listed, and
 //     one whose file is the part's key is adopted by it (and so stopped if
 //     unwanted); any other composite there writing under meetings/ that no
 //     part owns is stopped, so nothing records or uploads unowned. A part
-//     none matches after LostEgress has no egress: it is resolved (failed,
+//     none matches for LostEgress (and while the room lists no unidentified
+//     egress that names no file yet) has no egress: it is resolved (failed,
 //     its egress ended), so a deleted recording's rows can go, and a meeting
 //     still recorded starts its next part.
+//
+// A list LiveKit will not answer skips that part or room, never the pass;
+// an egress whose part the database cannot read is left as it is.
 func (s *Server) reconcileRecordings(ctx context.Context) {
 	if !s.Recording() {
 		return
@@ -412,8 +434,15 @@ func (s *Server) reconcileRecordings(ctx context.Context) {
 		return
 	}
 	now := s.cfg.Now()
-	lost := func(p store.Recording) bool { return now.Sub(time.UnixMilli(p.RequestedAt)) >= LostEgress }
-	unowned := map[string][]store.Recording{}
+	// 🔴 lost is LostEgress after the first pass that could not see the
+	// egress (cleared when a pass sees it again), never after its request:
+	// one empty answer (LiveKit's Redis restarting) does not end an egress
+	// that has run for an hour.
+	lost := func(p store.OpenPart, seen bool) bool {
+		since, err := s.store.SeenEgress(ctx, p.ID, seen, now)
+		return err == nil && !seen && now.Sub(since) >= LostEgress
+	}
+	unowned := map[string][]store.OpenPart{}
 	var order []string
 	for _, p := range parts {
 		if p.EgressID == "" {
@@ -425,36 +454,51 @@ func (s *Server) reconcileRecordings(ctx context.Context) {
 		}
 		items, err := s.cfg.LiveKit.ListEgress(ctx, p.EgressID)
 		if err != nil {
-			s.cfg.Log.Printf("reconcile: LiveKit: %s", lkKind(err))
-			return
+			// One part LiveKit will not answer for: the next is still asked.
+			s.cfg.Log.Printf("reconcile: meeting %s part %d: LiveKit: %s", p.MeetingID, p.Part, lkKind(err))
+			continue
 		}
 		seen := false
 		for _, it := range items {
 			if it.EgressID == p.EgressID {
 				seen = true
-				s.onRecordingEgress(ctx, it)
+				_, _ = s.onRecordingEgress(ctx, it)
 			}
 		}
-		if !seen && lost(p) {
+		if lost(p, seen) {
 			// As an end would (EndRecording records its egress ended, opens
 			// the gap and restarts a recorded meeting).
-			s.onRecordingEgress(ctx, livekit.EgressInfo{EgressID: p.EgressID, Status: "EGRESS_ABORTED"})
+			_, _ = s.onRecordingEgress(ctx, livekit.EgressInfo{EgressID: p.EgressID, Status: "EGRESS_ABORTED"})
 		}
 	}
 	for _, id := range order {
 		items, err := s.cfg.LiveKit.ListRoomEgress(ctx, store.RoomName(id))
 		if err != nil {
-			s.cfg.Log.Printf("reconcile: LiveKit: %s", lkKind(err))
-			return
+			s.cfg.Log.Printf("reconcile: meeting %s: LiveKit: %s", id, lkKind(err))
+			continue
 		}
 		keys := map[string]bool{}
+		// unsure: the room lists an egress, not ended, with no file named
+		// yet that is no track's (a composite still STARTING may name none):
+		// it could be one of these parts', so none of them is called gone.
+		unsure, failed := false, false
 		for _, it := range items {
 			if len(it.Files) == 0 || it.Files[0].Filename == "" {
-				continue // not a file egress (a track's audio): not ours to judge here
+				if !it.Ended() {
+					if _, err := s.store.TrackByEgress(ctx, it.EgressID, now); errors.Is(err, store.ErrNotFound) {
+						unsure = true
+					}
+				}
+				continue // no file to judge it by
 			}
 			key := it.Files[0].Filename
 			keys[key] = true
-			if s.onRecordingEgress(ctx, it) {
+			owned, err := s.onRecordingEgress(ctx, it)
+			if err != nil {
+				failed = true
+				continue // the database could not say whose it is: nothing is stopped
+			}
+			if owned {
 				continue // a part's (adopted by its key if it had no id)
 			}
 			if strings.HasPrefix(key, "meetings/") && !it.Ended() && it.Status != "EGRESS_ENDING" {
@@ -465,29 +509,38 @@ func (s *Server) reconcileRecordings(ctx context.Context) {
 			}
 		}
 		for _, p := range unowned[id] {
-			if !keys[p.ObjectKey] && lost(p) {
+			if lost(p, keys[p.ObjectKey] || unsure || failed) {
 				s.goneEgress(ctx, p)
 			}
 		}
 	}
 }
 
-// goneEgress resolves a part whose egress LiveKit does not know, LostEgress
-// after it was asked for: its egress has ended (none runs), so its object is
-// final and it is due if its recording was deleted; a meeting still
-// recorded with no part running starts its next.
-func (s *Server) goneEgress(ctx context.Context, p store.Recording) {
+// goneEgress resolves a part whose egress LiveKit has not listed for
+// LostEgress: its egress has ended (none runs), so its object is final and
+// it is due if its recording was deleted; a meeting still recorded with no
+// part running starts its next, on the restart backoff (its attempt count
+// kept), and only when no start loop of the meeting is running already (a
+// running loop retries by itself; replacing it could drop a start in
+// flight).
+func (s *Server) goneEgress(ctx context.Context, p store.OpenPart) {
 	if err := s.store.EgressGone(ctx, p.ID, "lost", s.cfg.Now()); err != nil {
 		s.cfg.Log.Printf("reconcile: meeting %s part %d: %v", p.MeetingID, p.Part, err)
 		return
 	}
-	s.cfg.Log.Printf("reconcile: meeting %s part %d: LiveKit knows no egress for it; its egress is gone", p.MeetingID, p.Part)
+	s.cfg.Log.Printf("reconcile: meeting %s part %d: LiveKit has not listed its egress for %s; its egress is gone", p.MeetingID, p.Part, LostEgress)
 	s.purgeMeeting(ctx, p.MeetingID)
 	s.hub.Changed(p.MeetingID)
+	s.rec.mu.Lock()
+	running := s.rec.runs[p.MeetingID] != nil
+	s.rec.mu.Unlock()
+	if running {
+		return
+	}
 	if ids, err := s.store.ToResume(ctx, s.cfg.Now()); err == nil {
 		for _, id := range ids {
 			if id == p.MeetingID {
-				s.startRecording(id)
+				s.startRecordingAfter(id, s.recordingRestartWait(id, nil))
 			}
 		}
 	}

@@ -376,16 +376,56 @@ func (s *Store) CurrentRecording(ctx context.Context, meetingID string) (Recordi
 		ORDER BY r.part DESC LIMIT 1`, meetingID))
 }
 
+// OpenPart is a part whose egress's end has not been observed, and since
+// when LiveKit has not listed its egress (zero while it does).
+type OpenPart struct {
+	Recording
+	UnseenSince time.Time
+}
+
 // RunningRecordings is every part whose egress's end has not been observed,
 // whatever its state (a part marked failed whose start timed out may still
 // have an egress running), with or without an egress id: what the reconcile
 // asks LiveKit about.
-func (s *Store) RunningRecordings(ctx context.Context) ([]Recording, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+recCols+` FROM recordings r WHERE r.egress_ended = 0 ORDER BY r.id`)
+func (s *Store) RunningRecordings(ctx context.Context) ([]OpenPart, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+recCols+`, r.unseen_since FROM recordings r WHERE r.egress_ended = 0 ORDER BY r.id`)
 	if err != nil {
 		return nil, err
 	}
-	return scanRecordings(rows)
+	defer rows.Close()
+	var out []OpenPart
+	for rows.Next() {
+		var o OpenPart
+		var start, dur, size, unseen sql.NullInt64
+		if err := rows.Scan(&o.ID, &o.MeetingID, &o.Part, &o.EgressID, &o.ObjectKey, &o.State, &o.RequestedAt, &start, &dur, &size, &o.Error, &unseen); err != nil {
+			return nil, err
+		}
+		if start.Valid {
+			v := start.Int64
+			o.StartMS = &v
+		}
+		if unseen.Valid {
+			o.UnseenSince = time.UnixMilli(unseen.Int64).UTC()
+		}
+		out = append(out, o)
+	}
+	return out, rows.Err()
+}
+
+// SeenEgress records whether a reconcile pass found the part's egress in
+// LiveKit's list: seen clears the first-unseen time, unseen sets it unless
+// it is already set. It answers the first-unseen time (zero once seen).
+func (s *Store) SeenEgress(ctx context.Context, id int64, seen bool, now time.Time) (time.Time, error) {
+	if seen {
+		_, err := s.db.ExecContext(ctx, `UPDATE recordings SET unseen_since = NULL WHERE id = ?`, id)
+		return time.Time{}, err
+	}
+	var v int64
+	err := s.db.QueryRowContext(ctx, `UPDATE recordings SET unseen_since = coalesce(unseen_since, ?) WHERE id = ? RETURNING unseen_since`, ms(now), id).Scan(&v)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return time.UnixMilli(v).UTC(), nil
 }
 
 // RecordingStatus is what the badge says about the recording of a meeting

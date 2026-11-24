@@ -130,6 +130,27 @@ type Fake struct {
 	// upload: the egress is ENDING (egress_updated) and stays active until
 	// FinishEgress; without it a stop ends the egress at once.
 	StopEnding bool
+	// FilelessUntilBegin makes a composite list no file result until its
+	// file begins (as an Egress still STARTING may).
+	FilelessUntilBegin bool
+	// hideList is how many of the next ListEgress calls answer no egress (a
+	// LiveKit whose Redis restarted); failList the egress ids whose
+	// ListEgress fails (503).
+	hideList int
+	failList map[string]bool
+}
+
+// HideList makes the next n ListEgress calls answer an empty list.
+func (f *Fake) HideList(n int) { f.mu.Lock(); f.hideList = n; f.mu.Unlock() }
+
+// FailList makes every ListEgress for egressID fail.
+func (f *Fake) FailList(egressID string) {
+	f.mu.Lock()
+	if f.failList == nil {
+		f.failList = map[string]bool{}
+	}
+	f.failList[egressID] = true
+	f.mu.Unlock()
 }
 
 // FinishEgress ends an egress that is ENDING (its upload done): COMPLETE.
@@ -682,7 +703,7 @@ func (f *Fake) egressJSON(e *Egress) map[string]any {
 		status = "EGRESS_COMPLETE"
 	}
 	files := []map[string]any{}
-	if e.Composite {
+	if e.Composite && !(f.FilelessUntilBegin && e.StartedAt.IsZero()) {
 		// The file is named from the start (its started_at 0 until it began).
 		started := "0"
 		if !e.StartedAt.IsZero() {
@@ -851,6 +872,17 @@ func (f *Fake) egressTwirp(w http.ResponseWriter, r *http.Request) {
 			}
 		}()
 	case "ListEgress":
+		if f.failList[in.EgressID] {
+			f.mu.Unlock()
+			twirpErr(w, 503, "unavailable", "the fake fails this list")
+			return
+		}
+		if f.hideList > 0 {
+			f.hideList--
+			f.mu.Unlock()
+			writeOK(map[string]any{"items": []map[string]any{}})
+			return
+		}
 		var items []map[string]any
 		for _, x := range f.egresses {
 			if (in.EgressID == "" || x.ID == in.EgressID) && (in.RoomName == "" || x.Room == in.RoomName) {

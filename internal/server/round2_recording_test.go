@@ -168,6 +168,8 @@ func TestAStartingPartWithNoEgressIsResolvedAndBecomesDue(t *testing.T) {
 	if resp, raw := e.do("DELETE", "/api/meetings/"+c.ID+"/recording", c.Sess, nil); resp.StatusCode != 200 {
 		t.Fatalf("delete = %d %s", resp.StatusCode, raw)
 	}
+	// Two passes: the first that misses its egress starts the window.
+	e.server.Reconcile(ctx)
 	e.clock.Add(server.LostEgress)
 	e.server.Reconcile(ctx)
 	if parts, _, _ := e.store.ForSubject(c.Subject).Recordings(ctx, c.ID); len(parts) != 0 {

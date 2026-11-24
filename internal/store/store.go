@@ -252,6 +252,7 @@ var migrations = []string{
 		ended_at     INTEGER,           -- Unix ms
 		error        TEXT    NOT NULL DEFAULT '', -- a fixed phrase or an egress status, never Egress's message
 		egress_ended INTEGER NOT NULL DEFAULT 0 CHECK (egress_ended IN (0, 1)), -- its egress's end was observed (or none exists): its object is final
+		unseen_since INTEGER,           -- Unix ms: the first reconcile pass LiveKit did not list its egress; NULL once listed again
 		UNIQUE (meeting_id, part)
 	) STRICT;
 	CREATE INDEX recordings_egress ON recordings (egress_id) WHERE egress_id != '';

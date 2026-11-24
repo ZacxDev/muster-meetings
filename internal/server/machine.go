@@ -89,12 +89,14 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		// A room composite's file began (ACTIVE, with its file's start):
 		// recording.go. A track egress's update changes nothing.
 		if ev.EgressInfo != nil {
-			s.onRecordingEgress(ctx, *ev.EgressInfo)
+			_, _ = s.onRecordingEgress(ctx, *ev.EgressInfo)
 		}
 	case "egress_ended":
 		// A recording part's, else a track egress's.
-		if ev.EgressInfo != nil && !s.onRecordingEgress(ctx, *ev.EgressInfo) {
-			s.onEgressEnded(ctx, *ev.EgressInfo)
+		if ev.EgressInfo != nil {
+			if owned, err := s.onRecordingEgress(ctx, *ev.EgressInfo); err == nil && !owned {
+				s.onEgressEnded(ctx, *ev.EgressInfo)
+			}
 		}
 	case "room_finished":
 		if room == "" {

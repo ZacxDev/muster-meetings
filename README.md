@@ -486,11 +486,15 @@ the pre-recording commit's).
   that failed once, Record off landing while a start was in flight, or a
   start that timed out while LiveKit ran it anyway leaves nothing
   recording. Whether a part's egress has ended is its own recorded fact
-  (`egress_ended`), never inferred from its state. A part with no egress id
-  (its start's answer was lost) is matched by its key among the room's
-  egresses LiveKit lists, and any composite there that no part owns is
-  stopped; one LiveKit knows nothing of two minutes after it was asked for
-  is resolved as gone.
+  (`egress_ended`): set when its end is seen, or when LiveKit has not
+  listed it for two minutes counted from the first reconcile pass that
+  missed it (`unseen_since`, cleared when it is listed again); a part's
+  state (`failed`) never sets it. A part with no egress id (its start's
+  answer was lost) is matched by its key among the room's egresses LiveKit
+  lists, and any composite there that no part owns is stopped; it is
+  resolved as gone only after those two minutes, and not while the room
+  lists an egress, not yet ended, that names no file and is no track's (a
+  composite still starting may name none).
 - **The badge.** Everyone in the call sees "Recording · …" while Record is
   on, and **"Recording failed · …"** while the recording should run and does
   not: its start was refused (no Egress capacity), or its egress died and the

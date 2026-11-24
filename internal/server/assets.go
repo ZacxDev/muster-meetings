@@ -135,7 +135,7 @@ func staticHandler(next http.Handler) http.Handler {
 var pageSamples = map[string][]any{
 	"app.html":   {enterPage{Session: "mmo_sample", Ref: "sample"}, enterPage{Message: "sample", Again: true}},
 	"guest.html": {guestPage{OwnerName: "sample", Notice: lobby.Notice{Record: true, AI: true, Transcribed: true, Text: []string{"sample"}, Badge: "sample"}}, guestPage{Message: "sample"}},
-	"share.html": {sharePage{Missing: true}, sharePage{Title: "sample", When: "sample", Until: "sample", Many: true,
+	"share.html": {sharePage{Missing: true}, sharePage{Title: "sample", When: "sample", Until: "until sample", Many: true,
 		Parts: []sharePart{{Label: "sample", Src: "/r/sample/1"}}, Gaps: []string{"sample"}}},
 }
 

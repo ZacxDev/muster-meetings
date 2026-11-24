@@ -164,6 +164,7 @@ const (
 	s3Go     = "internal/s3/s3.go"
 	framesGo = "internal/frames/frames.go"
 	recE2E   = "recording.spec.ts"
+	lobbyN   = "internal/lobby/notice.go"
 	// action items, phase 4a (the design's "Action-item evaluation")
 	itGuard  = "internal/items/guard.go"
 	itWindow = "internal/items/window.go"
@@ -938,7 +939,7 @@ var mutants = []mutant{
 		pkg: "./internal/server", test: "TestTheExportsFenceGuestSpeech", want: "txt ="},
 	{name: "export: a fence mark in a name not escaped (txt)", file: tscript, from: "name = strings.NewReplacer(`\\`, `\\\\`, \"«\", `\\«`, \"»\", `\\»`).Replace(oneLine(name))", to: "name = oneLine(name)",
 		pkg: "./internal/server", test: "TestTheExportsFenceGuestSpeech", want: "txt ="},
-	{name: "notice: transcribed without an engine", file: trans, from: "return lobby.NoticeWith(record, ai, s.Transcribing())", to: "return lobby.NoticeFor(record, ai)",
+	{name: "notice: transcribed without an engine", file: trans, from: "return lobby.NoticeFull(record, ai, s.Transcribing(), s.Recording())", to: "return lobby.NoticeFull(record, ai, true, s.Recording())",
 		pkg: "./internal/server", test: "TestTheNoticeSaysTranscribedOnlyWithAnEngine", want: "engine false"},
 	{name: "notice: a knock's transcribed answer not checked", file: guest, from: "if in.Notice.Transcribed == nil || *in.Notice.Transcribed != s.Transcribing() {", to: "if false {",
 		pkg: "./internal/server", test: "TestTheNoticeSaysTranscribedOnlyWithAnEngine", want: "want 409 with the current notice"},
@@ -1311,8 +1312,6 @@ var mutants = []mutant{
 		pkg: "./internal/server", test: "TestTheReconcileEndsAPartWhoseWebhookWasLost", want: "after the reconcile the part is"},
 	{name: "share door: a revoked link opens", file: recSt, from: "subtle.ConstantTimeCompare([]byte(stored), []byte(h)) != 1 || revoked.Valid ||", to: "subtle.ConstantTimeCompare([]byte(stored), []byte(h)) != 1 ||",
 		pkg: "./internal/store", test: "TestAShareLinkOpensUntilThePurgeAndNotOnceRevokedOrReplaced", want: "the replaced link still opens"},
-	{name: "share door: an expired link opens", file: recSt, from: "!purge.Valid || purge.Int64 <= ms(now) {\n\t\treturn Shared{}, ErrNotFound", to: "!purge.Valid {\n\t\treturn Shared{}, ErrNotFound",
-		pkg: "./internal/store", test: "TestAShareLinkOpensUntilThePurgeAndNotOnceRevokedOrReplaced", want: "open at the purge time"},
 	{name: "share door: the token stored in clear", file: recSt, from: "VALUES (?, ?, ?)`, Hash(tok), meetingID, ms(now)); err != nil {", to: "VALUES (?, ?, ?)`, tok, meetingID, ms(now)); err != nil {",
 		pkg: "./internal/store", test: "TestTheTokenIsStoredOnlyHashed", want: "the share token is in the database file"},
 	{name: "share door: the media's 404 is not the page's", file: recGo, from: "\tif err != nil {\n\t\ts.shareMissing(w)\n\t\treturn\n\t}\n\tn := atoi(r.PathValue(\"part\"))", to: "\tif err != nil {\n\t\twriteJSON(w, http.StatusNotFound, map[string]any{\"error\": \"not found\"})\n\t\treturn\n\t}\n\tn := atoi(r.PathValue(\"part\"))",
@@ -1329,14 +1328,6 @@ var mutants = []mutant{
 		pkg: "./internal/server", test: "TestTheSweeperDeletesTheObjectThenTheRowAndRetriesWhenTheStoreIsDown", want: "the store down: deleted 1, left 0"},
 	{name: "sweeper: the object never deleted", file: recGo, from: "\t\tif d.ObjectKey != \"\" {\n\t\t\tif err := s.cfg.S3.Delete", to: "\t\tif false {\n\t\t\tif err := s.cfg.S3.Delete",
 		pkg: "./internal/server", test: "TestTheSweeperDeletesTheObjectItself", want: "the object is still stored after its sweep"},
-	{name: "retention: the owner's setting ignored at the end", file: recSt, from: "86400000 * coalesce(\n\t\t\t(SELECT o.retention_days_recording FROM owners o WHERE o.subject = meetings.subject), ", to: "86400000 * coalesce(NULL, ",
-		pkg: "./internal/store", test: "TestEveryEndStampsTheRecordingPurgeTime", want: "End: purge at"},
-	{name: "retention: an end path that does not close the recording", file: parts, from: "\treturn closeEnded(ctx, tx)\n", to: "\treturn nil\n",
-		pkg: "./internal/store", test: "TestTheEndClosesAnOpenGapAndScreenShare", want: "gaps after the end"},
-	{name: "retention: any number of days", file: recSt, from: "\t\tok = ok || v.RecordingRetentionDays == c\n", to: "\t\tok = ok || v.RecordingRetentionDays == c || true\n",
-		pkg: "./internal/store", test: "TestRetentionIsThirtyByDefaultAndOnlyThirtyOr365", want: "0 days: constraint failed"},
-	{name: "migration 6: an ended meeting gets no purge time", file: st, from: "\tUPDATE meetings SET purge_recording_at = ended_at + 30 * 86400000 WHERE state = 'ended' AND ended_at IS NOT NULL;\n", to: "",
-		pkg: "./internal/store", test: "TestMigration6KeepsEveryRowAndStampsEndedMeetings", want: "after migration 6"},
 	{name: "no bucket: the recording's routes mounted", file: srv, from: "\tif cfg.S3 != nil {\n\t\ts.recordingRoutes()", to: "\tif true {\n\t\ts.recordingRoutes()",
 		pkg: "./internal/server", test: "TestNoBucketChangesNothing", want: "with no bucket the surface changed"},
 	{name: "no bucket: one S3 variable alone accepted", file: mainGo, from: "\tcase set < 4:\n\t\treturn nil, ErrS3Half", to: "\tcase false:\n\t\treturn nil, ErrS3Half",
@@ -1351,7 +1342,34 @@ var mutants = []mutant{
 		pkg: "./internal/server", test: "TestTheTimelineBundleNamesFramesWhileAScreenWasShared", want: "frames:"},
 	{name: "timeline: a screen share's end never recorded", file: machine, from: "\t\t\ts.onScreenShareEnded(ctx, *ev.Track)\n", to: "",
 		pkg: "./internal/server", test: "TestTheTimelineBundleNamesFramesWhileAScreenWasShared", want: "screen shares:"},
-
+	{name: "share door: an expired link opens", file: recSt, from: "(purge.Valid && purge.Int64 <= ms(now)) {\n\t\treturn Shared{}, ErrNotFound", to: "(false) {\n\t\treturn Shared{}, ErrNotFound",
+		pkg: "./internal/store", test: "TestAShareLinkOpensUntilThePurgeAndNotOnceRevokedOrReplaced", want: "open at the purge time"},
+	{name: "share door: a forever recording's link expires", file: recSt, from: "(purge.Valid && purge.Int64 <= ms(now)) {\n\t\treturn Shared{}, ErrNotFound", to: "(!purge.Valid || purge.Int64 <= ms(now)) {\n\t\treturn Shared{}, ErrNotFound",
+		pkg: "./internal/store", test: "TestAForeverRecordingsLinkOpensUntilRevoked", want: "five years on"},
+	{name: "retention: the owner's setting ignored at the end", file: recSt, from: "`UPDATE meetings SET purge_recording_at = ended_at + 86400000 * `+days+`", to: "`UPDATE meetings SET purge_recording_at = ended_at + 86400000 * 30 + 0 * `+days+`",
+		pkg: "./internal/store", test: "TestEveryEndStampsTheRecordingPurgeTime", want: "End: purge at"},
+	{name: "retention: forever stamped as a finite time", file: recSt, from: " AND purge_recording_at IS NULL AND coalesce(`+days+`, 0) > 0`, ms(now)", to: " AND purge_recording_at IS NULL AND coalesce(`+days+`, 0) >= 0`, ms(now)",
+		pkg: "./internal/store", test: "TestEveryEndStampsTheRecordingPurgeTime", want: "forever: purge at"},
+	{name: "retention: a meeting kept forever picks up a later setting", file: recSt, from: "WHERE state = 'ended' AND ended_at = ? AND purge_recording_at IS NULL", to: "WHERE state = 'ended' AND (ended_at = ? OR 1) AND purge_recording_at IS NULL",
+		pkg: "./internal/store", test: "TestEveryEndStampsTheRecordingPurgeTime", want: "a meeting kept forever was given"},
+	{name: "retention: an end path that does not close the recording", file: parts, from: "\treturn closeEnded(ctx, tx, now)\n", to: "\treturn nil\n",
+		pkg: "./internal/store", test: "TestTheEndClosesAnOpenGapAndScreenShare", want: "gaps after the end"},
+	{name: "retention: any number of days", file: recSt, from: "\t\tok = ok || v.RecordingRetentionDays == c\n", to: "\t\tok = ok || v.RecordingRetentionDays == c || true\n",
+		pkg: "./internal/store", test: "TestRetentionIsForeverByDefaultAnd30Or90Or365", want: "7 days: constraint failed"},
+	{name: "migration 6: the default retention is not forever", file: st, from: "DEFAULT 0 CHECK (retention_days_recording IN (0, 30, 90, 365)); -- 0: forever", to: "DEFAULT 30 CHECK (retention_days_recording IN (0, 30, 90, 365)); -- 0: forever",
+		pkg: "./internal/store", test: "TestMigration6KeepsEveryRowAndStampsEndedMeetings", want: "after migration 6"},
+	{name: "delete now: share links left unrevoked", file: recSt, from: "`UPDATE recording_shares SET revoked_at = ? WHERE meeting_id = ? AND revoked_at IS NULL`, ms(now), meetingID); err != nil {\n\t\treturn 0, err", to: "`SELECT ?, ?`, ms(now), meetingID); err != nil {\n\t\treturn 0, err",
+		pkg: "./internal/store", test: "TestDeleteNowRevokesEveryLinkAndMakesThePartsDue", want: "a share link left unrevoked after Delete now"},
+	{name: "delete now: the purge time not set (the media still plays)", file: recSt, from: "SET purge_recording_at = min(coalesce(purge_recording_at, ?), ?)", to: "SET purge_recording_at = coalesce(purge_recording_at, nullif(?, ?))",
+		pkg: "./internal/store", test: "TestDeleteNowRevokesEveryLinkAndMakesThePartsDue", want: "purge after Delete now"},
+	{name: "delete now: another owner's recording deletable", file: recSt, from: "FROM meetings m WHERE m.id = ? AND m.subject = ?`, meetingID, r.subject).Scan(&state, &parts)", to: "FROM meetings m WHERE m.id = ? AND ? != ''`, meetingID, r.subject).Scan(&state, &parts)",
+		pkg: "./internal/store", test: "TestDeleteNowRevokesEveryLinkAndMakesThePartsDue", want: "another owner deleted it"},
+	{name: "delete now: a live meeting's recording deleted", file: recSt, from: "\tif state != \"ended\" {\n\t\treturn 0, ErrRecordingLive", to: "\tif false {\n\t\treturn 0, ErrRecordingLive",
+		pkg: "./internal/store", test: "TestDeleteNowRevokesEveryLinkAndMakesThePartsDue", want: "a live meeting"},
+	{name: "delete now: the objects left in the store", file: recGo, from: "\tdeleted, left := s.purge(r.Context(), due)\n", to: "\tdeleted, left := 0, len(due)\n",
+		pkg: "./internal/server", test: "TestDeleteNowDeletesTheObjectsRowsAndLinks", want: "delete = 200"},
+	{name: "notice: recording named with no bucket", file: lobbyN, from: "\trecord = record && recordable\n", to: "\t_ = recordable\n",
+		pkg: "./internal/lobby", test: "TestTheNoticeMentionsRecordingOnlyWhenThePluginCanRecord", want: "no bucket:"},
 	// ---- 🔴 contacts, phase 1b, in a browser (go run ./scripts/mutate -e2e) ----
 	{name: "contacts ui: the consent sentence reworded", file: guestJS, from: "', who will see that you were in this meeting. Nothing else is shared.'", to: "', who may see that you were in this meeting. Nothing else is shared.'",
 		e2e: cardE2E, test: "End: the guest's card .*\\(mobile\\)", want: "Your name and email go to Ada L., who will see"},
@@ -1365,10 +1383,14 @@ var mutants = []mutant{
 	// ---- 🔴 the recording, phase 5, in a browser (go run ./scripts/mutate -e2e) ----
 	{name: "recording ui: a line click does not seek the video", file: appJS, from: "          li.classList.add('playing');\n          play(at.part, at.offset_ms);", to: "          li.classList.add('playing');",
 		e2e: recE2E, test: "archive plays the recording", want: "toBeCloseTo"},
-	{name: "recording ui: the archive shows no video", file: appJS, from: "      if (b.parts && b.parts.some(function (p) { return p.duration_ms > 0; })) media.load(m);\n", to: "",
+	{name: "recording ui: the archive shows no video", file: appJS, from: "      if (b.parts) media.load(m);\n", to: "",
 		e2e: recE2E, test: "archive plays the recording", want: "archive-media"},
 	{name: "recording ui: the badge hides a failure", file: callJS, from: "    b.textContent = text;\n", to: "    b.textContent = text.replace(' failed', '');\n",
 		e2e: recE2E, test: "390x844 the owner and a guest see the recording badge", want: "Recording failed"},
+	{name: "delete ui: Cancel deletes", file: appJS, from: "$('delete-no').addEventListener('click', function () { $('delete-confirm').hidden = true; $('delete-rec').focus(); });", to: "$('delete-no').addEventListener('click', function () { $('delete-yes').click(); });",
+		e2e: recE2E, test: "1280x800 Delete now asks first", want: "Expected: 200"},
+	{name: "notice ui: the Record switch shown with no bucket", file: appJS, from: "    $('sw-record-row').hidden = !s.notice.recordable;\n", to: "    $('sw-record-row').hidden = false;\n",
+		e2e: "lobby-mobile.spec.ts", test: "at 390×844 a guest knocks", want: "sw-record-row"},
 }
 
 func main() {

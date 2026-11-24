@@ -172,7 +172,7 @@ test('a guest: the consent notice sits above the preview, and nothing leaves the
   const notice = (await guest.locator('#notice').boundingBox())!;
   const preview = (await guest.locator('#pre-tile').boundingBox())!;
   expect(notice.y + notice.height, 'the notice ends above the preview').toBeLessThanOrEqual(preview.y);
-  await expect(guest.locator('#notice')).toContainText('recorded');
+  await expect(guest.locator('#notice')).toContainText('transcribed');
   // Knock and wait: the preview is local only; no room, no publish.
   await guest.locator('#name').fill('Grace');
   await guest.locator('#ask').click();

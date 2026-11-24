@@ -65,7 +65,10 @@ test('at 390×844 a guest knocks, the lobby row shows their name as text, and Ad
   await guest.goto(link);
   // The notice comes before the name field, and names what is on.
   const notice = guest.locator('#notice');
-  await expect(notice).toContainText('This meeting is recorded and transcribed.');
+  // The harness has no bucket: nothing is recorded, and the notice says only
+  // what does happen.
+  await expect(notice).toContainText('This meeting is transcribed.');
+  await expect(notice).not.toContainText('recorded');
   await expect(notice).toContainText('sent to an AI service (OpenRouter)');
   const noticeBox = (await notice.boundingBox())!;
   const nameBox = (await guest.locator('#name').boundingBox())!;
@@ -96,7 +99,14 @@ test('at 390×844 a guest knocks, the lobby row shows their name as text, and Ad
   await expect(row.locator('.admit')).toBeInViewport({ ratio: 1 });
   await expect(row.locator('.admit')).toHaveAccessibleName(`Admit ${typed}`);
   await expect(app.locator('#btn-leave')).toBeInViewport({ ratio: 1 });
-  await expect(app.locator('#badge')).toHaveText('Recording · Transcribing · AI');
+  await expect(app.locator('#badge')).toHaveText('Transcribing · AI');
+  // No Record switch without a bucket: in the open popover, AI is there
+  // (the control) and Record is not.
+  await app.locator('#consent-btn').click();
+  await expect(app.locator('#sw-ai')).toBeVisible();
+  await expect(app.locator('#sw-record-row')).toBeHidden();
+  await app.locator('#consent-btn').click();
+  await expect(app.locator('#consent-pop')).toBeHidden();
   const before = (await joins(browser)).filter((j) => j.Claims.sub?.startsWith('guest-'));
   expect(before).toHaveLength(0); // no guest token before the admit
 
@@ -114,7 +124,7 @@ test('at 390×844 a guest knocks, the lobby row shows their name as text, and Ad
   }
   // The guest's controls fit the phone screen, and so does the badge.
   await expect(guest.locator('#btn-leave')).toBeInViewport({ ratio: 1 });
-  await expect(guest.locator('#badge')).toHaveText('Recording · Transcribing · AI');
+  await expect(guest.locator('#badge')).toHaveText('Transcribing · AI');
   // The owner's row moved from waiting to in the call.
   await expect(app.locator('.lobby-row.admitted .who')).toHaveText(`${typed} (guest)`);
 

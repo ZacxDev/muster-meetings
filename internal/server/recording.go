@@ -435,6 +435,20 @@ func (s *Server) SweepRecordings(ctx context.Context) (deleted, left int) {
 		s.cfg.Log.Printf("retention: %v", err)
 		return 0, 0
 	}
+	deleted, left = s.purge(ctx, due)
+	if _, err := s.store.PurgeRecordingMeta(ctx, now); err != nil {
+		s.cfg.Log.Printf("retention: %v", err)
+	}
+	if deleted+left > 0 {
+		s.cfg.Log.Printf("retention: %d recording parts deleted, %d left for the next pass", deleted, left)
+	}
+	return deleted, left
+}
+
+// purge deletes each due part's object, then its row: the one step the
+// sweeper and Delete now share. A part whose object the store would not
+// delete keeps its row (left), and is due again on the next pass.
+func (s *Server) purge(ctx context.Context, due []store.Due) (deleted, left int) {
 	for _, d := range due {
 		if d.ObjectKey != "" {
 			if err := s.cfg.S3.Delete(ctx, d.ObjectKey); err != nil {
@@ -447,12 +461,6 @@ func (s *Server) SweepRecordings(ctx context.Context) (deleted, left int) {
 			continue
 		}
 		deleted++
-	}
-	if _, err := s.store.PurgeRecordingMeta(ctx, now); err != nil {
-		s.cfg.Log.Printf("retention: %v", err)
-	}
-	if deleted+left > 0 {
-		s.cfg.Log.Printf("retention: %d recording parts deleted, %d left for the next pass", deleted, left)
 	}
 	return deleted, left
 }
@@ -490,6 +498,7 @@ func (s *Server) recordingRoutes() {
 	s.mux.HandleFunc("GET /api/settings", s.owner(s.handleGetSettings))
 	s.mux.HandleFunc("PUT /api/settings", s.owner(s.handlePutSettings))
 	s.mux.HandleFunc("GET /api/meetings/{id}/recording", s.owner(s.handleRecording))
+	s.mux.HandleFunc("DELETE /api/meetings/{id}/recording", s.owner(s.handleDeleteRecording))
 	s.mux.HandleFunc("POST /api/meetings/{id}/recording-url", s.owner(s.handleRecordingURL))
 	s.mux.HandleFunc("POST /api/meetings/{id}/share", s.owner(s.handleShare))
 	s.mux.HandleFunc("DELETE /api/meetings/{id}/share", s.owner(s.handleUnshare))
@@ -517,13 +526,13 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request, repo 
 		return
 	}
 	if in.Days == nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": `send {"recording_retention_days": 30} or 365`})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": `send {"recording_retention_days": 30}, 90, 365, or 0 (forever)`})
 		return
 	}
 	err := repo.SetSettings(r.Context(), store.Settings{RecordingRetentionDays: *in.Days}, s.cfg.Now())
 	switch {
 	case errors.Is(err, store.ErrRetention):
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Recordings are kept 30 or 365 days."})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Recordings are kept 30, 90 or 365 days, or 0: forever."})
 		return
 	case errors.Is(err, store.ErrNoSession):
 		w.Header().Set("WWW-Authenticate", `Bearer realm="meetings"`)
@@ -536,20 +545,38 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request, repo 
 	writeJSON(w, http.StatusOK, map[string]any{"settings": store.Settings{RecordingRetentionDays: *in.Days}})
 }
 
-// recordingView is one meeting's recording as its owner sees it.
+// recordingView is one meeting's recording as its owner sees it. Deleting
+// says it was deleted (Delete now, or its purge time) and some part's object
+// is still waiting for the store to delete it.
 type recordingView struct {
-	Parts   []store.Recording `json:"parts"`
-	Gaps    []store.Gap       `json:"gaps"`
-	PurgeAt *time.Time        `json:"purge_at"`
-	Share   store.ShareState  `json:"share"`
+	Parts    []store.Recording `json:"parts"`
+	Gaps     []store.Gap       `json:"gaps"`
+	PurgeAt  *time.Time        `json:"purge_at"`
+	Share    store.ShareState  `json:"share"`
+	Deleting bool              `json:"deleting"`
+}
+
+// partsOf is one of the owner's meetings' parts and gaps as they may be
+// served: none once its purge time has passed (Delete now sets it to the
+// moment), whatever rows still wait for their objects to go; deleting says
+// some do. 🔴 Every owner route that serves the recording (its view, its
+// media URLs, its frames, the timeline) reads it here.
+func (s *Server) partsOf(ctx context.Context, repo *store.OwnerRepo, id string) (parts []store.Recording, gaps []store.Gap, purge *time.Time, deleting bool, err error) {
+	parts, gaps, err = repo.Recordings(ctx, id)
+	if err != nil {
+		return nil, nil, nil, false, err
+	}
+	if purge, err = repo.PurgeRecordingAt(ctx, id); err != nil {
+		return nil, nil, nil, false, err
+	}
+	if purge != nil && !s.cfg.Now().Before(*purge) {
+		return []store.Recording{}, []store.Gap{}, purge, len(parts) > 0, nil
+	}
+	return parts, gaps, purge, false, nil
 }
 
 func (s *Server) recordingOf(ctx context.Context, repo *store.OwnerRepo, id string) (recordingView, error) {
-	parts, gaps, err := repo.Recordings(ctx, id)
-	if err != nil {
-		return recordingView{}, err
-	}
-	purge, err := repo.PurgeRecordingAt(ctx, id)
+	parts, gaps, purge, deleting, err := s.partsOf(ctx, repo, id)
 	if err != nil {
 		return recordingView{}, err
 	}
@@ -557,7 +584,46 @@ func (s *Server) recordingOf(ctx context.Context, repo *store.OwnerRepo, id stri
 	if err != nil {
 		return recordingView{}, err
 	}
-	return recordingView{Parts: parts, Gaps: gaps, PurgeAt: purge, Share: share}, nil
+	return recordingView{Parts: parts, Gaps: gaps, PurgeAt: purge, Share: share, Deleting: deleting}, nil
+}
+
+// handleDeleteRecording is Delete now: DELETE /api/meetings/{id}/recording,
+// on an ended meeting of the owner's. 🔴 One transaction makes the
+// recording unservable at once (its purge time is now, every share link
+// revoked: store.DeleteRecording); then each part's object is deleted and
+// then its row (purge). The store down refuses no part of that: the parts
+// it would not delete stay queued and the answer says pending; the hourly
+// sweeper finishes them, and the archive shows "Deleting…" meanwhile.
+func (s *Server) handleDeleteRecording(w http.ResponseWriter, r *http.Request, repo *store.OwnerRepo) {
+	id := r.PathValue("id")
+	now := s.cfg.Now()
+	n, err := repo.DeleteRecording(r.Context(), id, now)
+	switch {
+	case errors.Is(err, store.ErrRecordingLive):
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "End the meeting before deleting its recording."})
+		return
+	case errors.Is(err, store.ErrNoRecording):
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "This meeting has no recording."})
+		return
+	case errors.Is(err, store.ErrNoSession):
+		w.Header().Set("WWW-Authenticate", `Bearer realm="meetings"`)
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "no live owner session: " + EnterAgain})
+		return
+	case err != nil:
+		s.meetingErr(w, err)
+		return
+	}
+	due, err := s.store.DueRecordingsOf(r.Context(), id, now)
+	if err != nil {
+		s.meetingErr(w, err)
+		return
+	}
+	deleted, left := s.purge(r.Context(), due)
+	if _, err := s.store.PurgeRecordingMeta(r.Context(), now); err != nil {
+		s.cfg.Log.Printf("recording: delete now: %v", err)
+	}
+	s.cfg.Log.Printf("recording: meeting %s: deleted now (%d parts; %d objects deleted, %d left for the sweeper)", id, n, deleted, left)
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": deleted, "pending": left})
 }
 
 func (s *Server) handleRecording(w http.ResponseWriter, r *http.Request, repo *store.OwnerRepo) {
@@ -590,7 +656,7 @@ func MediaPath(meetingID string, part int) string {
 // MediaURLLifetime, with the part's place in meeting time.
 func (s *Server) handleRecordingURL(w http.ResponseWriter, r *http.Request, repo *store.OwnerRepo) {
 	id := r.PathValue("id")
-	parts, _, err := repo.Recordings(r.Context(), id)
+	parts, _, _, _, err := s.partsOf(r.Context(), repo, id)
 	if err != nil {
 		s.meetingErr(w, err)
 		return
@@ -624,7 +690,7 @@ func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]any{"error": "this media link has expired: open the recording again"})
 		return
 	}
-	p, err := s.store.PlayablePart(r.Context(), id, atoi(partS))
+	p, err := s.store.PlayablePart(r.Context(), id, atoi(partS), s.cfg.Now())
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "no such recording"})
 		return
@@ -688,6 +754,8 @@ func (s *Server) handleShare(w http.ResponseWriter, r *http.Request, repo *store
 		s.meetingErr(w, err)
 		return
 	}
+	// expires_at null: the recording is kept forever, so the link opens
+	// until it is turned off or the recording deleted.
 	writeJSON(w, http.StatusCreated, map[string]any{"url": s.ShareURL(tok), "expires_at": exp})
 }
 
@@ -743,7 +811,11 @@ func (s *Server) handleSharePage(w http.ResponseWriter, r *http.Request) {
 		s.shareMissing(w)
 		return
 	}
-	p := sharePage{Title: sh.Title, When: sh.CreatedAt.Format("2 Jan 2006"), Until: sh.ExpiresAt.Format("2 Jan 2006"), Many: len(sh.Parts) > 1}
+	until := "until it is turned off or deleted"
+	if sh.ExpiresAt != nil {
+		until = "until " + sh.ExpiresAt.Format("2 Jan 2006")
+	}
+	p := sharePage{Title: sh.Title, When: sh.CreatedAt.Format("2 Jan 2006"), Until: until, Many: len(sh.Parts) > 1}
 	for i, part := range sh.Parts {
 		p.Parts = append(p.Parts, sharePart{Label: "Part " + strconv.Itoa(i+1), Src: "/r/" + r.PathValue("token") + "/" + strconv.Itoa(part.Part)})
 	}
@@ -810,7 +882,7 @@ func (s *Server) bundle(ctx context.Context, repo *store.OwnerRepo, id string) (
 	if err != nil {
 		return Bundle{}, err
 	}
-	parts, gaps, err := repo.Recordings(ctx, id)
+	parts, gaps, _, _, err := s.partsOf(ctx, repo, id)
 	if err != nil {
 		return Bundle{}, err
 	}
@@ -880,7 +952,7 @@ func (s *Server) handleFrame(w http.ResponseWriter, r *http.Request, repo *store
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "at is a meeting time in ms"})
 		return
 	}
-	parts, _, err := repo.Recordings(r.Context(), id)
+	parts, _, _, _, err := s.partsOf(r.Context(), repo, id)
 	if err != nil {
 		s.meetingErr(w, err)
 		return

@@ -95,7 +95,8 @@ func TestTheNoticeSaysTranscribedOnlyWithAnEngine(t *testing.T) {
 		} `json:"notice"`
 	}
 	for _, on := range []bool{true, false} {
-		e := newEnvOpts(t, nil, func(c *server.Config) {
+		// A plugin that records, so the notice's recording clause is there.
+		e, _ := recEnv(t, func(c *server.Config) {
 			if !on {
 				c.Engine = nil
 			}

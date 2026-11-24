@@ -23,3 +23,10 @@ var SchemaForTest = len(migrations)
 // MigrationsBeforeRecordingForTest are migrations 1–5: the schema before the
 // recording (migration 6).
 var MigrationsBeforeRecordingForTest = append([]string(nil), migrations[:5]...)
+
+// LiveSharesForTest counts the meeting's share links not revoked.
+func (s *Store) LiveSharesForTest(meetingID string) int {
+	var n int
+	s.db.QueryRow(`SELECT count(*) FROM recording_shares WHERE meeting_id = ? AND revoked_at IS NULL`, meetingID).Scan(&n)
+	return n
+}

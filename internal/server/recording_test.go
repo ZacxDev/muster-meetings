@@ -283,10 +283,20 @@ func TestEndMeetingStopsTheEgressItself(t *testing.T) {
 	}
 }
 
-// finishedRecording is a meeting of ada's that ended with one playable part.
-func finishedRecording(t *testing.T, e *env) call {
+// finishedRecording is a meeting of ada's, kept 30 days, that ended with one
+// playable part.
+func finishedRecording(t *testing.T, e *env) call { return finishedRecordingKept(t, e, 30) }
+
+// finishedRecordingKept is finishedRecording with ada's retention set to
+// days first (-1: left as it is).
+func finishedRecordingKept(t *testing.T, e *env, days int) call {
 	t.Helper()
 	c := e.meeting(ada)
+	if days >= 0 {
+		if resp, raw := e.do("PUT", "/api/settings", c.Sess, map[string]int{"recording_retention_days": days}); resp.StatusCode != 200 {
+			t.Fatalf("settings = %d %s", resp.StatusCode, raw)
+		}
+	}
 	e.started(c)
 	n := len(e.lk.Composites()) + 1
 	e.admitGuest(c, grace)
@@ -508,16 +518,16 @@ func TestRetentionSettingsAndThePurgeTimeTheEndGives(t *testing.T) {
 	e, _ := recEnv(t)
 	sess := e.enter(ada)
 	resp, raw := e.do("GET", "/api/settings", sess, nil)
-	if resp.StatusCode != 200 || !strings.Contains(string(raw), `"recording_retention_days":30`) {
-		t.Fatalf("settings = %d %s", resp.StatusCode, raw)
+	if resp.StatusCode != 200 || !strings.Contains(string(raw), `"recording_retention_days":0`) {
+		t.Fatalf("settings = %d %s: want the default, 0 (forever)", resp.StatusCode, raw)
 	}
-	if resp, _ := e.do("PUT", "/api/settings", sess, map[string]int{"recording_retention_days": 90}); resp.StatusCode != 400 {
-		t.Fatalf("90 days = %d, want 400", resp.StatusCode)
+	if resp, _ := e.do("PUT", "/api/settings", sess, map[string]int{"recording_retention_days": 7}); resp.StatusCode != 400 {
+		t.Fatalf("7 days = %d, want 400", resp.StatusCode)
 	}
 	if resp, raw := e.do("PUT", "/api/settings", sess, map[string]int{"recording_retention_days": 365}); resp.StatusCode != 200 {
 		t.Fatalf("365 days = %d %s", resp.StatusCode, raw)
 	}
-	c := finishedRecording(t, e)
+	c := finishedRecordingKept(t, e, -1)
 	resp, raw = e.do("GET", "/api/meetings/"+c.ID+"/recording", c.Sess, nil)
 	var v struct {
 		PurgeAt time.Time `json:"purge_at"`
@@ -653,3 +663,141 @@ func TestTheReconcileEndsAPartWhoseWebhookWasLost(t *testing.T) {
 		t.Fatalf("after the reconcile the part is %v", parts[0]["state"])
 	}
 }
+
+// A recording kept forever (the default): its link names no expiry, the page
+// says so, and it still opens ten years on.
+func TestAForeverRecordingsShareLinkHasNoExpiry(t *testing.T) {
+	e, _ := recEnv(t)
+	c := finishedRecordingKept(t, e, -1)
+	resp, raw := e.do("POST", "/api/meetings/"+c.ID+"/share", c.Sess, nil)
+	var v struct {
+		URL       string     `json:"url"`
+		ExpiresAt *time.Time `json:"expires_at"`
+	}
+	if resp.StatusCode != 201 || json.Unmarshal(raw, &v) != nil || v.ExpiresAt != nil {
+		t.Fatalf("share = %d %s: want no expiry", resp.StatusCode, raw)
+	}
+	e.clock.Add(10 * 365 * 24 * time.Hour)
+	path := strings.TrimPrefix(v.URL, publicURL)
+	resp, page := e.do("GET", path, "", nil)
+	if resp.StatusCode != 200 || !strings.Contains(string(page), "available until it is turned off or deleted") {
+		t.Fatalf("ten years on: %d %s", resp.StatusCode, page)
+	}
+}
+
+// 🔴 Delete now, the store up: every part's object and row go, every link
+// and the owner's media URL answer what a missing one does, and the owner's
+// views show nothing to play.
+func TestDeleteNowDeletesTheObjectsRowsAndLinks(t *testing.T) {
+	e, f := recEnv(t)
+	c := finishedRecording(t, e)
+	key := "meetings/" + c.Subject + "/" + c.ID + "/recording-1.mp4"
+	path := e.share(c)
+	resp, raw := e.do("POST", "/api/meetings/"+c.ID+"/recording-url", c.Sess, nil)
+	var u struct {
+		Parts []struct {
+			URL string `json:"url"`
+		} `json:"parts"`
+	}
+	if json.Unmarshal(raw, &u) != nil || len(u.Parts) != 1 {
+		t.Fatalf("recording-url = %d %s", resp.StatusCode, raw)
+	}
+	unknown := func(p string) answer { r, b := e.do("GET", p, "", nil); return answerOf(r, b) }
+	wantPage, wantMedia := unknown("/r/"+strings.Repeat("A", 43)), unknown("/r/"+strings.Repeat("A", 43)+"/1")
+
+	// Bea cannot delete it.
+	if resp, _ := e.do("DELETE", "/api/meetings/"+c.ID+"/recording", e.enter(bea), nil); resp.StatusCode != 404 || !f.Has(key) {
+		t.Fatalf("another owner's delete = %d, the object kept %v", resp.StatusCode, f.Has(key))
+	}
+	resp, raw = e.do("DELETE", "/api/meetings/"+c.ID+"/recording", c.Sess, nil)
+	if resp.StatusCode != 200 || !strings.Contains(string(raw), `"deleted":1`) || !strings.Contains(string(raw), `"pending":0`) {
+		t.Fatalf("delete = %d %s", resp.StatusCode, raw)
+	}
+	if f.Has(key) {
+		t.Fatal("the object is still stored after Delete now")
+	}
+	if parts, _, _ := e.store.ForSubject(c.Subject).Recordings(context.Background(), c.ID); len(parts) != 0 {
+		t.Fatalf("the rows are kept after Delete now: %v", parts)
+	}
+	for _, x := range []struct {
+		p    string
+		want answer
+	}{{path, wantPage}, {path + "/1", wantMedia}} {
+		if got := unknown(x.p); got.Status != x.want.Status || got.Body != x.want.Body || !sameHeaders(got.Headers, x.want.Headers) {
+			t.Errorf("the link %s after Delete now = %+v, want an unknown link's %+v", x.p, got, x.want)
+		}
+	}
+	if resp, body := e.do("GET", u.Parts[0].URL, "", nil); resp.StatusCode != 404 || string(body) != `{"error":"no such recording"}`+"\n" {
+		t.Errorf("the media URL after Delete now = %d %s, want a missing part's 404", resp.StatusCode, body)
+	}
+	if resp, raw := e.do("DELETE", "/api/meetings/"+c.ID+"/recording", c.Sess, nil); resp.StatusCode != 404 {
+		t.Errorf("a second delete = %d %s, want 404 (no recording)", resp.StatusCode, raw)
+	}
+}
+
+// 🔴 Delete now with the store down: nothing is served from that moment on,
+// the parts stay queued (pending), the owner sees "deleting", and the
+// sweeper finishes once the store is back.
+func TestDeleteNowWithTheStoreDownIsPendingAndFinishedByTheSweeper(t *testing.T) {
+	e, f := recEnv(t)
+	c := finishedRecording(t, e)
+	key := "meetings/" + c.Subject + "/" + c.ID + "/recording-1.mp4"
+	path := e.share(c)
+	f.SetDown(true)
+	resp, raw := e.do("DELETE", "/api/meetings/"+c.ID+"/recording", c.Sess, nil)
+	if resp.StatusCode != 200 || !strings.Contains(string(raw), `"deleted":0`) || !strings.Contains(string(raw), `"pending":1`) {
+		t.Fatalf("delete with the store down = %d %s", resp.StatusCode, raw)
+	}
+	f.SetDown(false)
+	if !f.Has(key) {
+		t.Fatal("the object went while the store was down")
+	}
+	if resp, _ := e.do("GET", path, "", nil); resp.StatusCode != 404 {
+		t.Fatalf("the link while pending = %d, want 404", resp.StatusCode)
+	}
+	resp, raw = e.do("GET", "/api/meetings/"+c.ID+"/recording", c.Sess, nil)
+	if !strings.Contains(string(raw), `"parts":[]`) || !strings.Contains(string(raw), `"deleting":true`) {
+		t.Fatalf("the owner's view while pending = %s", raw)
+	}
+	if d, l := e.server.SweepRecordings(context.Background()); d != 1 || l != 0 || f.Has(key) {
+		t.Fatalf("the sweeper: deleted %d, left %d, object kept %v", d, l, f.Has(key))
+	}
+	if _, raw := e.do("GET", "/api/meetings/"+c.ID+"/recording", c.Sess, nil); !strings.Contains(string(raw), `"deleting":false`) {
+		t.Fatalf("after the sweeper: %s", raw)
+	}
+}
+
+func TestDeleteNowRefusesALiveMeeting(t *testing.T) {
+	e, _ := recEnv(t)
+	c := e.meeting(ada)
+	e.started(c)
+	e.admitGuest(c, grace)
+	e.composite(1)
+	if resp, raw := e.do("DELETE", "/api/meetings/"+c.ID+"/recording", c.Sess, nil); resp.StatusCode != 409 {
+		t.Fatalf("delete during the meeting = %d %s, want 409", resp.StatusCode, raw)
+	}
+}
+
+// 🔴 With no bucket the plugin records nothing, so nothing it says mentions
+// recording: the guest page's notice, the owner's and the guest's badge, and
+// a stale knock's 409, whatever the Record switch holds. recordable false
+// tells the owner's page to hide the switch.
+func TestWithNoBucketNothingMentionsRecording(t *testing.T) {
+	e := newEnv(t)
+	c := e.meeting(ada)
+	_, page := e.do("GET", "/j/"+c.Code, "", nil)
+	if !strings.Contains(string(page), "This meeting is transcribed.") || strings.Contains(string(page), "recorded") {
+		t.Fatalf("the guest page's notice mentions recording:\n%s", page)
+	}
+	owner := e.open("GET", "/api/meetings/"+c.ID+"/events", c.Sess, nil)
+	ev := owner.want("meeting").Data
+	if !strings.Contains(ev, `"badge":"Transcribing · AI"`) || !strings.Contains(ev, `"recordable":false`) || strings.Contains(ev, "Recording") {
+		t.Fatalf("the owner's notice with no bucket: %s", ev)
+	}
+	resp, b := e.knockFrom(c.Code, grace, map[string]bool{"record": false, "ai": true, "transcribed": true}, "198.51.100.7")
+	if resp.StatusCode != 409 || strings.Contains(jsonOf(b), "recorded") || strings.Contains(jsonOf(b), "Recording") {
+		t.Fatalf("a stale knock = %d %v", resp.StatusCode, b)
+	}
+}
+
+func jsonOf(v any) string { b, _ := json.Marshal(v); return string(b) }

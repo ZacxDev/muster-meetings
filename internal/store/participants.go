@@ -392,7 +392,7 @@ func endParticipants(ctx context.Context, tx *sql.Tx, now time.Time) error {
 	if err != nil {
 		return err
 	}
-	return closeEnded(ctx, tx)
+	return closeEnded(ctx, tx, now)
 }
 
 // ---- the owner side: through OwnerRepo, so always the owner's own meeting ----

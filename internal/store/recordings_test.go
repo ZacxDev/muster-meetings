@@ -15,9 +15,8 @@ const day = 24 * time.Hour
 func i64(v int64) *int64 { return &v }
 
 // Migration 6 (the recording) on a schema-5 database: every row is kept, the
-// owner's recording retention is 30 days, a meeting that had ended gets a
-// purge time 30 days after its end, an open one none, and the schema is this
-// build's. (One-way: TestReopenKeepsDataAndRefusesANewerSchema pins that an
+// owner's recording retention is forever (0), no meeting gets a purge time
+// (ended or open: kept until deleted), and the schema is this build's. (One-way: TestReopenKeepsDataAndRefusesANewerSchema pins that an
 // older build refuses it.)
 func TestMigration6KeepsEveryRowAndStampsEndedMeetings(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "m5.db")
@@ -57,14 +56,14 @@ func TestMigration6KeepsEveryRowAndStampsEndedMeetings(t *testing.T) {
 	var purgeOld, purgeOpen sql.NullInt64
 	db.QueryRow(`SELECT title, purge_recording_at FROM meetings WHERE id = 'bWlncmF0aW9uNm1l'`).Scan(&title, &purgeOld)
 	db.QueryRow(`SELECT purge_recording_at FROM meetings WHERE id = 'b3Blbm1lZXRpbmc2'`).Scan(&purgeOpen)
-	// 7000 + 30 × 86 400 000 = 2 592 007 000.
-	if v != 6 || days != 30 || title != "old" || !purgeOld.Valid || purgeOld.Int64 != 2_592_007_000 || purgeOpen.Valid {
+	if v != 6 || days != 0 || title != "old" || purgeOld.Valid || purgeOpen.Valid {
 		t.Fatalf("after migration 6: schema %d, retention %d, title %q, purge(ended) %v, purge(open) %v", v, days, title, purgeOld, purgeOpen)
 	}
 }
 
 // Every end stamps the purge time from the owner's retention at the end:
-// End meeting (with 365 days set) and the 24 h cap (with the default 30).
+// End meeting (with 365 days set) and the 24 h cap (with 90); with the
+// default, forever, it stays NULL.
 func TestEveryEndStampsTheRecordingPurgeTime(t *testing.T) {
 	s, _ := open(t)
 	r := owner(t, s, subA, t0)
@@ -82,14 +81,41 @@ func TestEveryEndStampsTheRecordingPurgeTime(t *testing.T) {
 	}
 
 	b := owner(t, s, subB, t0)
+	if err := b.SetSettings(ctx, store.Settings{RecordingRetentionDays: 90}, t0); err != nil {
+		t.Fatal(err)
+	}
 	cb := mk(t, s, subB, t0)
 	sweepAt := t0.Add(store.LinkLifetime + time.Minute)
 	if n, err := s.Sweep(ctx, sweepAt); err != nil || n != 1 {
 		t.Fatalf("sweep ended %d (%v)", n, err)
 	}
 	got, err = b.PurgeRecordingAt(ctx, cb.Meeting.ID)
-	if err != nil || got == nil || !got.Equal(sweepAt.Add(30*day)) {
-		t.Fatalf("24 h cap: purge at %v (%v), want %v", got, err, sweepAt.Add(30*day))
+	if err != nil || got == nil || !got.Equal(sweepAt.Add(90*day)) {
+		t.Fatalf("24 h cap: purge at %v (%v), want %v", got, err, sweepAt.Add(90*day))
+	}
+	// The default: forever, no purge time.
+	f := owner(t, s, "Ff0Gg1Hh2Ii3Jj4Kk5Ll6m", t0)
+	cf := mk(t, s, "Ff0Gg1Hh2Ii3Jj4Kk5Ll6m", t0)
+	if _, err := f.End(ctx, cf.Meeting.ID, endAt); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := f.PurgeRecordingAt(ctx, cf.Meeting.ID); err != nil || got != nil {
+		t.Fatalf("forever: purge at %v (%v), want none", got, err)
+	}
+	// 🔴 A later finite setting does not reach a meeting kept forever when
+	// some other meeting ends.
+	if err := f.SetSettings(ctx, store.Settings{RecordingRetentionDays: 30}, t0); err != nil {
+		t.Fatal(err)
+	}
+	cf2 := mk(t, s, "Ff0Gg1Hh2Ii3Jj4Kk5Ll6m", t0)
+	if _, err := f.End(ctx, cf2.Meeting.ID, endAt.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := f.PurgeRecordingAt(ctx, cf.Meeting.ID); got != nil {
+		t.Fatalf("a meeting kept forever was given %v by a later end", got)
+	}
+	if got, _ := f.PurgeRecordingAt(ctx, cf2.Meeting.ID); got == nil || !got.Equal(endAt.Add(time.Hour).Add(30*day)) {
+		t.Fatalf("the next meeting under 30 days: purge at %v", got)
 	}
 	// A later change of the setting leaves an ended meeting's time alone.
 	if err := r.SetSettings(ctx, store.Settings{RecordingRetentionDays: 30}, t0); err != nil {
@@ -100,13 +126,18 @@ func TestEveryEndStampsTheRecordingPurgeTime(t *testing.T) {
 	}
 }
 
-func TestRetentionIsThirtyByDefaultAndOnlyThirtyOr365(t *testing.T) {
+func TestRetentionIsForeverByDefaultAnd30Or90Or365(t *testing.T) {
 	s, _ := open(t)
 	r := owner(t, s, subA, t0)
-	if v, err := r.Settings(ctx); err != nil || v.RecordingRetentionDays != 30 {
-		t.Fatalf("default = %+v %v", v, err)
+	if v, err := r.Settings(ctx); err != nil || v.RecordingRetentionDays != 0 {
+		t.Fatalf("default = %+v %v, want 0 (forever)", v, err)
 	}
-	for _, d := range []int{0, 7, 90, 366, -1} {
+	for _, d := range []int{30, 90, 365, 0} {
+		if err := r.SetSettings(ctx, store.Settings{RecordingRetentionDays: d}, t0); err != nil {
+			t.Errorf("%d days refused: %v", d, err)
+		}
+	}
+	for _, d := range []int{7, 1, 366, -1} {
 		if err := r.SetSettings(ctx, store.Settings{RecordingRetentionDays: d}, t0); !errors.Is(err, store.ErrRetention) {
 			t.Errorf("%d days: %v", d, err)
 		}
@@ -239,10 +270,14 @@ func TestRecordingsAreTheOwnersAlone(t *testing.T) {
 	}
 }
 
-// finished is a meeting of subA that ended at endAt with one playable part.
+// finished is a meeting of subA, kept 30 days, that ended at endAt with one
+// playable part.
 func finished(t *testing.T, s *store.Store, endAt time.Time) (*store.OwnerRepo, string) {
 	t.Helper()
 	r := owner(t, s, subA, t0)
+	if err := r.SetSettings(ctx, store.Settings{RecordingRetentionDays: 30}, t0); err != nil {
+		t.Fatal(err)
+	}
 	c := mk(t, s, subA, t0)
 	p, err := s.BeginRecording(ctx, c.Meeting.ID, 0, t0)
 	if err != nil {
@@ -261,7 +296,7 @@ func TestAShareLinkOpensUntilThePurgeAndNotOnceRevokedOrReplaced(t *testing.T) {
 	endAt := t0.Add(time.Hour)
 	r, id := finished(t, s, endAt)
 	tok, exp, err := r.Share(ctx, id, endAt)
-	if err != nil || !exp.Equal(endAt.Add(30*day)) || !store.ValidShareToken(tok) {
+	if err != nil || exp == nil || !exp.Equal(endAt.Add(30*day)) || !store.ValidShareToken(tok) {
 		t.Fatalf("share = %q %v %v", tok, exp, err)
 	}
 	sh, err := s.ShareByToken(ctx, tok, endAt.Add(29*day))
@@ -341,4 +376,74 @@ func containsBytes(b []byte, s string) bool {
 		}
 	}
 	return false
+}
+
+// A recording kept forever: its share link has no expiry and opens years
+// later, until it is revoked.
+func TestAForeverRecordingsLinkOpensUntilRevoked(t *testing.T) {
+	s, _ := open(t)
+	r := owner(t, s, subA, t0)
+	c := mk(t, s, subA, t0)
+	p, _ := s.BeginRecording(ctx, c.Meeting.ID, 0, t0)
+	s.RecordingBegan(ctx, p.ID, 1_000)
+	s.EndRecording(ctx, p.ID, store.RecordingEnd{State: store.RecComplete, DurationMS: i64(5_000), Bytes: i64(100)}, t0)
+	r.End(ctx, c.Meeting.ID, t0)
+	tok, exp, err := r.Share(ctx, c.Meeting.ID, t0)
+	if err != nil || exp != nil {
+		t.Fatalf("share = %v %v, want no expiry", exp, err)
+	}
+	if _, err := s.ShareByToken(ctx, tok, t0.Add(5*365*day)); err != nil {
+		t.Fatalf("five years on: %v", err)
+	}
+	if d, _ := s.DueRecordings(ctx, t0.Add(5*365*day), 10); len(d) != 0 {
+		t.Fatalf("a forever recording is due: %v", d)
+	}
+	r.RevokeShare(ctx, c.Meeting.ID, t0)
+	if _, err := s.ShareByToken(ctx, tok, t0); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("revoked: %v", err)
+	}
+}
+
+// 🔴 Delete now: one transaction makes the purge time now and revokes every
+// share link; the parts are then due; a live meeting is refused, and another
+// owner gets the same not found as no meeting.
+func TestDeleteNowRevokesEveryLinkAndMakesThePartsDue(t *testing.T) {
+	s, _ := open(t)
+	endAt := t0.Add(time.Hour)
+	r, id := finished(t, s, endAt)
+	tok, _, _ := r.Share(ctx, id, endAt)
+	if s.LiveSharesForTest(id) != 1 {
+		t.Fatal("no live link to start with")
+	}
+	b := owner(t, s, subB, t0)
+	if _, err := b.DeleteRecording(ctx, id, endAt); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("another owner deleted it: %v", err)
+	}
+	if s.LiveSharesForTest(id) != 1 {
+		t.Fatal("another owner's delete revoked the link")
+	}
+	at := endAt.Add(time.Minute)
+	if n, err := r.DeleteRecording(ctx, id, at); err != nil || n != 1 {
+		t.Fatalf("delete = %d %v", n, err)
+	}
+	if n := s.LiveSharesForTest(id); n != 0 {
+		t.Fatalf("a share link left unrevoked after Delete now (%d)", n)
+	}
+	if got, _ := r.PurgeRecordingAt(ctx, id); got == nil || !got.Equal(at) {
+		t.Fatalf("purge after Delete now = %v, want %v", got, at)
+	}
+	if d, _ := s.DueRecordingsOf(ctx, id, at); len(d) != 1 {
+		t.Fatalf("due after Delete now: %v", d)
+	}
+	if _, err := s.ShareByToken(ctx, tok, at); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("the link after Delete now: %v", err)
+	}
+	if _, err := s.PlayablePart(ctx, id, 1, at); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("the part after Delete now: %v", err)
+	}
+	live := mk(t, s, subA, t0)
+	s.BeginRecording(ctx, live.Meeting.ID, 0, t0)
+	if _, err := r.DeleteRecording(ctx, live.Meeting.ID, at); !errors.Is(err, store.ErrRecordingLive) {
+		t.Fatalf("a live meeting: %v", err)
+	}
 }

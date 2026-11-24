@@ -36,15 +36,20 @@ const (
 	GapFailed   = "failed"   // an egress died, and its successor has not begun
 )
 
-// RetentionChoices are the recording retention settings (days); the first is
-// the default (decision 9; the operator's decision 5: 30 days).
-var RetentionChoices = []int{30, 365}
+// RetentionChoices are the recording retention settings, in days; 0 is
+// forever (the operator's answer to round 0: 30, 90, 365 days or forever,
+// default forever).
+var RetentionChoices = []int{30, 90, 365, RetainForever}
 
-// DefaultRetentionDays is a new owner's recording retention.
-const DefaultRetentionDays = 30
+// RetainForever is the retention that keeps a recording until its owner
+// deletes it; DefaultRetentionDays is a new owner's.
+const (
+	RetainForever        = 0
+	DefaultRetentionDays = RetainForever
+)
 
 // ErrRetention is a retention setting that is not one of RetentionChoices.
-var ErrRetention = errors.New("the recording retention is 30 or 365 days")
+var ErrRetention = errors.New("the recording retention is 30, 90 or 365 days, or 0 (forever)")
 
 // Recording is one part's row.
 type Recording struct {
@@ -445,7 +450,8 @@ func (s *Store) recordingGaps(ctx context.Context, meetingID string) ([]Gap, err
 	return out, rows.Err()
 }
 
-// Purge is when a meeting's recording is deleted: nil while it runs.
+// PurgeRecordingAt is when a meeting's recording is deleted: nil while it
+// runs, and for one kept forever.
 func (r *OwnerRepo) PurgeRecordingAt(ctx context.Context, meetingID string) (*time.Time, error) {
 	var v sql.NullInt64
 	err := r.s.db.QueryRowContext(ctx, `SELECT purge_recording_at FROM meetings WHERE id = ? AND subject = ?`, meetingID, r.subject).Scan(&v)
@@ -458,7 +464,7 @@ func (r *OwnerRepo) PurgeRecordingAt(ctx context.Context, meetingID string) (*ti
 // Settings are the owner's settings.
 type Settings struct {
 	// RecordingRetentionDays is how long a recording is kept after its
-	// meeting ends: one of RetentionChoices.
+	// meeting ends: one of RetentionChoices (0: forever).
 	RecordingRetentionDays int `json:"recording_retention_days"`
 }
 
@@ -498,13 +504,17 @@ func (r *OwnerRepo) SetSettings(ctx context.Context, v Settings, now time.Time) 
 }
 
 // closeEnded is the rest of every meeting's end, in the transaction that
-// ended it (endParticipants calls it): each meeting that has just ended is
-// given its recording purge time (its owner's retention from its end), and
-// its open recording gap and open screen shares close where it ended.
-func closeEnded(ctx context.Context, tx *sql.Tx) error {
-	if _, err := tx.ExecContext(ctx, `UPDATE meetings SET purge_recording_at = ended_at + 86400000 * coalesce(
-			(SELECT o.retention_days_recording FROM owners o WHERE o.subject = meetings.subject), `+strconv.Itoa(DefaultRetentionDays)+`)
-		WHERE state = 'ended' AND ended_at IS NOT NULL AND purge_recording_at IS NULL`); err != nil {
+// ended it (endParticipants calls it, with the end's now): each meeting that
+// has just ended (its ended_at is now) is given its recording purge time,
+// its owner's retention from its end, unless that retention is forever (the
+// purge time stays NULL: only Delete now removes it); and its open recording
+// gap and open screen shares close where it ended. 🔴 Only the meetings this
+// end ended: a meeting kept forever that ended earlier must never pick up a
+// finite time from a setting changed since.
+func closeEnded(ctx context.Context, tx *sql.Tx, now time.Time) error {
+	const days = `(SELECT o.retention_days_recording FROM owners o WHERE o.subject = meetings.subject)`
+	if _, err := tx.ExecContext(ctx, `UPDATE meetings SET purge_recording_at = ended_at + 86400000 * `+days+`
+		WHERE state = 'ended' AND ended_at = ? AND purge_recording_at IS NULL AND coalesce(`+days+`, 0) > 0`, ms(now)); err != nil {
 		return err
 	}
 	const endMS = `(SELECT m.ended_at - coalesce(m.started_at, m.created_at) FROM meetings m WHERE m.id = %s.meeting_id)`
@@ -533,18 +543,19 @@ var ErrNotShareable = errors.New("the meeting has no finished recording to share
 
 // Share mints the share link of one of the owner's meetings: a new random
 // token, stored only as its SHA-256, valid until the meeting's recording is
-// purged. 🔴 Any earlier link of the meeting is revoked in the same
+// purged (its expiry; nil for a recording kept forever: until it is revoked
+// or the recording deleted). 🔴 Any earlier link of the meeting is revoked in the same
 // transaction: one live link per meeting, and the token is shown once.
-func (r *OwnerRepo) Share(ctx context.Context, meetingID string, now time.Time) (string, time.Time, error) {
+func (r *OwnerRepo) Share(ctx context.Context, meetingID string, now time.Time) (string, *time.Time, error) {
 	if r.session == "" {
-		return "", time.Time{}, ErrNoSession
+		return "", nil, ErrNoSession
 	}
 	if _, err := r.Meeting(ctx, meetingID); err != nil {
-		return "", time.Time{}, err
+		return "", nil, err
 	}
 	tx, err := r.s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return "", time.Time{}, err
+		return "", nil, err
 	}
 	defer tx.Rollback()
 	var purge sql.NullInt64
@@ -552,23 +563,23 @@ func (r *OwnerRepo) Share(ctx context.Context, meetingID string, now time.Time) 
 	err = tx.QueryRowContext(ctx, `SELECT m.purge_recording_at, (SELECT count(*) FROM recordings p WHERE p.meeting_id = m.id AND p.start_ms IS NOT NULL
 			AND p.duration_ms > 0 AND p.bytes > 0 AND p.object_key != '')
 		FROM meetings m WHERE m.id = ? AND m.subject = ? AND m.state = 'ended'`, meetingID, r.subject).Scan(&purge, &playable)
-	if errors.Is(err, sql.ErrNoRows) || (err == nil && (!purge.Valid || playable == 0 || purge.Int64 <= ms(now))) {
-		return "", time.Time{}, ErrNotShareable
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && (playable == 0 || (purge.Valid && purge.Int64 <= ms(now)))) {
+		return "", nil, ErrNotShareable
 	}
 	if err != nil {
-		return "", time.Time{}, err
+		return "", nil, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE recording_shares SET revoked_at = ? WHERE meeting_id = ? AND revoked_at IS NULL`, ms(now), meetingID); err != nil {
-		return "", time.Time{}, err
+		return "", nil, err
 	}
 	tok := random(ShareTokenBytes)
 	if _, err := tx.ExecContext(ctx, `INSERT INTO recording_shares (token_sha256, meeting_id, created_at) VALUES (?, ?, ?)`, Hash(tok), meetingID, ms(now)); err != nil {
-		return "", time.Time{}, err
+		return "", nil, err
 	}
 	if err := audit(ctx, tx, now, r.subject, meetingID, "recording.shared", ""); err != nil {
-		return "", time.Time{}, err
+		return "", nil, err
 	}
-	return tok, time.UnixMilli(purge.Int64).UTC(), tx.Commit()
+	return tok, fromMS(purge), tx.Commit()
 }
 
 // RevokeShare revokes the meeting's live share link. It answers whether there
@@ -609,7 +620,7 @@ func (r *OwnerRepo) ShareOf(ctx context.Context, meetingID string, now time.Time
 	if err != nil {
 		return ShareState{}, err
 	}
-	if n == 0 || !purge.Valid || purge.Int64 <= ms(now) {
+	if n == 0 || (purge.Valid && purge.Int64 <= ms(now)) {
 		return ShareState{}, nil
 	}
 	return ShareState{Live: true, ExpiresAt: fromMS(purge)}, nil
@@ -620,7 +631,7 @@ type Shared struct {
 	MeetingID string
 	Title     string
 	CreatedAt time.Time
-	ExpiresAt time.Time
+	ExpiresAt *time.Time // nil: kept forever
 	Parts     []Recording
 	Gaps      []Gap
 }
@@ -648,7 +659,7 @@ func (s *Store) ShareByToken(ctx context.Context, token string, now time.Time) (
 	if err != nil {
 		return Shared{}, err
 	}
-	if subtle.ConstantTimeCompare([]byte(stored), []byte(h)) != 1 || revoked.Valid || !purge.Valid || purge.Int64 <= ms(now) {
+	if subtle.ConstantTimeCompare([]byte(stored), []byte(h)) != 1 || revoked.Valid || (purge.Valid && purge.Int64 <= ms(now)) {
 		return Shared{}, ErrNotFound
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT `+recCols+` FROM recordings r WHERE r.meeting_id = ? ORDER BY r.part`, out.MeetingID)
@@ -671,7 +682,7 @@ func (s *Store) ShareByToken(ctx context.Context, token string, now time.Time) (
 		return Shared{}, err
 	}
 	out.CreatedAt = time.UnixMilli(created).UTC()
-	out.ExpiresAt = time.UnixMilli(purge.Int64).UTC()
+	out.ExpiresAt = fromMS(purge)
 	return out, nil
 }
 
@@ -800,10 +811,12 @@ func (s *Store) MediaKey() []byte {
 	return m.Sum(nil)
 }
 
-// ByIDForMedia is a meeting's part by number, for a signed media URL (the
-// signature has already bound the meeting): ErrNotFound unless playable.
-func (s *Store) PlayablePart(ctx context.Context, meetingID string, part int) (Recording, error) {
-	r, err := scanRecording(s.db.QueryRowContext(ctx, `SELECT `+recCols+` FROM recordings r WHERE r.meeting_id = ? AND r.part = ?`, meetingID, part))
+// PlayablePart is a meeting's part by number, for a signed media URL (the
+// signature has already bound the meeting): ErrNotFound unless playable and
+// its meeting's purge time (or Delete now) has not passed.
+func (s *Store) PlayablePart(ctx context.Context, meetingID string, part int, now time.Time) (Recording, error) {
+	r, err := scanRecording(s.db.QueryRowContext(ctx, `SELECT `+recCols+` FROM recordings r JOIN meetings m ON m.id = r.meeting_id
+		WHERE r.meeting_id = ? AND r.part = ? AND (m.purge_recording_at IS NULL OR m.purge_recording_at > ?)`, meetingID, part, ms(now)))
 	if err != nil {
 		return Recording{}, err
 	}
@@ -831,6 +844,79 @@ func (s *Store) ToResume(ctx context.Context, now time.Time) ([]string, error) {
 			return nil, err
 		}
 		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// ---- Delete now (design: "Retention": "Delete now on a meeting removes its
+// rows and objects at once") ----
+
+// ErrRecordingLive is Delete now on a meeting that has not ended.
+var ErrRecordingLive = errors.New("the meeting has not ended")
+
+// ErrNoRecording is Delete now on a meeting with no recording left.
+var ErrNoRecording = errors.New("the meeting has no recording")
+
+// DeleteRecording is Delete now on one of the owner's ended meetings, in one
+// transaction: its purge time becomes now and every share link of it is
+// revoked. 🔴 From that commit on nothing of the recording is served (the
+// share page, its media and /media all check both), whatever then happens
+// to the objects: the caller deletes each part's object, then its row
+// (the sweeper's own step), and a part the store refuses stays queued as
+// due, for the next pass. It answers how many parts are queued.
+func (r *OwnerRepo) DeleteRecording(ctx context.Context, meetingID string, now time.Time) (int, error) {
+	if r.session == "" {
+		return 0, ErrNoSession
+	}
+	tx, err := r.s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	var state string
+	var parts int
+	err = tx.QueryRowContext(ctx, `SELECT m.state, (SELECT count(*) FROM recordings p WHERE p.meeting_id = m.id)
+		FROM meetings m WHERE m.id = ? AND m.subject = ?`, meetingID, r.subject).Scan(&state, &parts)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	if err != nil {
+		return 0, err
+	}
+	if state != "ended" {
+		return 0, ErrRecordingLive
+	}
+	if parts == 0 {
+		return 0, ErrNoRecording
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE meetings SET purge_recording_at = min(coalesce(purge_recording_at, ?), ?) WHERE id = ? AND subject = ?`,
+		ms(now), ms(now), meetingID, r.subject); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE recording_shares SET revoked_at = ? WHERE meeting_id = ? AND revoked_at IS NULL`, ms(now), meetingID); err != nil {
+		return 0, err
+	}
+	if err := audit(ctx, tx, now, r.subject, meetingID, "recording.deleted", fmt.Sprintf("%d parts", parts)); err != nil {
+		return 0, err
+	}
+	return parts, tx.Commit()
+}
+
+// DueRecordingsOf is DueRecordings for one meeting.
+func (s *Store) DueRecordingsOf(ctx context.Context, meetingID string, now time.Time) ([]Due, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT r.id, r.meeting_id, r.object_key FROM recordings r JOIN meetings m ON m.id = r.meeting_id
+		WHERE r.meeting_id = ? AND m.purge_recording_at IS NOT NULL AND m.purge_recording_at <= ? ORDER BY r.id`, meetingID, ms(now))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Due
+	for rows.Next() {
+		var d Due
+		if err := rows.Scan(&d.ID, &d.MeetingID, &d.ObjectKey); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
 	}
 	return out, rows.Err()
 }

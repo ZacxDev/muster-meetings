@@ -217,9 +217,10 @@ var migrations = []string{
 	CREATE INDEX contacts_outbox_due ON contacts_outbox (next_at, id);`,
 
 	// 6: phase 5, the recording (design: "Media: LiveKit, TURN, Egress",
-	// "Retention"; recordings.go). The owner's recording retention (30 or 365
-	// days, 30 by default) and each meeting's purge time, stamped when it
-	// ends. recordings is one row per room composite egress: a PART of the
+	// "Retention"; recordings.go). The owner's recording retention (30, 90 or
+	// 365 days, or 0: forever, the default) and each meeting's purge time,
+	// stamped when it ends with a finite retention (NULL: kept forever), or set
+	// to the moment of Delete now. recordings is one row per room composite egress: a PART of the
 	// meeting's recording, its object, and its file's start in MEETING TIME
 	// as the egress reported it (start_ms; NULL until the egress says when
 	// its file began). recording_gaps are the stretches of a meeting that
@@ -234,9 +235,8 @@ var migrations = []string{
 	// schema 6 ("newer than this build"); roll back by unsetting the S3
 	// variables (README: "Recording (optional)"), never by running an older
 	// image on this database.
-	`ALTER TABLE owners ADD COLUMN retention_days_recording INTEGER NOT NULL DEFAULT 30 CHECK (retention_days_recording IN (30, 365));
-	ALTER TABLE meetings ADD COLUMN purge_recording_at INTEGER;
-	UPDATE meetings SET purge_recording_at = ended_at + 30 * 86400000 WHERE state = 'ended' AND ended_at IS NOT NULL;
+	`ALTER TABLE owners ADD COLUMN retention_days_recording INTEGER NOT NULL DEFAULT 0 CHECK (retention_days_recording IN (0, 30, 90, 365)); -- 0: forever
+	ALTER TABLE meetings ADD COLUMN purge_recording_at INTEGER; -- NULL: kept forever (or not ended)
 	CREATE INDEX meetings_purge_recording ON meetings (purge_recording_at) WHERE purge_recording_at IS NOT NULL;
 	CREATE TABLE recordings (
 		id           INTEGER PRIMARY KEY,

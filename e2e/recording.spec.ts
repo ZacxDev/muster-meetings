@@ -62,6 +62,10 @@ for (const size of sizes) {
       await expect(b).toHaveText(on, { timeout: 15_000 });
       await expect(b).toBeInViewport({ ratio: 1 });
     }
+    // A plugin that records shows the owner its Record switch.
+    await app.locator('#consent-btn').click();
+    await expect(app.locator('#sw-record-row')).toBeVisible();
+    await app.locator('#consent-btn').click();
     // The egress dies and its restarts are refused: everyone is told.
     const room = await roomOf(browser);
     await get(browser, '/composite-refuse?n=1000');
@@ -83,11 +87,11 @@ test.describe('the archive and the share link', () => {
 
   // recordedMeeting holds a meeting with a guest, the guest's two lines said
   // while it was recorded, then ends it and opens its archive.
-  async function recordedMeeting(browser: Browser, owner: Page): Promise<FrameLocator> {
+  async function recordedMeeting(browser: Browser, owner: Page, viewport = { width: 1280, height: 800 }): Promise<FrameLocator> {
     await useFakeLiveKit(owner.context());
     const app = await ownerInCall(owner, h);
     const link = await app.locator('#join-url').inputValue();
-    const guest = await guestIn(browser, app, link, { width: 1280, height: 800 });
+    const guest = await guestIn(browser, app, link, viewport);
     await expect(app.locator('#badge')).toHaveText(on, { timeout: 15_000 });
     const room = await roomOf(browser);
     // The recording's file has begun (the fake composite reports it at once).
@@ -179,4 +183,42 @@ test.describe('the archive and the share link', () => {
     await ctx.close();
     await owner.close();
   });
+
+  for (const size of sizes) {
+    test(`at ${size.width}x${size.height} Delete now asks first, then the video and its share link are gone`, async ({ browser }) => {
+      const viewport = { width: size.width, height: size.height };
+      const owner = await browser.newPage({ viewport });
+      const app = await recordedMeeting(browser, owner, viewport);
+      await expect(app.locator('#archive-media')).toBeVisible({ timeout: 15_000 });
+      await app.locator('#share-rec').click();
+      await expect(app.locator('#share-url')).toHaveValue(/\/r\/[A-Za-z0-9_-]{43}$/);
+      const url = await app.locator('#share-url').inputValue();
+      // The confirmation: Cancel deletes nothing.
+      await app.locator('#delete-rec').click();
+      const confirm = app.locator('#delete-confirm');
+      await expect(confirm).toBeVisible();
+      await expect(confirm).toHaveAttribute('role', 'alertdialog');
+      await expect(confirm.locator('#delete-yes')).toBeInViewport({ ratio: 1 });
+      await expect(confirm).toContainText('every share link to it stops working');
+      await confirm.locator('#delete-no').click();
+      await expect(confirm).toBeHidden();
+      const ctx = await browser.newContext();
+      const viewer = await ctx.newPage();
+      expect((await viewer.goto(url))!.status()).toBe(200);
+      // Delete: the video leaves the archive, and the link opens nothing.
+      await app.locator('#delete-rec').click();
+      await app.locator('#delete-yes').click();
+      await expect(app.locator('#archive-media')).toBeHidden({ timeout: 15_000 });
+      await expect(app.locator('#archive-deleting')).toBeHidden();
+      expect((await viewer.goto(url))!.status()).toBe(404);
+      await expect(viewer.locator('#message')).toHaveText('This recording is not available. The link may have expired or been turned off.');
+      // Opening the archive again: the transcript, no video.
+      await app.locator('#archive-back').click();
+      await app.locator('.meeting').first().locator('.transcript-row').click();
+      await expect(app.locator('#archive-lines li.line')).toHaveCount(2);
+      await expect(app.locator('#archive-media')).toBeHidden();
+      await ctx.close();
+      await owner.close();
+    });
+  }
 });

@@ -8,6 +8,14 @@ package server_test
 // -update-norecording to write testdata/norecording.golden.json. An equality
 // to the base cannot be red at the base; the mutation rows "no bucket: …"
 // supply the failing case.
+//
+// Changed ON PURPOSE once since (round 0's answer: "the notice and the
+// Record switch mention recording only when the install can record"): five
+// answers, the two AI switch answers, the guest's meeting event, the owner's
+// notice and the Record-off answer, lost "This meeting is recorded and
+// transcribed." and the badge's "Recording" (now "This meeting is
+// transcribed." and "Transcribing · AI"), and gained "recordable":false.
+// Every other answer, the recording's routes' 404s included, is the base's.
 
 import (
 	"encoding/json"

@@ -183,7 +183,7 @@
         l.appendChild(li);
       });
       $('archive-empty').hidden = b.segments.length > 0;
-      if (b.parts && b.parts.some(function (p) { return p.duration_ms > 0; })) media.load(m);
+      if (b.parts) media.load(m);
     }).catch(function (e) { if (token && archived === m) archiveSay('Could not load the transcript: ' + e.message); });
     $('archive-back').focus();
   }
@@ -241,6 +241,8 @@
         try { video.load(); } catch (e) { /* not fatal */ }
         box.hidden = true;
         $('share-out').hidden = true;
+        $('delete-confirm').hidden = true;
+        $('archive-deleting').hidden = true;
       },
       load: function (m) {
         meetingID = m.id;
@@ -251,6 +253,12 @@
           return api('GET', '/api/meetings/' + encodeURIComponent(m.id) + '/recording').then(function (r) {
             if (archived !== m) return;
             $('unshare-rec').hidden = !(r.share && r.share.live);
+          });
+        }).then(function () {
+          if (archived !== m || !box.hidden) return;
+          // No part to play: one deleted, and still leaving the store?
+          return api('GET', '/api/meetings/' + encodeURIComponent(m.id) + '/recording').then(function (r) {
+            if (archived === m) $('archive-deleting').hidden = !r.deleting;
           });
         }).catch(function (e) { if (token && archived === m) archiveSay('Could not load the recording: ' + e.message); });
       },
@@ -281,7 +289,9 @@
     api('POST', '/api/meetings/' + encodeURIComponent(m.id) + '/share').then(function (b) {
       if (archived !== m) return;
       $('share-url').value = b.url;
-      $('share-until').textContent = new Date(b.expires_at).toLocaleDateString(undefined, { dateStyle: 'medium' });
+      // expires_at null: the recording is kept forever.
+      $('share-until').textContent = b.expires_at ? 'until ' + new Date(b.expires_at).toLocaleDateString(undefined, { dateStyle: 'medium' })
+        : 'until you turn the link off or delete the recording';
       $('share-out').hidden = false;
       $('unshare-rec').hidden = false;
       $('share-url').select();
@@ -299,14 +309,39 @@
     }).catch(function (e) { if (token) archiveSay('Could not turn the link off: ' + e.message); });
   });
 
-  // The recording retention (only a plugin that records answers it).
+  // Delete now: the confirmation first; then every part and every share link
+  // go at once. A store that is down finishes later: the archive says so.
+  $('delete-rec').addEventListener('click', function () {
+    $('delete-confirm').hidden = false;
+    $('delete-no').focus();
+  });
+  $('delete-no').addEventListener('click', function () { $('delete-confirm').hidden = true; $('delete-rec').focus(); });
+  $('delete-yes').addEventListener('click', function () {
+    if (!archived) return;
+    var m = archived, b = this;
+    b.disabled = true;
+    api('DELETE', '/api/meetings/' + encodeURIComponent(m.id) + '/recording').then(function (r) {
+      if (archived !== m) return;
+      media.reset();
+      $('archive-deleting').hidden = !(r.pending > 0);
+      UI.toast('The recording was deleted.', { kind: 'success', timeout: 3000 });
+    }).catch(function (e) { if (token) archiveSay('Could not delete the recording: ' + e.message); })
+      .then(function () { b.disabled = false; });
+  });
+
+  // The recording retention (only a plugin that records answers it). 0 is
+  // forever.
+  function retentionAfter(v) { $('retention-after').textContent = v === '0' ? 'until you delete them.' : 'after a meeting ends.'; }
   api('GET', '/api/settings').then(function (b) {
     var sel = $('retention-days');
     sel.value = String(b.settings.recording_retention_days);
+    retentionAfter(sel.value);
     $('retention').hidden = false;
     sel.addEventListener('change', function () {
+      retentionAfter(sel.value);
       api('PUT', '/api/settings', { recording_retention_days: parseInt(sel.value, 10) }).then(function () {
-        UI.toast('Recordings of meetings that end from now on are kept ' + sel.value + ' days.', { kind: 'success', timeout: 3000 });
+        UI.toast(sel.value === '0' ? 'Recordings of meetings that end from now on are kept until you delete them.'
+          : 'Recordings of meetings that end from now on are kept ' + sel.value + ' days.', { kind: 'success', timeout: 3000 });
       }).catch(function (e) { if (token) say('Could not change how long recordings are kept: ' + e.message); });
     });
   }).catch(function () { /* no recording: the setting stays hidden */ });
@@ -411,6 +446,8 @@
       } } });
     });
     MeetingsCall.showBadge(s.notice, { owner: true });
+    // The Record switch only on a plugin that can record (it has a bucket).
+    $('sw-record-row').hidden = !s.notice.recordable;
     [['sw-record', s.notice.record], ['sw-ai', s.notice.ai]].forEach(function (x) {
       var box = $(x[0]);
       box.checked = x[1];

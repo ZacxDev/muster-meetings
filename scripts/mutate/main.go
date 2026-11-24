@@ -177,7 +177,7 @@ const (
 	scVar   = "internal/sttcorpus/variant.go"
 	icsMain = "cmd/items-corpus-stt/main.go"
 	icsTr   = "cmd/items-corpus-stt/transcribe.go"
-	icsTTS  = "cmd/items-corpus-stt/tts.go"
+	scVoice = "internal/sttcorpus/voices.go"
 )
 
 var mutants = []mutant{
@@ -312,6 +312,18 @@ var mutants = []mutant{
 		pkg: "./cmd/items-eval", test: "TestTheSTTLintCatchesEachProblem", want: "no word error rate: lint said"},
 	{name: "stt lint: a recorded WER not checked against the text", file: ieSTT, from: "if *in.WER != sc.Rate() || in.Words != sc.Words || in.Errors != sc.Errors {", to: "if false {",
 		pkg: "./cmd/items-eval", test: "TestTheSTTLintCatchesEachProblem", want: "a word error rate its text does not give"},
+	{name: "stt lint: a changed speaker list accepted", file: ieSTT, from: "if !reflect.DeepEqual(v.Speakers, src.Speakers) {", to: "if false {",
+		pkg: "./cmd/items-eval", test: "TestTheSTTLintCatchesEachProblem", want: "a changed speaker list: lint said"},
+	{name: "stt lint: a segment's changed speaker accepted", file: ieSTT, from: "if s.ID != o.ID || s.Speaker != o.Speaker {", to: "if s.ID != o.ID {",
+		pkg: "./cmd/items-eval", test: "TestTheSTTLintCatchesEachProblem", want: "a segment's speaker changed: lint said"},
+	{name: "stt lint: a variant from another tool version accepted", file: ieSTT, from: "} else if in.Tool != sttcorpus.Tool {", to: "} else if false {",
+		pkg: "./cmd/items-eval", test: "TestTheSTTLintCatchesEachProblem", want: "made by another tool version: lint said"},
+	{name: "stt lint: lines from an engine it does not name accepted", file: ieSTT, from: "case in.Engine != sttcorpus.EngineMixed && (len(engines) != 1 || engines[0] != in.Engine):", to: "case false:",
+		pkg: "./cmd/items-eval", test: "TestTheSTTLintCatchesEachProblem", want: "lines from an engine it does not name: lint said"},
+	{name: "stt lint: mixed with lines from one engine accepted", file: ieSTT, from: "case in.Engine == sttcorpus.EngineMixed && len(engines) < 2:", to: "case false:",
+		pkg: "./cmd/items-eval", test: "TestTheSTTLintCatchesEachProblem", want: "mixed with lines from one engine: lint said"},
+	{name: "stt lint: a voice voices.yaml does not give accepted", file: ieSTT, from: "if want, ok := cfg.Speakers[n]; !ok || in.Voices[n] != want {", to: "if want, ok := cfg.Speakers[n]; false && (!ok || in.Voices[n] != want) {",
+		pkg: "./cmd/items-eval", test: "TestTheSTTLintCatchesEachProblem", want: "a voice voices.yaml does not give: lint said"},
 	{name: "stt run: the STT lint not run", file: ieMain, from: "if p := append(Lint(ms), LintSTT(ms, sms)...); len(p) > 0 {", to: "if p := Lint(ms); len(p) > 0 {",
 		pkg: "./cmd/items-eval", test: "TestARunWithoutTheSTTCorpusScoresNoModel", want: "a missing variant: exit 0"},
 	{name: "gate: the clean corpus left out of the worst-of-both", file: ieScore, from: "w := Worst([]Metrics{clean.Worst, stt.Worst})", to: "w := Worst([]Metrics{stt.Worst})",
@@ -348,7 +360,7 @@ var mutants = []mutant{
 		pkg: "./cmd/items-corpus-stt", test: "TestAssignByOverlapAndRefuseAGap", want: "a gap: <nil>"},
 	{name: "corpus-stt: every overlapping line to the first segment", file: icsTr, from: "best, bestOv = i, ov", to: "best, bestOv = min(i, 0), ov",
 		pkg: "./cmd/items-corpus-stt", test: "TestAssignByOverlapAndRefuseAGap", want: "assigned map"},
-	{name: "corpus-stt: two speakers of a meeting on one voice", file: icsTTS, from: "if o, dup := by[v]; dup {", to: "if o, dup := by[v]; false && dup {",
+	{name: "corpus-stt: two speakers of a meeting on one voice", file: scVoice, from: "if o, dup := by[v]; dup {", to: "if o, dup := by[v]; false && dup {",
 		pkg: "./cmd/items-corpus-stt", test: "TestTheVoiceMapCoversTheCorpus", want: "two speakers on one voice: <nil>"},
 	{name: "corpus-stt: the record's WER over the wrong text", file: icsMain, from: "sc = sc.Add(s.Text, texts[s.ID])", to: "sc = sc.Add(s.Text, s.Text)",
 		pkg: "./cmd/items-corpus-stt", test: "TestAMeetingThroughTheNemotronEngine", want: "want 7 errors over 12 words"},

@@ -1,4 +1,5 @@
-# The voices cmd/items-corpus-stt speaks the corpus with: Piper models from
+# The voices cmd/items-corpus-stt speaks the corpus with (embedded by
+# internal/sttcorpus; the corpus lint checks each variant against it): Piper models from
 # rhasspy/piper-voices at one pinned revision, downloaded at run time into
 # the tool's cache (never committed) and checked against these sha256s.
 #

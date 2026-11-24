@@ -17,9 +17,20 @@ import (
 // commitment was said, and the gate measures whether a model still finds it
 // in the transcribed text), and records how it was made and its word error
 // rate, which must be what its text gives against the source's.
+//
+// The record is checked against the current pipeline too: made by this
+// tool version (sttcorpus.Tool), its lines per engine agreeing with its
+// engine, and each speaker's voice the one voices.yaml gives them, so a
+// variant made by an older pipeline or with other voices is remade, never
+// silently scored.
 func LintSTT(clean, stt []*Meeting) []string {
 	var p []string
 	bad := func(f string, a ...any) { p = append(p, fmt.Sprintf(f, a...)) }
+	cfg, err := sttcorpus.Voices()
+	if err != nil {
+		bad("voices.yaml: %v", err)
+		cfg = &sttcorpus.Config{}
+	}
 	variant := map[string]*Meeting{}
 	for _, v := range stt {
 		variant[v.file] = v
@@ -67,12 +78,12 @@ func LintSTT(clean, stt []*Meeting) []string {
 		if !reflect.DeepEqual(v.Traps, src.Traps) {
 			bad("%s: its traps differ from the source's", where)
 		}
-		lintInfo(v, src, bad)
+		lintInfo(v, src, cfg, bad)
 	}
 	return p
 }
 
-func lintInfo(v, src *Meeting, bad func(string, ...any)) {
+func lintInfo(v, src *Meeting, cfg *sttcorpus.Config, bad func(string, ...any)) {
 	where, in := v.file, v.STT
 	if in == nil {
 		bad("%s: no stt block (engine, voices, tool, word error rate)", where)
@@ -83,6 +94,23 @@ func lintInfo(v, src *Meeting, bad func(string, ...any)) {
 	}
 	if strings.TrimSpace(in.Tool) == "" {
 		bad("%s: records no tool version", where)
+	} else if in.Tool != sttcorpus.Tool {
+		bad("%s: made by %q, the current tool is %q: run cmd/items-corpus-stt again", where, in.Tool, sttcorpus.Tool)
+	}
+	engines := make([]string, 0, len(in.Lines))
+	for e, n := range in.Lines {
+		if n > 0 {
+			engines = append(engines, e)
+		}
+	}
+	sort.Strings(engines)
+	switch {
+	case len(engines) == 0:
+		bad("%s: records no lines per engine", where)
+	case in.Engine == sttcorpus.EngineMixed && len(engines) < 2:
+		bad("%s: engine mixed, but its lines are all from %v", where, engines)
+	case in.Engine != sttcorpus.EngineMixed && (len(engines) != 1 || engines[0] != in.Engine):
+		bad("%s: engine %s, but its lines are from %v", where, in.Engine, engines)
 	}
 	var names []string
 	for _, s := range src.Speakers {
@@ -92,6 +120,11 @@ func lintInfo(v, src *Meeting, bad func(string, ...any)) {
 	sort.Strings(names)
 	if !reflect.DeepEqual(voiced, names) {
 		bad("%s: voices are for %v, the speakers are %v", where, voiced, names)
+	}
+	for _, n := range voiced {
+		if want, ok := cfg.Speakers[n]; !ok || in.Voices[n] != want {
+			bad("%s: speaker %s's voice is %q, voices.yaml gives %q", where, n, in.Voices[n], want)
+		}
 	}
 	used := map[string]bool{}
 	for _, n := range voiced {

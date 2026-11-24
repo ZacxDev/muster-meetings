@@ -57,6 +57,23 @@ func TestTheSTTLintCatchesEachProblem(t *testing.T) {
 			func(c, s []*Meeting) ([]*Meeting, []*Meeting) { s[0].Labels = s[0].Labels[:2]; return c, s }},
 		{"a changed trap", "m01-standup.stt.yaml: its traps differ from the source's",
 			func(c, s []*Meeting) ([]*Meeting, []*Meeting) { s[0].Traps[0].Kind = "question"; return c, s }},
+		{"a changed speaker list", "m01-standup.stt.yaml: its speakers differ from the source's",
+			func(c, s []*Meeting) ([]*Meeting, []*Meeting) { s[0].Speakers[1].Guest = true; return c, s }},
+		{"a segment's speaker changed", "m01-standup.stt.yaml: segment 1 is 100 by \"Cleo\", the source's is 100 by \"Bo\"",
+			func(c, s []*Meeting) ([]*Meeting, []*Meeting) { s[0].Segments[1].Speaker = "Cleo"; return c, s }},
+		{"made by another tool version", "m01-standup.stt.yaml: made by \"items-corpus-stt 0\", the current tool is \"items-corpus-stt 1\"",
+			func(c, s []*Meeting) ([]*Meeting, []*Meeting) { s[0].STT.Tool = "items-corpus-stt 0"; return c, s }},
+		{"lines from an engine it does not name", "m01-standup.stt.yaml: engine nemotron, but its lines are from [nemotron utterance]",
+			func(c, s []*Meeting) ([]*Meeting, []*Meeting) { s[0].STT.Lines["utterance"] = 2; return c, s }},
+		{"mixed with lines from one engine", "m01-standup.stt.yaml: engine mixed, but its lines are all from [nemotron]",
+			func(c, s []*Meeting) ([]*Meeting, []*Meeting) { s[0].STT.Engine = "mixed"; return c, s }},
+		{"no lines per engine", "m01-standup.stt.yaml: records no lines per engine",
+			func(c, s []*Meeting) ([]*Meeting, []*Meeting) { s[0].STT.Lines = nil; return c, s }},
+		{"a voice voices.yaml does not give", "m01-standup.stt.yaml: speaker Ada's voice is \"en_GB-vctk-medium#40\", voices.yaml gives \"en_GB-vctk-medium#0\"",
+			func(c, s []*Meeting) ([]*Meeting, []*Meeting) {
+				s[0].STT.Voices["Ada"] = "en_GB-vctk-medium#40"
+				return c, s
+			}},
 		{"a changed segment id", "m01-standup.stt.yaml: segment 1 is 9999 by \"Bo\", the source's is 100 by \"Bo\"",
 			func(c, s []*Meeting) ([]*Meeting, []*Meeting) { s[0].Segments[1].ID = 9999; return c, s }},
 		{"a variant with its own times", "m01-standup.stt.yaml: segment 99's dur differs from the source's",

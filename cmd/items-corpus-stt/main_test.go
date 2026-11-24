@@ -11,6 +11,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/ZacxDev/muster-meetings/internal/stt"
+	"github.com/ZacxDev/muster-meetings/internal/sttcorpus"
 	"github.com/ZacxDev/muster-meetings/internal/stttest"
 )
 
@@ -57,7 +58,7 @@ func TestAMeetingThroughTheNemotronEngine(t *testing.T) {
 	if err := yaml.Unmarshal([]byte(fixtureSource), &src); err != nil {
 		t.Fatal(err)
 	}
-	voices := map[string]Voice{"Ada": {"en_GB-vctk-medium", 0}, "Bo": {"en_US-ryan-medium", 0}}
+	voices := map[string]Voice{"Ada": {Model: "en_GB-vctk-medium", Speaker: 0}, "Bo": {Model: "en_US-ryan-medium", Speaker: 0}}
 	speak := func(v Voice, text string) ([]int16, error) {
 		return tone(1.0 + 0.1*float64(len(strings.Fields(text)))), nil
 	}
@@ -128,7 +129,7 @@ func TestAssignByOverlapAndRefuseAGap(t *testing.T) {
 // The shipped voice map covers every speaker of the corpus, never gives two
 // speakers of one meeting the same voice, and has two accents.
 func TestTheVoiceMapCoversTheCorpus(t *testing.T) {
-	cfg, err := ParseConfig(defaultVoices)
+	cfg, err := sttcorpus.Voices()
 	if err != nil {
 		t.Fatal(err)
 	}

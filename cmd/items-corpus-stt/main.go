@@ -16,7 +16,7 @@
 // participant's microphone is one track in a call):
 //
 //  1. Piper (`piper` on PATH: nixpkgs piper-tts) speaks each of the
-//     speaker's segments in their voice (voices.yaml: models pinned by
+//     speaker's segments in their voice (internal/sttcorpus/voices.yaml: models pinned by
 //     revision and sha256, downloaded into -cache; never committed).
 //  2. The audio is laid out as one stream: room noise, then each segment
 //     followed by a 1.5 s pause, resampled to 16 kHz mono.
@@ -42,7 +42,6 @@ package main
 
 import (
 	"context"
-	_ "embed"
 	"flag"
 	"fmt"
 	"io"
@@ -60,16 +59,6 @@ import (
 	"github.com/ZacxDev/muster-meetings/internal/stt"
 	"github.com/ZacxDev/muster-meetings/internal/sttcorpus"
 )
-
-// Version is recorded in every variant: bump it when the pipeline changes
-// what a variant would hold (the layout, the voices' handling, the mapping).
-const Version = "1"
-
-// Tool is the variant's `tool` value.
-const Tool = "items-corpus-stt " + Version
-
-//go:embed voices.yaml
-var defaultVoices []byte
 
 // source is the part of a corpus meeting the tool reads.
 type source struct {
@@ -105,7 +94,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 		return 2
 	}
 	fail := func(f string, a ...any) int { fmt.Fprintf(stderr, "items-corpus-stt: "+f+"\n", a...); return 1 }
-	raw := defaultVoices
+	raw := sttcorpus.VoicesYAML
 	if *voices != "" {
 		b, err := os.ReadFile(*voices)
 		if err != nil {
@@ -113,7 +102,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 		}
 		raw = b
 	}
-	cfg, err := ParseConfig(raw)
+	cfg, err := sttcorpus.ParseConfig(raw)
 	if err != nil {
 		return fail("voices: %v", err)
 	}
@@ -280,7 +269,7 @@ func transcribeMeeting(ctx context.Context, src source, voices map[string]Voice,
 // fell back for some lines), the lines per engine, the voices, and the word
 // error rate of texts against the source.
 func Record(src source, texts map[int64]string, lines map[string]int, voices map[string]Voice, configured string) sttcorpus.Info {
-	in := sttcorpus.Info{Engine: configured, Lines: lines, Tool: Tool, Voices: map[string]string{}}
+	in := sttcorpus.Info{Engine: configured, Lines: lines, Tool: sttcorpus.Tool, Voices: map[string]string{}}
 	if len(lines) > 1 {
 		in.Engine = sttcorpus.EngineMixed
 	} else {

@@ -32,7 +32,7 @@ kind, the non-ASCII meeting, that injections are a guest's, and the controls.
 
 **The speech-to-text corpus.** Beside each meeting `<name>.yaml` is
 `<name>.stt.yaml`: the same meeting spoken by Piper (a distinct voice per
-speaker, British and American, `cmd/items-corpus-stt/voices.yaml`) and
+speaker, British and American, `internal/sttcorpus/voices.yaml`) and
 transcribed by the plugin's own STT engine (`nemotron`, as live calls are
 stored: one stream per speaker, 80 ms frames in real time, silence
 included, a flush per utterance, late closing marks amended onto the line
@@ -49,7 +49,9 @@ both and reports each, and a model passes only on the worst of the two:
 every metric the worse corpus's, so it must pass on both; the choice reads
 the same worst-of-both numbers. The controls must pass on each. Its lint requires every source to have its
 variant, the variant to match its source in everything but the text, and
-the recorded word error rate to be what the text gives. The three
+the recorded word error rate to be what the text gives, and the record to
+be the current pipeline's: this tool version, lines from the engine it
+names, and the voices `voices.yaml` gives. The three
 `asr: true` meetings are written by hand in speech-to-text style; their
 variants are STT over that.
 

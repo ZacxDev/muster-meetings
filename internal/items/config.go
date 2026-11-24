@@ -95,35 +95,6 @@ func pinned(p map[string]any) bool {
 	return ok && len(o) > 0 && p["allow_fallbacks"] == false
 }
 
-// FromEnv reads the configuration; getenv is os.Getenv. A Model of Off
-// answers a Config with only Model set and no error.
-func FromEnv(getenv func(string) string) (Config, error) {
-	c := Config{Model: strings.TrimSpace(getenv("MEETINGS_ITEMS_MODEL"))}
-	if c.Model == "" {
-		return Config{}, errors.New("MEETINGS_ITEMS_MODEL is not set (an OpenRouter model slug, or off)")
-	}
-	if c.Model == Off {
-		return c, nil
-	}
-	c.Adapter = strings.TrimSpace(getenv("MEETINGS_ITEMS_ADAPTER"))
-	if c.Adapter == "" {
-		c.Adapter = AdapterFor(c.Model)
-	}
-	if c.Adapter != AdapterExtract && c.Adapter != AdapterChatJSON {
-		return Config{}, fmt.Errorf("MEETINGS_ITEMS_ADAPTER must be %s or %s", AdapterExtract, AdapterChatJSON)
-	}
-	var err error
-	if c.Prefs, err = ParsePrefs(getenv("MEETINGS_ITEMS_PROVIDER_PREFS"), c.Adapter); err != nil {
-		return Config{}, err
-	}
-	c.APIKey = strings.TrimSpace(getenv("OPENROUTER_API_KEY"))
-	if c.APIKey == "" {
-		return Config{}, errors.New("OPENROUTER_API_KEY is not set (required unless MEETINGS_ITEMS_MODEL=off; its value is not shown)")
-	}
-	c.BaseURL = DefaultBaseURL
-	return c, nil
-}
-
 // New builds the configured adapter. hc nil is a client with c.Timeout.
 func New(c Config, hc *http.Client) (Adapter, error) {
 	if c.Model == "" || c.Model == Off {

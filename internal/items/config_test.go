@@ -48,34 +48,11 @@ func TestProviderPrefsAlwaysDenyDataCollection(t *testing.T) {
 	}
 }
 
-func TestFromEnv(t *testing.T) {
-	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
-	c, err := items.FromEnv(env(map[string]string{"MEETINGS_ITEMS_MODEL": "off"}))
-	if err != nil || c.Model != "off" || c.APIKey != "" {
-		t.Errorf("off: %+v %v", c, err)
-	}
-	if _, err := items.FromEnv(env(map[string]string{})); err == nil {
-		t.Error("no model: want an error")
-	}
-	if _, err := items.FromEnv(env(map[string]string{"MEETINGS_ITEMS_MODEL": "scaledown/extract"})); err == nil || !strings.Contains(err.Error(), "OPENROUTER_API_KEY") {
-		t.Errorf("no key: %v", err)
-	}
-	c, err = items.FromEnv(env(map[string]string{"MEETINGS_ITEMS_MODEL": "scaledown/extract", "OPENROUTER_API_KEY": "k"}))
-	if err != nil || c.Adapter != items.AdapterExtract || c.Prefs["data_collection"] != "deny" || c.BaseURL != "https://openrouter.ai/api/v1" {
-		t.Errorf("extract: %+v %v", c, err)
-	}
-	if _, err := items.FromEnv(env(map[string]string{"MEETINGS_ITEMS_MODEL": "deepseek/deepseek-v4.1-flash-1017", "OPENROUTER_API_KEY": "k"})); err == nil || !strings.Contains(err.Error(), "pin") {
-		t.Errorf("deepseek with no pin: %v", err)
-	}
-	c, err = items.FromEnv(env(map[string]string{"MEETINGS_ITEMS_MODEL": "deepseek/deepseek-v4.1-flash-1017", "OPENROUTER_API_KEY": "k",
-		"MEETINGS_ITEMS_PROVIDER_PREFS": `{"quantizations":["fp8"]}`}))
-	if err != nil || c.Adapter != items.AdapterChatJSON {
-		t.Errorf("deepseek pinned: %+v %v", c, err)
-	}
-	if _, err := items.FromEnv(env(map[string]string{"MEETINGS_ITEMS_MODEL": "x/y", "MEETINGS_ITEMS_ADAPTER": "regex", "OPENROUTER_API_KEY": "k"})); err == nil {
-		t.Error("unknown adapter: want an error")
-	}
+func TestNewRefusesProviderPrefsWithoutDeny(t *testing.T) {
 	if _, err := items.New(items.Config{Model: "scaledown/extract", Adapter: items.AdapterExtract, Prefs: map[string]any{}, APIKey: "k"}, nil); err == nil {
 		t.Error("New with no deny: want an error")
+	}
+	if _, err := items.New(items.Config{Model: "deepseek/deepseek-v4.1-flash-1017", Adapter: items.AdapterChatJSON, Prefs: map[string]any{"data_collection": "deny"}, APIKey: "k"}, nil); err == nil {
+		t.Error("New with an unpinned chat_json model: want an error")
 	}
 }

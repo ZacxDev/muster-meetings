@@ -195,6 +195,9 @@ func Worst(runs []Metrics) Metrics {
 		w.P95 = max(w.P95, r.P95)
 		w.CostPerHour = math.Max(w.CostPerHour, r.CostPerHour)
 		w.CostKnown = w.CostKnown && r.CostKnown
+		// The fewest calls: the latency and schema gates fail a run (or a
+		// corpus) that made none.
+		w.Calls = min(w.Calls, r.Calls)
 		w.FatalFailures = max(w.FatalFailures, r.FatalFailures)
 		w.RetryFailures = max(w.RetryFailures, r.RetryFailures)
 		w.SchemaFailures = max(w.SchemaFailures, r.SchemaFailures)
@@ -269,40 +272,54 @@ func Judge(runs []Metrics, adapter string) Verdict {
 	return v
 }
 
-// Scored is one model's result: on the clean corpus (as written: reported)
-// and on the speech-to-text corpus (the same meetings through the real STT:
-// the gate, design: "ASR-style noise (a variant of each meeting passed
-// through the real STT from synthesised speech)"). A model passes on the
-// STT corpus's gates alone.
+// Scored is one model's result on the clean corpus (as written), on the
+// speech-to-text corpus (the same meetings through the real STT, design:
+// "ASR-style noise (a variant of each meeting passed through the real STT
+// from synthesised speech)"), and Combined: each metric the worse of the
+// two. Combined is the gate: a model passes only if it passes on both.
 type Scored struct {
-	Model   string  `json:"model"`
-	Adapter string  `json:"adapter"`
-	Prefs   any     `json:"provider_prefs"`
-	Clean   Verdict `json:"clean"`
-	STT     Verdict `json:"stt"`
-	Pass    bool    `json:"pass"`
+	Model    string  `json:"model"`
+	Adapter  string  `json:"adapter"`
+	Prefs    any     `json:"provider_prefs"`
+	Clean    Verdict `json:"clean"`
+	STT      Verdict `json:"stt"`
+	Combined Verdict `json:"combined"`
+	Pass     bool    `json:"pass"`
 }
 
-// NewScored judges a model's clean and STT runs; it passes when the STT
-// verdict does.
+// NewScored judges a model's clean and STT runs, and their worst-of-both;
+// it passes when that does.
 func NewScored(model, adapter string, prefs any, clean, stt []Metrics) Scored {
 	s := Scored{Model: model, Adapter: adapter, Prefs: prefs, Clean: Judge(clean, adapter), STT: Judge(stt, adapter)}
-	s.Pass = s.STT.Pass
+	s.Combined = Combine(s.Clean, s.STT, adapter)
+	s.Pass = s.Combined.Pass
 	return s
 }
 
+// Combine is the worst-of-both verdict: each metric the worse of the two
+// corpora's worst runs (Worst), gated as one. A corpus with no runs fails
+// it.
+func Combine(clean, stt Verdict, adapter string) Verdict {
+	if len(clean.Runs) == 0 || len(stt.Runs) == 0 {
+		return Verdict{}
+	}
+	w := Worst([]Metrics{clean.Worst, stt.Worst})
+	g := Gates(w, adapter)
+	return Verdict{Worst: w, Gates: g, Pass: Passes(g)}
+}
+
 // Choose is the default model (design: "Choice"): of the models passing
-// every gate (on the STT corpus), the better recall there, then the
-// cheaper; "off" if none passes.
+// every gate on both corpora, the better worst-of-both recall, then the
+// cheaper worst-of-both cost; "off" if none passes.
 func Choose(ss []Scored) string {
 	best := -1
 	for i, s := range ss {
 		if !s.Pass {
 			continue
 		}
-		w, b := s.STT.Worst, Metrics{}
+		w, b := s.Combined.Worst, Metrics{}
 		if best >= 0 {
-			b = ss[best].STT.Worst
+			b = ss[best].Combined.Worst
 		}
 		if best < 0 || w.Recall > b.Recall || (w.Recall == b.Recall && w.CostPerHour < b.CostPerHour) {
 			best = i

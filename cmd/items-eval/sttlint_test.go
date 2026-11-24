@@ -121,6 +121,60 @@ func TestARunWithoutTheSTTCorpusScoresNoModel(t *testing.T) {
 	}
 }
 
+// The STT half of the failed-control stop: a corpus whose STT controls fail
+// while its clean controls pass still stops the run before any model. The
+// variant of m01 is remade with segment 103 heard as nothing (its record's
+// WER remade to match, so the lint passes): label m01-1 cites only 103, so
+// the STT oracle cannot reach it and misses recall 1.0.
+func TestAFailedSTTControlStopsTheRunBeforeAnyModel(t *testing.T) {
+	dir := t.TempDir()
+	files, _ := filepath.Glob(filepath.Join(corpusDir, "*.yaml"))
+	for _, src := range files {
+		b, _ := os.ReadFile(src)
+		if err := os.WriteFile(filepath.Join(dir, filepath.Base(src)), b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	v := loadSTT(t)[0]
+	texts := map[int64]string{}
+	var sc sttcorpus.Score
+	for i, s := range v.Segments {
+		texts[s.ID] = s.Text
+		if s.ID == 103 {
+			texts[s.ID] = ""
+		}
+		sc = sc.Add(v.source.Segments[i].Text, texts[s.ID])
+	}
+	info := *v.STT
+	wer := sc.Rate()
+	info.WER, info.Words, info.Errors = &wer, sc.Words, sc.Errors
+	srcBytes, _ := os.ReadFile(filepath.Join(corpusDir, "m01-standup.yaml"))
+	out, err := sttcorpus.Write(srcBytes, texts, info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "m01-standup.stt.yaml"), out, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeRouter{}
+	srv := f.serve(t)
+	var so, se bytes.Buffer
+	code := run([]string{"-corpus", dir, "-runs", "1", "-out", filepath.Join(t.TempDir(), "r.json"), "-base", srv.URL + "/api/v1", "-models", "scaledown/extract"},
+		func(k string) string {
+			if k == "OPENROUTER_API_KEY" {
+				return "sk-test"
+			}
+			return ""
+		}, &so, &se)
+	clean, sttc, _ := strings.Cut(so.String(), "controls, stt corpus:")
+	if !strings.Contains(clean, "oracle                         pass") || !strings.Contains(sttc, "oracle                         FAIL") {
+		t.Fatalf("the fixture: want the clean oracle passing and the STT oracle failing:\n%s\n%s", so.String(), se.String())
+	}
+	if code != 1 || len(f.bodies) != 0 || !strings.Contains(se.String(), "a control did not score as stated") {
+		t.Errorf("a failing STT oracle: exit %d, %d requests, stderr %s", code, len(f.bodies), se.String())
+	}
+}
+
 // A segment the engine heard nothing in is no line (production stores none)
 // and the others keep their source times.
 func TestAnEmptyTranscriptIsNoLine(t *testing.T) {

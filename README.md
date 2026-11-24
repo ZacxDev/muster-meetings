@@ -1032,7 +1032,9 @@ does not score as stated stops the run before any model is called), and
 picks the default model. It replays every model on two corpora, the
 meetings as written and the same meetings passed through the plugin's real
 STT from synthesised speech (`<name>.stt.yaml`, made by
-`cmd/items-corpus-stt`), reports both, and **gates on the STT corpus**.
+`cmd/items-corpus-stt`), reports both, and **gates on both**: a model
+passes only if it passes on each, every metric taking the worse of the two,
+and the choice reads those worst-of-both numbers.
 **It costs money and needs a key, so it is run by hand, never in CI:**
 
 ```sh

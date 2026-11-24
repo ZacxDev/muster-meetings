@@ -139,20 +139,23 @@ func TestGatesAtTheirBars(t *testing.T) {
 
 func TestWorstIsEachMetricsWorstRun(t *testing.T) {
 	w := Worst([]Metrics{
-		{Recall: 0.9, Precision: 0.7, DupRate: 0.01, P95: time.Second, CostPerHour: 0.02, CostKnown: true},
-		{Recall: 0.8, Precision: 0.95, DupRate: 0.03, P95: 3 * time.Second, CostPerHour: 0.01, CostKnown: true},
-		{Recall: 0.85, Precision: 0.9, DupRate: 0.02, P95: 2 * time.Second, CostPerHour: 0.03, CostKnown: false},
+		{Recall: 0.9, Precision: 0.7, DupRate: 0.01, P95: time.Second, CostPerHour: 0.02, CostKnown: true, Calls: 7},
+		{Recall: 0.8, Precision: 0.95, DupRate: 0.03, P95: 3 * time.Second, CostPerHour: 0.01, CostKnown: true, Calls: 3},
+		{Recall: 0.85, Precision: 0.9, DupRate: 0.02, P95: 2 * time.Second, CostPerHour: 0.03, CostKnown: false, Calls: 5},
 	})
-	if w.Recall != 0.8 || w.Precision != 0.7 || w.DupRate != 0.03 || w.P95 != 3*time.Second || w.CostPerHour != 0.03 || w.CostKnown {
+	// Calls: the fewest (3), so a corpus that made no call fails the
+	// latency and schema gates even beside one that did.
+	if w.Recall != 0.8 || w.Precision != 0.7 || w.DupRate != 0.03 || w.P95 != 3*time.Second || w.CostPerHour != 0.03 || w.CostKnown || w.Calls != 3 {
 		t.Errorf("worst = %+v", w)
 	}
 }
 
 func TestChoose(t *testing.T) {
 	s := func(model string, pass bool, recall, cost float64) Scored {
-		// The choice reads the STT corpus: the clean one says the opposite.
-		return Scored{Model: model, Pass: pass, STT: Verdict{Worst: Metrics{Recall: recall, CostPerHour: cost}},
-			Clean: Verdict{Worst: Metrics{Recall: 1 - recall, CostPerHour: 1 - cost}}}
+		// The choice reads the worst-of-both numbers: each corpus alone says
+		// the opposite.
+		inv := Verdict{Worst: Metrics{Recall: 1 - recall, CostPerHour: 1 - cost}}
+		return Scored{Model: model, Pass: pass, Combined: Verdict{Worst: Metrics{Recall: recall, CostPerHour: cost}}, STT: inv, Clean: inv}
 	}
 	cases := []struct {
 		ss   []Scored
@@ -179,11 +182,13 @@ func TestTablesNameTheModelTheProviderAndTheChoice(t *testing.T) {
 		STTMeetings: []STTMeeting{{"m01", "nemotron", 0.1, 100, "items-corpus-stt 1"}, {"m02", "nemotron", 0.4, 300, "items-corpus-stt 1"}}}
 	out := Tables(res)
 	for _, want := range []string{"# Action-item evaluation, 2026-11-24", "`deepseek/deepseek-v4.1-flash-1017` (chat_json)", `{"data_collection":"deny"}`,
-		"P1 (4), P2 (1)", "| metric | stt (the gate) | clean (reported) | bar | pass (stt) |",
-		"| recall | 0.75 | 1.00 | ≥ 0.80 | **no** |",
+		"P1 (4), P2 (1)", "| metric | worst of both (the gate) | stt | clean | bar | pass |",
+		"| recall | 0.75 | 0.75 | 1.00 | ≥ 0.80 | **no** |",
+		// precision: clean 1.00, stt 0.60; the worst is the STT's.
+		"| precision | 0.60 | 0.60 | 1.00 | ≥ 0.80 | **no** |",
 		// (0.1·100 + 0.4·300) / 400 = 0.325
 		"word error rate 0.325 over 400 words (engines: nemotron (2); per meeting: m01 0.100, m02 0.400)",
-		"fails on the STT corpus** (on the clean corpus it passes", "**Choice:** `off`."} {
+		"fails** (on its own, the STT corpus fails and the clean corpus passes)", "**Choice:** `off`."} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the table has no %q:\n%s", want, out)
 		}
@@ -201,33 +206,67 @@ func passingFixture() []MeetingRun {
 		Windows: []WindowRun{{Elapsed: 100 * time.Millisecond, Provider: "P1", CostUSD: 0.0001, CostKnown: true}}}}
 }
 
-// A model passes, and is chosen, on the STT corpus's verdict alone: a model
-// perfect on the clean corpus and at recall 0.75 on the STT one fails; the
-// reverse passes.
-func TestTheSTTCorpusIsTheGate(t *testing.T) {
+// ok passes every gate (each metric at or inside its bar) with recall r.
+func ok(r float64) Metrics {
+	return Metrics{Recall: r, Precision: 0.95, DupRate: 0, Assignee: 0.95, Calls: 100, P95: time.Second, SchemaRate: 0, CostKnown: true, CostPerHour: 0.01}
+}
+
+// A model passes only if it passes on BOTH corpora, each metric the worse
+// of the two; and the choice reads those worst-of-both numbers.
+func TestAModelMustPassBothCorpora(t *testing.T) {
 	good, bad := Score(passingFixture()), Score(scoringFixture())
 	if !Passes(Gates(good, items.AdapterChatJSON)) || Passes(Gates(bad, items.AdapterChatJSON)) {
 		t.Fatal("the fixtures: passing must pass and scoring must fail")
 	}
 	cleanOnly := NewScored("a/clean-only", items.AdapterChatJSON, nil, []Metrics{good}, []Metrics{bad})
 	sttOnly := NewScored("b/stt-only", items.AdapterChatJSON, nil, []Metrics{bad}, []Metrics{good})
-	if cleanOnly.Pass || !cleanOnly.Clean.Pass || cleanOnly.STT.Pass || cleanOnly.STT.Worst.Recall != 0.75 || cleanOnly.Clean.Worst.Recall != 1 {
-		t.Errorf("perfect on clean, 0.75 on stt: pass %v (clean %v, stt %v, recall stt %v clean %v), want a failure",
-			cleanOnly.Pass, cleanOnly.Clean.Pass, cleanOnly.STT.Pass, cleanOnly.STT.Worst.Recall, cleanOnly.Clean.Worst.Recall)
+	both := NewScored("c/both", items.AdapterChatJSON, nil, []Metrics{good}, []Metrics{good})
+	if cleanOnly.Pass || !cleanOnly.Clean.Pass || cleanOnly.STT.Pass {
+		t.Errorf("perfect on clean, 0.75 on stt: pass %v (clean %v, stt %v), want a failure", cleanOnly.Pass, cleanOnly.Clean.Pass, cleanOnly.STT.Pass)
 	}
-	if !sttOnly.Pass || sttOnly.Clean.Pass {
-		t.Errorf("0.75 on clean, perfect on stt: pass %v (clean %v), want a pass", sttOnly.Pass, sttOnly.Clean.Pass)
+	if sttOnly.Pass || sttOnly.Clean.Pass || !sttOnly.STT.Pass {
+		t.Errorf("0.75 on clean, perfect on stt: pass %v (clean %v, stt %v), want a failure", sttOnly.Pass, sttOnly.Clean.Pass, sttOnly.STT.Pass)
 	}
-	if got := Choose([]Scored{cleanOnly}); got != "off" {
-		t.Errorf("only the clean-corpus pass: Choose = %s, want off", got)
+	if !both.Pass {
+		t.Errorf("passing on both: pass false, gates %+v", both.Combined.Gates)
 	}
-	if got := Choose([]Scored{cleanOnly, sttOnly}); got != "b/stt-only" {
-		t.Errorf("Choose = %s, want b/stt-only", got)
+	// The worst of both, per metric, by hand: recall 0.75 (stt) and
+	// precision 0.60 (stt) against 1.00 and 1.00 (clean); cost $0.010 per hour
+	// (stt) against $0.0002 (clean).
+	if w := cleanOnly.Combined.Worst; w.Recall != 0.75 || w.Precision != 0.60 || !near(w.CostPerHour, 0.010) {
+		t.Errorf("worst of both = recall %v precision %v cost %v, want 0.75 0.60 0.010", w.Recall, w.Precision, w.CostPerHour)
+	}
+	if got := Choose([]Scored{cleanOnly, sttOnly}); got != "off" {
+		t.Errorf("each passing one corpus only: Choose = %s, want off", got)
+	}
+	// Two models passing both. A: clean 1.00, stt 0.85; B: 0.90 on both.
+	// Worst of both: A 0.85, B 0.90, so B, though A has the better clean
+	// recall. And mirrored (A: clean 0.85, stt 1.00), B again, though A has
+	// the better STT recall.
+	for _, c := range []struct {
+		name string
+		a    *Scored
+	}{
+		{"A better on clean", ptr(NewScored("a/x", items.AdapterChatJSON, nil, []Metrics{ok(1)}, []Metrics{ok(0.85)}))},
+		{"A better on stt", ptr(NewScored("a/x", items.AdapterChatJSON, nil, []Metrics{ok(0.85)}, []Metrics{ok(1)}))},
+	} {
+		b := NewScored("b/y", items.AdapterChatJSON, nil, []Metrics{ok(0.9)}, []Metrics{ok(0.9)})
+		if !c.a.Pass || !b.Pass {
+			t.Fatalf("%s: both must pass: %v %v", c.name, c.a.Pass, b.Pass)
+		}
+		if got := Choose([]Scored{*c.a, b}); got != "b/y" {
+			t.Errorf("%s: Choose = %s, want b/y (worst-of-both recall 0.90 against 0.85)", c.name, got)
+		}
 	}
 	if v := Judge(nil, items.AdapterChatJSON); v.Pass {
 		t.Error("a corpus with no runs passed")
 	}
+	if v := Combine(Judge([]Metrics{good}, items.AdapterChatJSON), Judge(nil, items.AdapterChatJSON), items.AdapterChatJSON); v.Pass {
+		t.Error("a model with no STT runs passed")
+	}
 }
+
+func ptr(s Scored) *Scored { return &s }
 
 func TestARewrittenSpanInTheNonASCIIMeetingFailsExtract(t *testing.T) {
 	runs := scoringFixture()

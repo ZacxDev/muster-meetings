@@ -44,9 +44,10 @@ rate against the source text (summed per segment; numbers are not spelled
 out, so "ten" and "10" differ). A segment the engine heard nothing in is
 left out of the timeline, as production stores no line for it.
 
-**The gate is the STT corpus.** `cmd/items-eval` replays every model on
-both corpora and reports both, but a model passes (and the choice is made)
-on the STT corpus's gates alone. Its lint requires every source to have its
+**The gate is both corpora.** `cmd/items-eval` replays every model on
+both and reports each, and a model passes only on the worst of the two:
+every metric the worse corpus's, so it must pass on both; the choice reads
+the same worst-of-both numbers. The controls must pass on each. Its lint requires every source to have its
 variant, the variant to match its source in everything but the text, and
 the recorded word error rate to be what the text gives. The three
 `asr: true` meetings are written by hand in speech-to-text style; their

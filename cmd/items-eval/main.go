@@ -19,8 +19,9 @@
 // The corpus is two: the meetings as written (the clean corpus) and the
 // same meetings through the plugin's real STT from synthesised speech (the
 // STT corpus, *.stt.yaml beside each source, made by cmd/items-corpus-stt).
-// Every model is replayed on both and reported on both; it PASSES on the
-// STT corpus's gates alone, and the choice is made there.
+// Every model is replayed on both and reported on both; it PASSES only on
+// the worst of the two (each metric the worse corpus's: it must pass on
+// both), and the choice reads those worst-of-both numbers.
 //
 // Order, every run: the lint of both corpora (every source must have its
 // variant), then the four controls on each (a failure of either stops the
@@ -277,44 +278,49 @@ func sttSummary(res Result) string {
 }
 
 // Tables is the result as markdown: one table per model, its gates on the
-// STT corpus beside the same metrics on the clean corpus, and the choice.
+// worst of both corpora (the gate) beside each corpus's own values, and the
+// choice.
 func Tables(res Result) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Action-item evaluation, %s\n\n", res.Date)
 	st := res.Corpus
-	fmt.Fprintf(&b, "Corpus: %d meetings, %d labels, %d windows (%.0f%% with no item), each as written (clean) and through the real STT from synthesised speech (stt: %s). Controls: all passed on both. **The gates are the STT corpus's;** the clean column is reported.\n\n",
+	fmt.Fprintf(&b, "Corpus: %d meetings, %d labels, %d windows (%.0f%% with no item), each as written (clean) and through the real STT from synthesised speech (stt: %s). Controls: all passed on both. **The gate is the worse of the two corpora, per metric:** a model passes only if it passes on both, and the choice reads the same worst-of-both numbers.\n\n",
 		st.Meetings, st.Labels, st.Windows, st.NoItemShare*100, sttSummary(res))
+	val := func(gs []Gate, i int) string {
+		if i < len(gs) {
+			return gs[i].Value
+		}
+		return "—"
+	}
+	pass := func(ok bool) string {
+		if ok {
+			return "passes"
+		}
+		return "fails"
+	}
 	for _, s := range res.Models {
 		pj, _ := json.Marshal(s.Prefs)
 		fmt.Fprintf(&b, "## `%s` (%s), %d runs, worst per metric\n\nProvider object: `%s`. Answered by: %s.\n\n", s.Model, s.Adapter, len(s.STT.Runs), pj, providers(mergeCounts(s.STT.Worst.Providers, s.Clean.Worst.Providers)))
-		b.WriteString("| metric | stt (the gate) | clean (reported) | bar | pass (stt) |\n|---|---|---|---|---|\n")
-		for i, g := range s.STT.Gates {
-			pass := "yes"
+		b.WriteString("| metric | worst of both (the gate) | stt | clean | bar | pass |\n|---|---|---|---|---|---|\n")
+		for i, g := range s.Combined.Gates {
+			p := "yes"
 			if !g.Pass {
-				pass = "**no**"
+				p = "**no**"
 			}
 			if !g.Gating {
-				pass += " (reported, not a gate)"
+				p += " (reported, not a gate)"
 			}
-			clean := "—"
-			if i < len(s.Clean.Gates) {
-				clean = s.Clean.Gates[i].Value
-			}
-			fmt.Fprintf(&b, "| %s | %s | %s | %s | %s |\n", g.Name, g.Value, clean, g.Bar, pass)
+			fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s |\n", g.Name, g.Value, val(s.STT.Gates, i), val(s.Clean.Gates, i), g.Bar, p)
 		}
-		fmt.Fprintf(&b, "| latency p50 | %v | %v | — | — |\n", s.STT.Worst.P50.Round(time.Millisecond), s.Clean.Worst.P50.Round(time.Millisecond))
+		fmt.Fprintf(&b, "| latency p50 | %v | %v | %v | — | — |\n", s.Combined.Worst.P50.Round(time.Millisecond), s.STT.Worst.P50.Round(time.Millisecond), s.Clean.Worst.P50.Round(time.Millisecond))
 		if s.Adapter == items.AdapterExtract {
-			fmt.Fprintf(&b, "| spans whose `text` was not the input, whole corpus | %d | %d | — | — |\n", s.STT.Worst.Rewritten, s.Clean.Worst.Rewritten)
+			fmt.Fprintf(&b, "| spans whose `text` was not the input, whole corpus | %d | %d | %d | — | — |\n", s.Combined.Worst.Rewritten, s.STT.Worst.Rewritten, s.Clean.Worst.Rewritten)
 		}
-		verdict := "passes every gate on the STT corpus"
+		verdict := "passes every gate on both corpora"
 		if !s.Pass {
-			verdict = "fails on the STT corpus"
+			verdict = "fails"
 		}
-		cv := "passes"
-		if !s.Clean.Pass {
-			cv = "fails"
-		}
-		fmt.Fprintf(&b, "\n**%s %s** (on the clean corpus it %s; reported, not the gate).\n\n", s.Model, verdict, cv)
+		fmt.Fprintf(&b, "\n**%s %s** (on its own, the STT corpus %s and the clean corpus %s).\n\n", s.Model, verdict, pass(s.STT.Pass), pass(s.Clean.Pass))
 	}
 	fmt.Fprintf(&b, "**Choice:** `%s`.\n", res.Choice)
 	return b.String()

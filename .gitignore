@@ -4,3 +4,5 @@
 e2e/node_modules/
 e2e/test-results/
 e2e/playwright-report/
+# cmd/items-eval's result file (the markdown, docs/items-eval-<date>.md, is what is committed)
+/items-eval-*.json

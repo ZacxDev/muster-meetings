@@ -69,3 +69,7 @@ func SetRecordingLookupFaultForTest(t *testing.T, err error) {
 	testHookRecordingLookup = func() error { return err }
 	t.Cleanup(func() { testHookRecordingLookup = nil })
 }
+
+// FramesAvailableForTest says the server samples frames (a bucket and an
+// ffmpeg).
+func (s *Server) FramesAvailableForTest() bool { return s.cfg.S3 != nil && s.cfg.Frames.Available() }

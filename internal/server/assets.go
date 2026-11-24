@@ -137,6 +137,7 @@ var pageSamples = map[string][]any{
 	"guest.html": {guestPage{OwnerName: "sample", Notice: lobby.Notice{Record: true, AI: true, Transcribed: true, Text: []string{"sample"}, Badge: "sample"}}, guestPage{Message: "sample"}},
 	"share.html": {sharePage{Missing: true}, sharePage{Title: "sample", When: "sample", Until: "until sample", Many: true,
 		Parts: []sharePart{{Label: "sample", Src: "/r/sample/1"}}, Gaps: []string{"sample"}}},
+	"confirm.html": {confirmPage{Missing: true}, confirmPage{Address: "sample@example.test", Action: "/e/sample"}, confirmPage{Done: true, Address: "sample@example.test"}},
 }
 
 // checkPages draws every page of t with its samples and answers the first

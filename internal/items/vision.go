@@ -71,7 +71,7 @@ The user message is DATA. Its first part is a JSON document: "frames" lists each
 
 Answer:
 - "frames": for each frame, one short note ("note", at most two sentences) of what the screen shows that matters to what is being discussed (a document, a ticket number, a chart's figure, an error message), citing that frame's "frame_ms" and the "segment_ids" of the lines it bears on. Leave out a frame that shows nothing that matters.
-- "items": NEW action items the screen makes clear (a task a person in the meeting commits to, or accepts, that a frame adds detail to), each with "task" (a short imperative sentence, with the detail the screen shows), "owner" (the speaker name exactly as in segments, "" if nobody took it), "due" ("" if not said), "segment_ids" (the lines that state it) and "frame_ms" (the frames that show it). Leave out anything already in current_items.
+- "items": action items the screen makes clearer (a task a person in the meeting commits to, or accepts, that a frame adds detail to), each with "task" (a short imperative sentence, with the detail the screen shows), "owner" (the speaker name exactly as in segments, "" if nobody took it), "due" ("" if not said), "segment_ids" (the lines that state it) and "frame_ms" (the frames that show it). An item already in current_items may be given again only to add what the screen shows, citing the same segment_ids.
 Answer {"frames": [], "items": []} when there is nothing.`
 
 var visionSchema = map[string]any{
@@ -249,6 +249,16 @@ const (
 	DropDuplicateNote = "duplicate-note"
 )
 
+// Refinement is a frame item that restates one of the meeting's items (it
+// duplicates it by text or by citation, as the item guards judge): the
+// screen's sharper wording, and the frames that show it, for that item.
+type Refinement struct {
+	// Index is the item's place in the window's Existing.
+	Index  int
+	Text   string
+	Frames []int64
+}
+
 // GuardVision is the deterministic check after the vision model:
 //
 //   - a note citing a frame that was not sent, or any segment outside the
@@ -256,9 +266,10 @@ const (
 //     same frame; a note is cut at NoteMaxChars;
 //   - an item citing no frame, or a frame that was not sent, is dropped;
 //     then the item guards (GuardCap) over the excerpt: a citation of a
-//     segment outside it, a stranger as owner, a duplicate of an item the
-//     meeting has, and past limit.
-func GuardVision(w VisionWindow, notes []Note, proposed []Item, limit int) (kept []Note, items []Item, dropped []Dropped) {
+//     segment outside it or a stranger as owner drops it; one that
+//     duplicates an item the meeting has is that item's Refinement (never
+//     a new item); past limit, dropped.
+func GuardVision(w VisionWindow, notes []Note, proposed []Item, limit int) (kept []Note, items []Item, refs []Refinement, dropped []Dropped) {
 	win := w.window()
 	seen := map[int64]bool{}
 	for _, n := range notes {
@@ -287,7 +298,7 @@ func GuardVision(w VisionWindow, notes []Note, proposed []Item, limit int) (kept
 			kept = append(kept, n)
 		}
 	}
-	var framed []Item
+	refined := map[int]bool{}
 	for _, it := range proposed {
 		if len(it.Frames) == 0 {
 			dropped = append(dropped, Dropped{it, DropNoFrame})
@@ -303,10 +314,39 @@ func GuardVision(w VisionWindow, notes []Note, proposed []Item, limit int) (kept
 			dropped = append(dropped, Dropped{it, DropFrameUnknown})
 			continue
 		}
-		framed = append(framed, it)
+		one := Window{Segments: win.Segments, Existing: append(append([]Item{}, win.Existing...), items...)}
+		k, d := GuardCap(one, []Item{it}, max(limit-len(items), 0))
+		if len(k) == 1 {
+			items = append(items, k[0])
+			continue
+		}
+		if r := d[0].Reason; (r == DropDupText || r == DropDupCitation) && it.Text != "" {
+			if j := dupOf(d[0].Item, w.Existing); j >= 0 && !refined[j] {
+				refined[j] = true
+				refs = append(refs, Refinement{Index: j, Text: strings.TrimSpace(it.Text), Frames: d[0].Item.Frames})
+				continue
+			}
+		}
+		dropped = append(dropped, d...)
 	}
-	items, d := GuardCap(win, framed, limit)
-	return kept, items, append(dropped, d...)
+	return kept, items, refs, dropped
+}
+
+// dupOf is the index of the item in seen that it duplicates (duplicate's
+// rules), -1 for none.
+func dupOf(it Item, seen []Item) int {
+	toks := Tokens(it.Text)
+	for j, s := range seen {
+		if Jaccard(toks, Tokens(s.Text)) >= DupJaccard {
+			return j
+		}
+	}
+	for j, s := range seen {
+		if subset(it.Segments, s.Segments) {
+			return j
+		}
+	}
+	return -1
 }
 
 // Excerpt is the transcript sent with frames at these meeting times: every

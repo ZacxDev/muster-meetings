@@ -6,7 +6,8 @@ package server_test
 // guest's notice, the AI switch's answers, the guest's ended event and its
 // card (contacts configured), the card's answer, End's answer, and every
 // route the feature adds (owner-authenticated and not), are compared with
-// goldens TAKEN AT THE PRE-CHANGE COMMIT (5ce6f50): this file uses only what
+// goldens TAKEN AT THE PRE-CHANGE COMMIT (5ce6f50; passed again on b0af057,
+// main after #16, before any change): this file uses only what
 // that commit had, and was run there with -update-noai to write
 // testdata/noai.golden.json. An equality to the base cannot be red at the
 // base; the mutation rows "no AI: …" supply the failing case.

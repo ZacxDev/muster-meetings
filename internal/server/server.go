@@ -414,6 +414,13 @@ func RedactPath(p string) string {
 	if strings.Contains(p, "/r/") || strings.Contains(c+"/", "/r/") {
 		return "/{redacted}"
 	}
+	// A confirmation link's token (notes.go) never reaches the log either.
+	if strings.HasPrefix(c, "/e/") {
+		return "/e/{token}"
+	}
+	if strings.Contains(p, "/e/") || strings.Contains(c+"/", "/e/") {
+		return "/{redacted}"
+	}
 	if rest, ok := strings.CutPrefix(c, "/j/"); ok {
 		if _, tail, ok := strings.Cut(rest, "/"); ok {
 			return "/j/{code}/" + tail

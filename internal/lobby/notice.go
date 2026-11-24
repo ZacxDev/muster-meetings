@@ -23,6 +23,30 @@ const (
 	BadgeRecordingFailed = "Recording failed"
 )
 
+// The AI clause with the post-call analysis configured: the summary, and
+// (for a recorded meeting with a vision model) the frames of shared screens.
+const (
+	NoticeAINotes  = "The transcript text (not the audio) is sent to an AI service (OpenRouter) to find action items and summarise the meeting."
+	NoticeAIFrames = "The transcript text and pictures of shared screens (not the audio) are sent to an AI service (OpenRouter) to find action items and summarise the meeting."
+)
+
+// WithAIClause is n with its AI clause naming the summary, and the frames
+// when frames is set. A notice without the clause is unchanged.
+func (n Notice) WithAIClause(frames bool) Notice {
+	repl := NoticeAINotes
+	if frames {
+		repl = NoticeAIFrames
+	}
+	out := append([]string(nil), n.Text...)
+	for i, t := range out {
+		if t == NoticeAI {
+			out[i] = repl
+		}
+	}
+	n.Text = out
+	return n
+}
+
 // Without an engine (MEETINGS_STT_ENGINE off) nothing is transcribed, so
 // nothing is sent to the AI service either: the notice then says only what
 // does happen.

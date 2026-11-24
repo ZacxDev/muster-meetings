@@ -51,6 +51,15 @@ func first(s string) string {
 	return ""
 }
 
+// FromName is the notes' sender name: "<owner> via Meetings" (decision 7),
+// "Meetings" when muster gave no name.
+func FromName(owner string) string {
+	if o := clean(owner); o != "" {
+		return o + " via Meetings"
+	}
+	return "Meetings"
+}
+
 // Yours reports whether an item assigned to assignee is the recipient's:
 // the assignee is their whole name (case and punctuation aside), or their
 // first name alone when no other name in names starts with it. An empty

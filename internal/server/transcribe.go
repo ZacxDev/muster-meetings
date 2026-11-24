@@ -211,7 +211,16 @@ func (s *Server) Transcribing() bool { return s.cfg.Engine != nil }
 // the "transcribed" clause and the Transcribing badge only while it has an
 // engine, and the recording's only while it has a bucket (lobby.NoticeFull). Every page and stream takes its notice here.
 func (s *Server) noticeFor(record, ai bool) lobby.Notice {
-	return lobby.NoticeFull(record, ai, s.Transcribing(), s.Recording())
+	n := lobby.NoticeFull(record, ai, s.Transcribing(), s.Recording())
+	// With the analysis configured, the AI clause says what is sent and
+	// what for: the frames of shared screens too, when they are analysed
+	// (a recorded meeting, a vision model). Without it, the notice is as it
+	// always was.
+	if s.ai != nil {
+		frames := s.ai.visionModel != "" && record && s.Recording()
+		n = n.WithAIClause(frames)
+	}
+	return n
 }
 
 // sinceStart is now in meeting time (ms from start), never negative.

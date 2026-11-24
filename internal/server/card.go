@@ -117,6 +117,9 @@ type cardPayload struct {
 	ID    string `json:"id"`
 	Name  string `json:"name"`
 	Owner string `json:"owner"`
+	// Notes says the address is also kept for the meeting notes (only with
+	// mail configured: the card's consent then says so).
+	Notes bool `json:"notes,omitempty"`
 }
 
 // offerCard mints participant pid's card when contacts is configured, the
@@ -135,7 +138,7 @@ func (s *Server) offerCard(ctx context.Context, subject, pid string) *cardPayloa
 	if !ok {
 		return nil
 	}
-	return &cardPayload{ID: off.ID, Name: off.TypedName, Owner: off.OwnerName}
+	return &cardPayload{ID: off.ID, Name: off.TypedName, Owner: off.OwnerName, Notes: s.notes != nil}
 }
 
 // endedPayload is a guest's "ended" event: its message, and the card when
@@ -227,6 +230,8 @@ func (s *Server) handleCard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.contacts.outbox.Kick()
+	// With mail on, the address is also kept for this meeting's notes.
+	s.keepCardEmail(r.Context(), spent, email)
 	writeJSON(w, http.StatusOK, map[string]any{"message": CardSentMessage(spent.OwnerName)})
 }
 

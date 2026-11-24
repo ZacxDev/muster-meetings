@@ -294,6 +294,7 @@ func (s *Server) handleGuestEvents(w http.ResponseWriter, r *http.Request) {
 	var last string
 	minted := false
 	tc := newTCursor()
+	var lastItems string
 	s.stream(ctx, w, f, g.MeetingID, false, func() (bool, error) {
 		cur, err := s.store.GuestByParticipant(r.Context(), g.ParticipantID, s.cfg.Now())
 		if err != nil {
@@ -330,6 +331,11 @@ func (s *Server) handleGuestEvents(w http.ResponseWriter, r *http.Request) {
 			if err := sse(w, f, "meeting", snap); err != nil {
 				return true, err
 			}
+		}
+		// The live action items, as the owner sees them (only with the
+		// analysis configured).
+		if err := s.sendItems(r.Context(), w, f, cur.MeetingID, &lastItems); err != nil {
+			return true, err
 		}
 		// The live transcript (decision 6: guests see what the owner sees),
 		// of this ticket's own meeting only, and only while admitted (checked

@@ -1061,6 +1061,9 @@ type Bundle struct {
 	Segments        []bundleSegment     `json:"segments"`
 	Frames          []frameRef          `json:"frames"`
 	FramesAvailable bool                `json:"frames_available"`
+	// Analysis is the current run's items, frame notes and summary (only
+	// with the analysis configured, and once a run exists).
+	Analysis *bundleAnalysis `json:"analysis,omitempty"`
 }
 
 func (s *Server) bundle(ctx context.Context, repo *store.OwnerRepo, id string) (Bundle, error) {
@@ -1120,10 +1123,21 @@ func (s *Server) bundle(ctx context.Context, repo *store.OwnerRepo, id string) (
 }
 
 func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request, repo *store.OwnerRepo) {
-	b, err := s.bundle(r.Context(), repo, r.PathValue("id"))
+	id := r.PathValue("id")
+	b, err := s.bundle(r.Context(), repo, id)
 	if err != nil {
 		s.meetingErr(w, err)
 		return
+	}
+	if b.Analysis, err = s.analysisOf(r.Context(), id); err != nil {
+		s.meetingErr(w, err)
+		return
+	}
+	// An agent's token reads frames on its own route.
+	if strings.HasPrefix(r.URL.Path, "/api/agent/") {
+		for i := range b.Frames {
+			b.Frames[i].Href = "/api/agent/meetings/" + id + "/frame?at=" + strconv.FormatInt(b.Frames[i].MeetingMS, 10)
+		}
 	}
 	writeJSON(w, http.StatusOK, b)
 }
@@ -1143,7 +1157,7 @@ func (s *Server) handleFrame(w http.ResponseWriter, r *http.Request, repo *store
 		s.meetingErr(w, err)
 		return
 	}
-	if !s.cfg.Frames.Available() {
+	if !s.cfg.Frames.Available() || s.cfg.S3 == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "frame sampling is off: this plugin has no ffmpeg"})
 		return
 	}

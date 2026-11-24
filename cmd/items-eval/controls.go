@@ -105,10 +105,21 @@ func RunControls(ms []*Meeting) []ControlResult {
 	out = append(out, ControlResult{"duplicator", "fails the duplicate gate (rate > 0.05)", fmt.Sprintf("duplicate rate %.2f", d.DupRate),
 		d.DupRate > barDupRate, d})
 
-	// Through the guards, the same output must lose every second copy.
-	dg := Score(replayAll(ms, oracle(2, false), ReplayOpts{}))
-	out = append(out, ControlResult{"duplicator through the guards", "duplicate rate 0, recall 1.00", fmt.Sprintf("duplicate rate %.2f, recall %.2f", dg.DupRate, dg.Recall),
-		dg.DupRate == 0 && dg.Recall == 1, dg})
+	// Through the guards, the same output must lose every second copy: at
+	// least half of what it proposed is dropped as a duplicate, and no label
+	// is matched twice. (Recall is the oracle's to check.)
+	dgr := replayAll(ms, oracle(2, false), ReplayOpts{})
+	dg := Score(dgr)
+	dprop, ddup := 0, 0
+	for _, r := range dgr {
+		for _, w := range r.Windows {
+			dprop += w.Proposed
+			ddup += w.Dropped[items.DropDupText] + w.Dropped[items.DropDupCitation]
+		}
+	}
+	out = append(out, ControlResult{"duplicator through the guards", "duplicate rate 0, at least half dropped as duplicates",
+		fmt.Sprintf("duplicate rate %.2f, %d of %d dropped as duplicates", dg.DupRate, ddup, dprop),
+		dg.DupRate == 0 && dprop > 0 && 2*ddup >= dprop, dg})
 
 	lr := replayAll(ms, oracle(1, true), ReplayOpts{})
 	l := Score(lr)

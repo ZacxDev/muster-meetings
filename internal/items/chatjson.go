@@ -124,11 +124,27 @@ func (c *ChatJSON) Propose(ctx context.Context, w Window) (Result, error) {
 			return res, &Error{Class: Schema, Status: 200, Msg: "an item is missing a required field"}
 		}
 		res.Items = append(res.Items, Item{
-			Text:     strings.TrimSpace(*it.Task),
-			Assignee: strings.TrimSpace(*it.Owner),
-			Due:      strings.TrimSpace(*it.Due),
-			Segments: *it.SegmentIDs,
+			Text:     str(it.Task),
+			Assignee: str(it.Owner),
+			Due:      str(it.Due),
+			Segments: ids(it.SegmentIDs),
 		})
 	}
 	return res, nil
+}
+
+// str and ids read an optional field ("" and none for absent): the check
+// above, not a nil dereference, is what refuses a missing field.
+func str(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return strings.TrimSpace(*p)
+}
+
+func ids(p *[]int64) []int64 {
+	if p == nil {
+		return nil
+	}
+	return *p
 }

@@ -53,6 +53,15 @@ func TestTheCorpusPassesItsLint(t *testing.T) {
 	}
 }
 
+func loadSTT(t *testing.T) []*Meeting {
+	t.Helper()
+	ms, err := LoadSTT(corpusDir, load(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ms
+}
+
 // broken is the real corpus with one change, for the lint's negative cases.
 func broken(t *testing.T, f func([]*Meeting)) []string {
 	ms := load(t)
@@ -150,7 +159,16 @@ func TestTheLintWantsTwelveMeetings(t *testing.T) {
 }
 
 func TestTheControlsScoreAsStatedOnTheCorpus(t *testing.T) {
-	cs := RunControls(load(t))
+	testControls(t, load(t))
+}
+
+func TestTheControlsScoreAsStatedOnTheSTTCorpus(t *testing.T) {
+	testControls(t, loadSTT(t))
+}
+
+func testControls(t *testing.T, ms []*Meeting) {
+	t.Helper()
+	cs := RunControls(ms)
 	if len(cs) != 5 {
 		t.Fatalf("%d controls, want 5", len(cs))
 	}
@@ -205,9 +223,10 @@ func TestARunGoesThroughProductionsClientWithItsProviderObject(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d: %s %s", code, so.String(), se.String())
 	}
-	windows := CorpusStats(load(t)).Windows
+	// Every model is replayed on both corpora: the clean one and the STT one.
+	windows := CorpusStats(load(t)).Windows + CorpusStats(loadSTT(t)).Windows
 	if len(f.bodies) != 2*windows {
-		t.Errorf("%d requests, want one per window per model (2 × %d)", len(f.bodies), windows)
+		t.Errorf("%d requests, want one per window per corpus per model (2 × %d)", len(f.bodies), windows)
 	}
 	for _, b := range f.bodies {
 		p, _ := b["provider"].(map[string]any)
@@ -226,8 +245,15 @@ func TestARunGoesThroughProductionsClientWithItsProviderObject(t *testing.T) {
 	if len(res.Requests) != 2*windows || res.Requests[0].Provider != "FakeProvider" || res.Choice != "off" || len(res.Models) != 2 {
 		t.Errorf("result: %d requests, first %+v, choice %s, %d models", len(res.Requests), res.Requests[0], res.Choice, len(res.Models))
 	}
-	if res.Models[0].Pass || res.Models[0].Worst.Recall != 0 {
-		t.Errorf("a model that found nothing passed: %+v", res.Models[0].Gates)
+	if res.Models[0].Pass || res.Models[0].STT.Worst.Recall != 0 || res.Models[0].Clean.Worst.Recall != 0 {
+		t.Errorf("a model that found nothing passed: %+v", res.Models[0].STT.Gates)
+	}
+	corpora := map[string]int{}
+	for _, r := range res.Requests {
+		corpora[r.Corpus]++
+	}
+	if corpora["clean"] == 0 || corpora["stt"] == 0 || len(res.STTMeetings) != 12 || len(res.STTControls) != 5 {
+		t.Errorf("requests per corpus %v, %d stt meetings, %d stt controls", corpora, len(res.STTMeetings), len(res.STTControls))
 	}
 	if !strings.Contains(so.String(), "**Choice:** `off`.") {
 		t.Errorf("stdout has no choice:\n%s", so.String())
@@ -258,7 +284,9 @@ func TestAFailedControlStopsTheRunBeforeAnyModel(t *testing.T) {
 	files, _ := filepath.Glob(filepath.Join(corpusDir, "*.yaml"))
 	for _, src := range files {
 		b, _ := os.ReadFile(src)
-		if filepath.Base(src) == "m01-standup.yaml" {
+		// The variant carries the same labels, so the change is made to both
+		// (else the STT lint, not the control, would stop the run).
+		if n := filepath.Base(src); n == "m01-standup.yaml" || n == "m01-standup.stt.yaml" {
 			b = bytes.Replace(b, []byte(`text: "Send the release notes draft to the team"`), []byte(`text: "Renew the staging certificate"`), 1)
 		}
 		if err := os.WriteFile(filepath.Join(dir, filepath.Base(src)), b, 0o644); err != nil {

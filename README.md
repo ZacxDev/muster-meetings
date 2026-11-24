@@ -1029,8 +1029,13 @@ adapter, `items.Guard`, and the failure, backoff and "paused after 3"
 rules that phase 4b's worker drives on the wall clock). It scores by cited segments (no model judges a model), runs
 its four controls first (null, oracle, duplicator, liar: a control that
 does not score as stated stops the run before any model is called), and
-picks the default model. **It costs money and needs a key, so it is run by
-hand, never in CI:**
+picks the default model. It replays every model on two corpora, the
+meetings as written and the same meetings passed through the plugin's real
+STT from synthesised speech (`<name>.stt.yaml`, made by
+`cmd/items-corpus-stt`), reports both, and **gates on both**: a model
+passes only if it passes on each, every metric taking the worse of the two,
+and the choice reads those worst-of-both numbers.
+**It costs money and needs a key, so it is run by hand, never in CI:**
 
 ```sh
 OPENROUTER_API_KEY=… go run ./cmd/items-eval \
@@ -1069,7 +1074,8 @@ phase 4b.
 | `compose.meetings.yml` | the fragment for muster's Compose stack |
 | `deploy/deploy_test.go` | the rendered objects and both LiveKit configs, pinned |
 | `internal/items` | action items: the `extract` and `chat_json` adapters, their OpenRouter client, the guards after the model, the window selection and the worker's loop (`items.Loop`), `MEETINGS_ITEMS_PROVIDER_PREFS` |
-| `cmd/items-eval`, `testdata/items-eval` | the action-item evaluation (run by hand) and its labelled synthetic corpus |
+| `cmd/items-eval`, `testdata/items-eval` | the action-item evaluation (run by hand) and its labelled synthetic corpus, as written and through the real STT |
+| `cmd/items-corpus-stt`, `internal/sttcorpus` | makes the STT corpus (Piper, then the plugin's STT engine; run by hand), its word error rate and its writer |
 | `scripts/mutate` | the security-gate mutation sweep |
 | `scripts/e2e-harness`, `e2e/` | the browser tests: the `/enter` frame gate, the lobby at 390×844, two owner devices, the transcript in both panels, live captions, and the UI (`ui-*.spec.ts`, goldens in `e2e/goldens/`); the harness also serves muster's UI kit from `e2e/fixtures/ui-kit` |
 | `scripts/vendor-ui-kit.sh`, `scripts/update-goldens.sh` | render muster's UI kit at a pinned commit (the fixtures and the built-in fallback); remake the visual goldens in the pinned Playwright image |

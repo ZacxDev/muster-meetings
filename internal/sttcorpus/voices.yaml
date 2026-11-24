@@ -1,0 +1,59 @@
+# The voices cmd/items-corpus-stt speaks the corpus with (embedded by
+# internal/sttcorpus; the corpus lint checks each variant against it): Piper models from
+# rhasspy/piper-voices at one pinned revision, downloaded at run time into
+# the tool's cache (never committed) and checked against these sha256s.
+#
+# Every speaker name in testdata/items-eval/ has a voice here, as
+# "<model>#<speaker id>"; within one meeting no two speakers share a voice
+# (the tool and its test refuse it), and the models cover two accents.
+revision: e5349433ed883a32f893a434dc43a6c66b95ef7c
+models:
+  en_GB-vctk-medium:
+    path: en/en_GB/vctk/medium
+    accent: en_GB
+    sha256: fc3d92d266b1a6c03af2a38215e0eee430ca7fb360f641d7c3dcb17c7670c0f3
+    config_sha256: 8cc5a7678bf893c35cb6fde5d0812fb7e2b63e1eef54db250afd525277471f2d
+  en_GB-northern_english_male-medium:
+    path: en/en_GB/northern_english_male/medium
+    accent: en_GB
+    sha256: 41199d55776c142c151e018cf77bea80ca5f01b7b834f81cd781df5b751bf2fb
+    config_sha256: 0159d481609238e47e31114496d004b86d7b49d1f95a81adfb6e5ff758d99013
+  en_US-libritts_r-medium:
+    path: en/en_US/libritts_r/medium
+    accent: en_US
+    sha256: 10bb85e071d616fcf4071f369f1799d0491492ab3c5d552ec19fb548fac13195
+    config_sha256: b471dc60d2d8335e819c393d196d6fbf792817f40051257b269878505bc9afb3
+  en_US-ryan-medium:
+    path: en/en_US/ryan/medium
+    accent: en_US
+    sha256: 33b53106e049f68a51f014e4fa10bf5a04e0f7d6668692dc05228cc4554c1d71
+    config_sha256: d29061675e660113d51f81650e922134d94cab750271f9ce2bcb05121f925a60
+speakers:
+  Ada: en_GB-vctk-medium#0
+  Bo: en_US-ryan-medium#0
+  Cleo: en_US-libritts_r-medium#1
+  Dev: en_GB-northern_english_male-medium#0
+  Eli: en_US-libritts_r-medium#2
+  Fay: en_GB-vctk-medium#1
+  Gus: en_GB-vctk-medium#2
+  Hana: en_GB-vctk-medium#3
+  Ivo: en_US-libritts_r-medium#3
+  Juno: en_US-libritts_r-medium#4
+  Kai: en_US-libritts_r-medium#5
+  Lena: en_GB-vctk-medium#4
+  Mo: en_US-ryan-medium#0
+  Nia: en_US-libritts_r-medium#6
+  Oren: en_GB-northern_english_male-medium#0
+  Pia: en_GB-vctk-medium#5
+  Quin: en_GB-vctk-medium#6
+  Rae: en_US-libritts_r-medium#7
+  Sol: en_US-ryan-medium#0
+  Tess: en_US-libritts_r-medium#8
+  Uma: en_GB-vctk-medium#7
+  Vic: en_GB-vctk-medium#8
+  Wren: en_GB-vctk-medium#9
+  Xan: en_US-libritts_r-medium#9
+  Yara: en_US-libritts_r-medium#10
+  Zed: en_GB-northern_english_male-medium#0
+  Inès: en_GB-vctk-medium#10
+  Søren: en_US-libritts_r-medium#11

@@ -171,6 +171,13 @@ const (
 	ieMain   = "cmd/items-eval/main.go"
 	ieCorpus = "cmd/items-eval/corpus.go"
 	ieReplay = "cmd/items-eval/replay.go"
+	// the STT corpus (cmd/items-corpus-stt, internal/sttcorpus)
+	ieSTT   = "cmd/items-eval/sttlint.go"
+	scWER   = "internal/sttcorpus/wer.go"
+	scVar   = "internal/sttcorpus/variant.go"
+	icsMain = "cmd/items-corpus-stt/main.go"
+	icsTr   = "cmd/items-corpus-stt/transcribe.go"
+	scVoice = "internal/sttcorpus/voices.go"
 )
 
 var mutants = []mutant{
@@ -283,7 +290,7 @@ var mutants = []mutant{
 		pkg: "./cmd/items-eval", test: "TestWorstIsEachMetricsWorstRun", want: "worst ="},
 	{name: "items-eval controls: the oracle's check removed", file: ieCtl, from: "o.Recall == 1 && o.Precision == 1, o})", to: "true, o})",
 		pkg: "./cmd/items-eval", test: "TestAFailedControlStopsTheRunBeforeAnyModel", want: "a failing oracle: exit 0"},
-	{name: "items-eval controls: a failed control does not stop the run", file: ieMain, from: "if !ControlsPass(res.Controls) {", to: "if false {",
+	{name: "items-eval controls: a failed control does not stop the run", file: ieMain, from: "if !ControlsPass(res.Controls) || !ControlsPass(res.STTControls) {", to: "if false {",
 		pkg: "./cmd/items-eval", test: "TestAFailedControlStopsTheRunBeforeAnyModel", want: "a failing oracle: exit 0"},
 	{name: "items-eval controls: the liar cites only the window", file: ieCtl, from: "in = []int64{in[0], top + 1000}", to: "in = []int64{in[0]}",
 		pkg: "./cmd/items-eval", test: "TestTheControlsScoreAsStatedOnTheCorpus", want: "control liar"},
@@ -295,6 +302,68 @@ var mutants = []mutant{
 		pkg: "./cmd/items-eval", test: "TestTheLintCatchesEachProblem", want: "a label citing a segment not in its meeting"},
 	{name: "items-eval lint: a missing hard case accepted", file: ieCorpus, from: "if st.HardCases[k] < minPerHardCase {", to: "if false {",
 		pkg: "./cmd/items-eval", test: "TestTheLintCatchesEachProblem", want: "no retracted case"},
+
+	// ---- action items: the STT corpus (the gate's corpus) ----
+	{name: "stt lint: a source without its variant accepted", file: ieSTT, from: "if variant[sttcorpus.VariantName(m.file)] == nil {", to: "if false {",
+		pkg: "./cmd/items-eval", test: "TestTheSTTLintCatchesEachProblem", want: "a source without its variant"},
+	{name: "stt lint: a changed label accepted", file: ieSTT, from: "if !reflect.DeepEqual(v.Labels[i], src.Labels[i]) {", to: "if false {",
+		pkg: "./cmd/items-eval", test: "TestTheSTTLintCatchesEachProblem", want: "a changed label"},
+	{name: "stt lint: a missing word error rate accepted", file: ieSTT, from: "\t\tbad(\"%s: records no word error rate\", where)\n", to: "",
+		pkg: "./cmd/items-eval", test: "TestTheSTTLintCatchesEachProblem", want: "no word error rate: lint said"},
+	{name: "stt lint: a recorded WER not checked against the text", file: ieSTT, from: "if *in.WER != sc.Rate() || in.Words != sc.Words || in.Errors != sc.Errors {", to: "if false {",
+		pkg: "./cmd/items-eval", test: "TestTheSTTLintCatchesEachProblem", want: "a word error rate its text does not give"},
+	{name: "stt lint: a changed speaker list accepted", file: ieSTT, from: "if !reflect.DeepEqual(v.Speakers, src.Speakers) {", to: "if false {",
+		pkg: "./cmd/items-eval", test: "TestTheSTTLintCatchesEachProblem", want: "a changed speaker list: lint said"},
+	{name: "stt lint: a segment's changed speaker accepted", file: ieSTT, from: "if s.ID != o.ID || s.Speaker != o.Speaker {", to: "if s.ID != o.ID {",
+		pkg: "./cmd/items-eval", test: "TestTheSTTLintCatchesEachProblem", want: "a segment's speaker changed: lint said"},
+	{name: "stt lint: a variant from another tool version accepted", file: ieSTT, from: "} else if in.Tool != sttcorpus.Tool {", to: "} else if false {",
+		pkg: "./cmd/items-eval", test: "TestTheSTTLintCatchesEachProblem", want: "made by another tool version: lint said"},
+	{name: "stt lint: lines from an engine it does not name accepted", file: ieSTT, from: "case in.Engine != sttcorpus.EngineMixed && (len(engines) != 1 || engines[0] != in.Engine):", to: "case false:",
+		pkg: "./cmd/items-eval", test: "TestTheSTTLintCatchesEachProblem", want: "lines from an engine it does not name: lint said"},
+	{name: "stt lint: mixed with lines from one engine accepted", file: ieSTT, from: "case in.Engine == sttcorpus.EngineMixed && len(engines) < 2:", to: "case false:",
+		pkg: "./cmd/items-eval", test: "TestTheSTTLintCatchesEachProblem", want: "mixed with lines from one engine: lint said"},
+	{name: "stt lint: a voice voices.yaml does not give accepted", file: ieSTT, from: "if want, ok := cfg.Speakers[n]; !ok || in.Voices[n] != want {", to: "if want, ok := cfg.Speakers[n]; false && (!ok || in.Voices[n] != want) {",
+		pkg: "./cmd/items-eval", test: "TestTheSTTLintCatchesEachProblem", want: "a voice voices.yaml does not give: lint said"},
+	{name: "stt run: the STT lint not run", file: ieMain, from: "if p := append(Lint(ms), LintSTT(ms, sms)...); len(p) > 0 {", to: "if p := Lint(ms); len(p) > 0 {",
+		pkg: "./cmd/items-eval", test: "TestARunWithoutTheSTTCorpusScoresNoModel", want: "a missing variant: exit 0"},
+	{name: "gate: the clean corpus left out of the worst-of-both", file: ieScore, from: "w := Worst([]Metrics{clean.Worst, stt.Worst})", to: "w := Worst([]Metrics{stt.Worst})",
+		pkg: "./cmd/items-eval", test: "TestAModelMustPassBothCorpora", want: "0.75 on clean, perfect on stt: pass true"},
+	{name: "gate: the STT corpus left out of the worst-of-both", file: ieScore, from: "w := Worst([]Metrics{clean.Worst, stt.Worst})", to: "w := Worst([]Metrics{clean.Worst})",
+		pkg: "./cmd/items-eval", test: "TestAModelMustPassBothCorpora", want: "perfect on clean, 0.75 on stt: pass true"},
+	{name: "gate: the pass read from the STT corpus only", file: ieScore, from: "s.Pass = s.Combined.Pass", to: "s.Pass = s.STT.Pass",
+		pkg: "./cmd/items-eval", test: "TestAModelMustPassBothCorpora", want: "0.75 on clean, perfect on stt: pass true"},
+	{name: "gate: the pass read from the clean corpus only", file: ieScore, from: "s.Pass = s.Combined.Pass", to: "s.Pass = s.Clean.Pass",
+		pkg: "./cmd/items-eval", test: "TestAModelMustPassBothCorpora", want: "perfect on clean, 0.75 on stt: pass true"},
+	{name: "gate: the choice read from the STT corpus only", file: ieScore, from: "w, b := s.Combined.Worst, Metrics{}", to: "w, b := s.STT.Worst, Metrics{}",
+		more: []edit{{ieScore, "b = ss[best].Combined.Worst", "b = ss[best].STT.Worst"}},
+		pkg:  "./cmd/items-eval", test: "TestAModelMustPassBothCorpora", want: "A better on stt: Choose = a/x"},
+	{name: "gate: the choice read from the clean corpus only", file: ieScore, from: "w, b := s.Combined.Worst, Metrics{}", to: "w, b := s.Clean.Worst, Metrics{}",
+		more: []edit{{ieScore, "b = ss[best].Combined.Worst", "b = ss[best].Clean.Worst"}},
+		pkg:  "./cmd/items-eval", test: "TestAModelMustPassBothCorpora", want: "A better on clean: Choose = a/x"},
+	{name: "gate: a corpus with no calls hidden by the other's", file: ieScore, from: "w.Calls = min(w.Calls, r.Calls)", to: "",
+		pkg: "./cmd/items-eval", test: "TestWorstIsEachMetricsWorstRun", want: "worst ="},
+	{name: "stt run: a failed STT control does not stop the run", file: ieMain, from: "if !ControlsPass(res.Controls) || !ControlsPass(res.STTControls) {", to: "if !ControlsPass(res.Controls) {",
+		pkg: "./cmd/items-eval", test: "TestAFailedSTTControlStopsTheRunBeforeAnyModel", want: "a failing STT oracle: exit 0"},
+	{name: "stt corpus: a variant timed by its own words", file: ieCorpus, from: "if m.source != nil {\n\t\tm.buildVariant()", to: "if false {\n\t\tm.buildVariant()",
+		pkg: "./cmd/items-eval", test: "TestAnEmptyTranscriptIsNoLine", want: "timeline"},
+	{name: "wer: a substitution not counted", file: scWER, from: "if ref[i-1] != hyp[j-1] {", to: "if false {",
+		pkg: "./internal/sttcorpus", test: "TestDistanceAndRate", want: `Distance("the cat sat", "the bat sat") = 0, want 1`},
+	{name: "wer: case not ignored", file: scWER, from: `s = strings.NewReplacer("’", "'", "‘", "'").Replace(strings.ToLower(s))`, to: `s = strings.NewReplacer("’", "'", "‘", "'").Replace(s)`,
+		pkg: "./internal/sttcorpus", test: "TestWordsNormalises", want: "Words = "},
+	{name: "variant writer: the text not replaced", file: scVar, from: `text.Value, text.Tag, text.Style = t, "!!str", yaml.DoubleQuotedStyle`, to: `text.Tag = "!!str"`,
+		pkg: "./internal/sttcorpus", test: "TestWriteKeepsEverythingButTheText", want: "text \"Bo, can you renew the cert today?\", want"},
+	{name: "variant writer: a segment without a transcript written", file: scVar, from: "if !ok {\n\t\t\treturn nil, fmt.Errorf(\"segment %d has no transcript\", id)", to: "if !ok && false {\n\t\t\treturn nil, fmt.Errorf(\"segment %d has no transcript\", id)",
+		pkg: "./internal/sttcorpus", test: "TestWriteRefusesAMissingOrAnExtraTranscript", want: "a missing transcript"},
+	{name: "corpus-stt: a late mark not amended onto its line", file: icsTr, from: "l.Text = text + lead", to: "l.Text = text",
+		pkg: "./cmd/items-corpus-stt", test: "TestAMeetingThroughTheNemotronEngine", want: `segment 9701: "bo can you renew the search today", want`},
+	{name: "corpus-stt: a gap written as text", file: icsTr, from: "if l.Gap {", to: "if false {",
+		pkg: "./cmd/items-corpus-stt", test: "TestAssignByOverlapAndRefuseAGap", want: "a gap: <nil>"},
+	{name: "corpus-stt: every overlapping line to the first segment", file: icsTr, from: "best, bestOv = i, ov", to: "best, bestOv = min(i, 0), ov",
+		pkg: "./cmd/items-corpus-stt", test: "TestAssignByOverlapAndRefuseAGap", want: "assigned map"},
+	{name: "corpus-stt: two speakers of a meeting on one voice", file: scVoice, from: "if o, dup := by[v]; dup {", to: "if o, dup := by[v]; false && dup {",
+		pkg: "./cmd/items-corpus-stt", test: "TestTheVoiceMapCoversTheCorpus", want: "two speakers on one voice: <nil>"},
+	{name: "corpus-stt: the record's WER over the wrong text", file: icsMain, from: "sc = sc.Add(s.Text, texts[s.ID])", to: "sc = sc.Add(s.Text, s.Text)",
+		pkg: "./cmd/items-corpus-stt", test: "TestAMeetingThroughTheNemotronEngine", want: "want 7 errors over 12 words"},
 
 	// ---- /enter: the frame gate (sign-in CSRF) ----
 	{name: "frame gate: removed", file: srv, from: `if ok, why := framed(r); !ok {`, to: `if ok, why := framed(r); false && !ok {`,

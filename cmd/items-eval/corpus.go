@@ -12,6 +12,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/ZacxDev/muster-meetings/internal/items"
+	"github.com/ZacxDev/muster-meetings/internal/sttcorpus"
 )
 
 // The meeting kinds the design names.
@@ -58,9 +59,15 @@ type Meeting struct {
 	Segments []CSeg    `yaml:"segments"`
 	Labels   []Label   `yaml:"labels"`
 	Traps    []Trap    `yaml:"traps"`
+	// STT is a speech-to-text variant's record (cmd/items-corpus-stt): a
+	// source meeting has none.
+	STT *sttcorpus.Info `yaml:"stt"`
 
 	file     string
 	timeline []items.Segment
+	// source is a variant's source meeting: its timeline is the source's,
+	// with the variant's text.
+	source *Meeting
 }
 
 type Speaker struct {
@@ -92,16 +99,34 @@ type Trap struct {
 	Segments []int64 `yaml:"segments"`
 }
 
-// LoadCorpus reads every *.yaml in dir, in name order. Unknown fields are
-// refused.
+// LoadCorpus reads every source meeting in dir (each *.yaml that is not a
+// variant, *.stt.yaml), in name order. Unknown fields are refused.
 func LoadCorpus(dir string) ([]*Meeting, error) {
+	return loadDir(dir, false, nil)
+}
+
+// LoadSTT reads every speech-to-text variant in dir (*.stt.yaml), in name
+// order, each paired with its source in clean by file name: its timeline is
+// the source's segment times with its own text.
+func LoadSTT(dir string, clean []*Meeting) ([]*Meeting, error) {
+	return loadDir(dir, true, clean)
+}
+
+func loadDir(dir string, variants bool, clean []*Meeting) ([]*Meeting, error) {
 	files, err := filepath.Glob(filepath.Join(dir, "*.yaml"))
 	if err != nil {
 		return nil, err
 	}
 	sort.Strings(files)
+	bySource := map[string]*Meeting{}
+	for _, m := range clean {
+		bySource[sttcorpus.VariantName(m.file)] = m
+	}
 	var out []*Meeting
 	for _, f := range files {
+		if sttcorpus.IsVariant(f) != variants {
+			continue
+		}
 		b, err := os.ReadFile(f)
 		if err != nil {
 			return nil, err
@@ -113,10 +138,11 @@ func LoadCorpus(dir string) ([]*Meeting, error) {
 			return nil, fmt.Errorf("%s: %w", f, err)
 		}
 		m.file = filepath.Base(f)
+		m.source = bySource[m.file]
 		m.build()
 		out = append(out, m)
 	}
-	if len(out) == 0 {
+	if len(out) == 0 && !variants {
 		return nil, fmt.Errorf("%s: no meetings (*.yaml)", dir)
 	}
 	return out, nil
@@ -124,7 +150,15 @@ func LoadCorpus(dir string) ([]*Meeting, error) {
 
 // build derives the timeline: each segment starts segGapMS after the last
 // ends and lasts Dur seconds, else one second per wordsPerSecond words.
+//
+// A variant's segment keeps its source segment's times, so its windows are
+// the source's; a segment the engine heard nothing in is left out, as
+// production stores no line for it.
 func (m *Meeting) build() {
+	if m.source != nil {
+		m.buildVariant()
+		return
+	}
 	guest := map[string]bool{}
 	for _, s := range m.Speakers {
 		guest[s.Name] = s.Guest
@@ -142,11 +176,30 @@ func (m *Meeting) build() {
 	}
 }
 
+func (m *Meeting) buildVariant() {
+	at := map[int64]items.Segment{}
+	for _, s := range m.source.Timeline() {
+		at[s.ID] = s
+	}
+	m.timeline = nil
+	for _, s := range m.Segments {
+		src, ok := at[s.ID]
+		if !ok || strings.TrimSpace(s.Text) == "" {
+			continue
+		}
+		src.Text = s.Text
+		m.timeline = append(m.timeline, src)
+	}
+}
+
 // Timeline is the meeting's final segments with their times.
 func (m *Meeting) Timeline() []items.Segment { return m.timeline }
 
 // DurationMS is the meeting's length: the last segment's end.
 func (m *Meeting) DurationMS() int64 {
+	if m.source != nil {
+		return m.source.DurationMS()
+	}
 	if len(m.timeline) == 0 {
 		return 0
 	}
@@ -268,6 +321,9 @@ func Lint(ms []*Meeting) []string {
 			bad("%s: meeting id %q is empty or not unique", where, m.ID)
 		}
 		seenMeeting[m.ID] = true
+		if m.STT != nil {
+			bad("%s: has an stt block: a source meeting is written, not transcribed", where)
+		}
 		if !contains(meetingKinds, m.Kind) {
 			bad("%s: kind %q is not one of %v", where, m.Kind, meetingKinds)
 		}

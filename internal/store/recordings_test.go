@@ -56,7 +56,7 @@ func TestMigration6KeepsEveryRowAndStampsEndedMeetings(t *testing.T) {
 	var purgeOld, purgeOpen sql.NullInt64
 	db.QueryRow(`SELECT title, purge_recording_at FROM meetings WHERE id = 'bWlncmF0aW9uNm1l'`).Scan(&title, &purgeOld)
 	db.QueryRow(`SELECT purge_recording_at FROM meetings WHERE id = 'b3Blbm1lZXRpbmc2'`).Scan(&purgeOpen)
-	if v != 6 || days != 0 || title != "old" || purgeOld.Valid || purgeOpen.Valid {
+	if v != store.SchemaForTest || days != 0 || title != "old" || purgeOld.Valid || purgeOpen.Valid {
 		t.Fatalf("after migration 6: schema %d, retention %d, title %q, purge(ended) %v, purge(open) %v", v, days, title, purgeOld, purgeOpen)
 	}
 }

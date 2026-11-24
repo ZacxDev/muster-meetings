@@ -45,6 +45,9 @@ type Item struct {
 	Assignee string  `json:"assignee,omitempty"`
 	Due      string  `json:"due,omitempty"`
 	Segments []int64 `json:"segments"`
+	// Frames are the meeting times of the screen frames that show it (the
+	// frame analysis' items only; GuardVision).
+	Frames []int64 `json:"frames,omitempty"`
 }
 
 // Window is one call's input: the final segments the model may cite, and

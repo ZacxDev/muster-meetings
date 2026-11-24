@@ -30,3 +30,27 @@ func (s *Store) LiveSharesForTest(meetingID string) int {
 	s.db.QueryRow(`SELECT count(*) FROM recording_shares WHERE meeting_id = ? AND revoked_at IS NULL`, meetingID).Scan(&n)
 	return n
 }
+
+// MigrationsBeforePostCallForTest are migrations 1–6: the schema before the
+// post-call pass (migration 7).
+var MigrationsBeforePostCallForTest = append([]string(nil), migrations[:6]...)
+
+// ExecForTest runs one statement on the database.
+func (s *Store) ExecForTest(q string, args ...any) error {
+	_, err := s.db.Exec(q, args...)
+	return err
+}
+
+// DraftStatesForTest is every draft of a meeting, superseded included:
+// recipient → states in order.
+func (s *Store) DraftStatesForTest(meetingID string) map[string][]string {
+	rows, _ := s.db.Query(`SELECT recipient, state FROM mail_drafts WHERE meeting_id = ? ORDER BY created_at, rowid`, meetingID)
+	defer rows.Close()
+	out := map[string][]string{}
+	for rows.Next() {
+		var r, st string
+		rows.Scan(&r, &st)
+		out[r] = append(out[r], st)
+	}
+	return out
+}

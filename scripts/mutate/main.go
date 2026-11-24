@@ -1089,7 +1089,7 @@ var mutants = []mutant{
 		pkg: "./internal/server", test: "TestTheExportsFenceGuestSpeech", want: "txt ="},
 	{name: "export: a fence mark in a name not escaped (txt)", file: tscript, from: "name = strings.NewReplacer(`\\`, `\\\\`, \"«\", `\\«`, \"»\", `\\»`).Replace(oneLine(name))", to: "name = oneLine(name)",
 		pkg: "./internal/server", test: "TestTheExportsFenceGuestSpeech", want: "txt ="},
-	{name: "notice: transcribed without an engine", file: trans, from: "return lobby.NoticeFull(record, ai, s.Transcribing(), s.Recording())", to: "return lobby.NoticeFull(record, ai, true, s.Recording())",
+	{name: "notice: transcribed without an engine", file: trans, from: "n := lobby.NoticeFull(record, ai, s.Transcribing(), s.Recording())", to: "n := lobby.NoticeFull(record, ai, true, s.Recording())",
 		pkg: "./internal/server", test: "TestTheNoticeSaysTranscribedOnlyWithAnEngine", want: "engine false"},
 	{name: "notice: a knock's transcribed answer not checked", file: guest, from: "if in.Notice.Transcribed == nil || *in.Notice.Transcribed != s.Transcribing() {", to: "if false {",
 		pkg: "./internal/server", test: "TestTheNoticeSaysTranscribedOnlyWithAnEngine", want: "want 409 with the current notice"},

@@ -539,8 +539,8 @@ var mutants = []mutant{
 		pkg: "./internal/store", test: "TestASwitchGoesBackOnOnlyBeforeAnyGuestKnocked", want: "want ErrSwitchLocked"},
 	{name: "consent: Record defaults off", file: repo, from: "SELECT ?, ?, ?, ?, 'open', 1, 1, ?", to: "SELECT ?, ?, ?, ?, 'open', 0, 1, ?",
 		pkg: "./internal/store", test: "TestASwitchGoesBackOnOnlyBeforeAnyGuestKnocked", want: "a new meeting: record false, ai true; want both on"},
-	{name: "notice is current: the guest stream keeps the notice it opened with", file: guest, from: `snap := map[string]any{"notice": s.noticeFor(cur.Notice.Record, cur.Notice.AI)}`,
-		to:  `snap := map[string]any{"notice": s.noticeFor(g.Notice.Record, g.Notice.AI)}`,
+	{name: "notice is current: the guest stream keeps the notice it opened with", file: guest, from: `snap := map[string]any{"notice": s.noticeOf(r.Context(), cur.MeetingID, cur.Notice.Record, cur.Notice.AI)}`,
+		to:  `snap := map[string]any{"notice": s.noticeOf(r.Context(), cur.MeetingID, g.Notice.Record, g.Notice.AI)}`,
 		pkg: "./internal/server", test: "TestTheAdmittedGuestSeesTheCurrentNotice", want: `no "meeting" event (the stream so far: "event: token`},
 
 	// ---- 🔴 the guest name ----

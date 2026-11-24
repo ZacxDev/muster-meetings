@@ -1,0 +1,32 @@
+id: m08
+kind: customer
+title: Support escalation call
+speakers:
+  - {name: Wren}
+  - {name: Xan, guest: true}
+segments:
+  - {id: 799, speaker: Wren, text: "Before we dig in, I am sorry this has taken a few days to get to a call. Our team was short this week, but your ticket is now my top priority."}
+  - {id: 800, speaker: Xan, text: "No problem, I appreciate it. It has been frustrating because our finance team relies on those exports every Monday morning for their weekly numbers."}
+  - {id: 801, speaker: Wren, text: "Hi Xan, thanks for making time. I read your ticket about the failed exports."}
+  - {id: 802, speaker: Xan, text: "Thanks. Since Monday every export over a gigabyte fails about halfway through."}
+  - {id: 803, speaker: Wren, text: "I reproduced it this morning on our side, so it's not your setup."}
+  - {id: 804, speaker: Xan, text: "That's a relief. Do you know when it'll be fixed?"}
+  - {id: 805, speaker: Wren, text: "Not yet. I'll open a priority bug with engineering today and send you the ticket number."}
+  - {id: 806, speaker: Xan, text: "Okay. In the meantime, can we split the exports somehow?"}
+  - {id: 807, speaker: Wren, text: "Yes, splitting by date range works. I'll write up the steps for you by tomorrow morning."}
+  - {id: 808, speaker: Xan, text: "Great, I'll try it on the March data and tell you whether it works."}
+  - {id: 809, speaker: Wren, text: "Perfect. We could maybe give you a credit for the downtime, I'd have to check with billing."}
+  - {id: 810, speaker: Xan, text: "That would be nice, but no pressure."}
+  - {id: 811, speaker: Wren, text: "I'll call you Thursday with an update. Hmm, actually I'm out Thursday, a colleague will email you instead, so no call from me."}
+  - {id: 812, speaker: Xan, text: "Email is fine."}
+  - {id: 813, speaker: Wren, text: "Great. So the bug goes in today, and you'll have the ticket number from me this afternoon."}
+  - {id: 814, speaker: Xan, text: "Thanks Wren, talk soon."}
+labels:
+  - {id: m08-1, text: "Open a priority bug with engineering and send the ticket number", assignee: Wren, due: "today", segments: [805, 813], cases: [restated]}
+  - {id: m08-2, text: "Write up the steps for splitting exports by date range", assignee: Wren, due: "by tomorrow morning", segments: [806, 807], cases: [cross_speaker]}
+  - {id: m08-3, text: "Try the split export on the March data and report back", assignee: Xan, segments: [808]}
+traps:
+  - {kind: past_tense, segments: [803]}
+  - {kind: question, segments: [804]}
+  - {kind: hypothetical, segments: [809]}
+  - {kind: retracted, segments: [811]}

@@ -157,6 +157,19 @@ const (
 	ctOut   = "internal/contacts/outbox.go"
 	ctAcc   = "internal/contacts/accepting.go"
 	cardE2E = "contacts-card.spec.ts"
+	// action items, phase 4a (the design's "Action-item evaluation")
+	itGuard  = "internal/items/guard.go"
+	itWindow = "internal/items/window.go"
+	itExt    = "internal/items/extract.go"
+	itChat   = "internal/items/chatjson.go"
+	itOR     = "internal/items/openrouter.go"
+	itCfg    = "internal/items/config.go"
+	itItems  = "internal/items/items.go"
+	ieScore  = "cmd/items-eval/score.go"
+	ieCtl    = "cmd/items-eval/controls.go"
+	ieMain   = "cmd/items-eval/main.go"
+	ieCorpus = "cmd/items-eval/corpus.go"
+	ieReplay = "cmd/items-eval/replay.go"
 )
 
 var mutants = []mutant{
@@ -165,6 +178,95 @@ var mutants = []mutant{
 		pkg: "./internal/store", test: "TestJoinCodeIs128BitsIn22Base64urlCharacters", want: "is not 22 base64url characters"},
 	{name: "control: a no-op edit (must survive)", file: secret, from: "JoinCodeBytes = 16", to: "JoinCodeBytes = 16 // no-op",
 		pkg: "./internal/store", test: "TestJoinCodeIs128BitsIn22Base64urlCharacters", survive: true},
+
+	// ---- action items, phase 4a: the guards after the model ----
+	{name: "items guard: an item citing no segment kept", file: itGuard, from: "if len(it.Segments) == 0 {", to: "if false {",
+		pkg: "./internal/items", test: "TestGuardDropsAnItemCitingNoSegment", want: "want both dropped as no-citation"},
+	{name: "items guard: an out-of-window citation kept", file: itGuard, from: "if !in {", to: "if false {",
+		pkg: "./internal/items", test: "TestGuardDropsAnItemCitingASegmentOutsideTheWindow", want: "want only the item citing 4 and 6"},
+	{name: "items guard: only the first citation checked", file: itGuard, from: "for _, id := range it.Segments {", to: "for _, id := range it.Segments[:1] {",
+		pkg: "./internal/items", test: "TestGuardDropsAnItemCitingASegmentOutsideTheWindow", want: "want only the item citing 4 and 6"},
+	{name: "items guard: Jaccard 0.70 exactly not a duplicate", file: itGuard, from: ">= DupJaccard {", to: "> DupJaccard {",
+		pkg: "./internal/items", test: "TestGuardDropsADuplicateByTextAtJaccard0Point7", want: "J=7/10: kept"},
+	{name: "items guard: the Jaccard bar lowered to 0.69", file: itGuard, from: "const DupJaccard = 0.7", to: "const DupJaccard = 0.69",
+		pkg: "./internal/items", test: "TestGuardDropsADuplicateByTextAtJaccard0Point7", want: "J=9/13: dropped"},
+	{name: "items guard: no duplicate by text", file: itGuard, from: "if Jaccard(toks, Tokens(s.Text)) >= DupJaccard {", to: "if false {",
+		pkg: "./internal/items", test: "TestGuardDropsADuplicateByTextAtJaccard0Point7", want: "J=5/7: kept"},
+	{name: "items guard: no duplicate by citation", file: itGuard, from: "if subset(it.Segments, s.Segments) {", to: "if false {",
+		pkg: "./internal/items", test: "TestGuardDropsADuplicateByCitation", want: "want the item citing only 4 dropped"},
+	{name: "items guard: no dedupe within one window", file: itGuard, from: "\t\tseen = append(seen, it)\n", to: "",
+		pkg: "./internal/items", test: "TestGuardDedupesWithinOneWindow", want: "want the later two dropped"},
+	{name: "items guard: no cap of 5 per window", file: itGuard, from: "if len(kept) >= MaxPerWindow {", to: "if false {",
+		pkg: "./internal/items", test: "TestGuardKeepsAtMostFivePerWindow", want: "want the first 5 kept"},
+	{name: "items window: a call with no new segment", file: itWindow, from: "if s.ID > lastID {\n\t\t\tok = true", to: "if true {\n\t\t\tok = true",
+		pkg: "./internal/items", test: "TestSelectMakesNoCallWithoutANewSegment", want: "want no call"},
+	{name: "items window: anchored on time, not the last segment", file: itWindow, from: "if s.EndMS > from || s.ID > lastID {", to: "if s.EndMS > from {",
+		pkg: "./internal/items", test: "TestSelectLooksBack90sAndCoversAGapAfterFailures", want: "anchored on the last segment processed"},
+
+	// ---- action items: the adapters ----
+	{name: "items extract: the model's text shown", file: itExt, from: `it.Text = strings.Join(parts, " ")`, to: "it.Text = e.Text",
+		pkg: "./internal/items", test: "TestExtractMapsSpansToSegmentsByOffsetAndShowsTheInput", want: "never the model's text"},
+	{name: "items extract: an offset past the end clamped", file: itExt, from: "if st < 0 || en <= st || en > len(runes) {",
+		to:  "if en > len(runes) {\n\t\t\ten = len(runes)\n\t\t}\n\t\tif st < 0 || en <= st {",
+		pkg: "./internal/items", test: "TestExtractMapsSpansToSegmentsByOffsetAndShowsTheInput", want: "the past-the-end span dropped"},
+	{name: "items extract: offsets counted in bytes", file: itExt, from: "n += len([]rune(s))", to: "n += len(s)",
+		pkg: "./internal/items", test: "TestExtractMapsSpansToSegmentsByOffsetAndShowsTheInput", want: "item 3"},
+	{name: "items extract: entities sent as a list", file: itExt, from: "sd[\"entities\"] = ExtractEntities", to: "sd[\"entities\"] = []string{EntityActionItem, EntityDueDate}",
+		pkg: "./internal/items", test: "TestExtractSendsTheS6ShapeWithTheTranscriptFenced", want: "not the pinned S6 shape"},
+	{name: "items extract fence: a line break in speech kept", file: itExt, from: "t := oneLine(s.Text)", to: "t := s.Text",
+		pkg: "./internal/items", test: "TestExtractSendsTheS6ShapeWithTheTranscriptFenced", want: "not the pinned S6 shape"},
+	{name: "items extract fence: a quote in a name not escaped", file: itExt, from: "`\"`, `\\\"`, ", to: "",
+		pkg: "./internal/items", test: "TestExtractSendsTheS6ShapeWithTheTranscriptFenced", want: "not the pinned S6 shape"},
+	{name: "items chat_json: the schema not strict", file: itChat, from: `"strict": true,`, to: `"strict": false,`,
+		pkg: "./internal/items", test: "TestChatJSONSendsTheWindowAsAJSONDocumentUnderTheStrictSchema", want: "the chat_json request body"},
+	{name: "items chat_json fence: the transcript in the instruction", file: itChat, from: "{Role: \"system\", Content: ChatJSONSystem},", to: "{Role: \"system\", Content: ChatJSONSystem + chatJSONInput(w)},",
+		pkg: "./internal/items", test: "TestChatJSONSendsTheWindowAsAJSONDocumentUnderTheStrictSchema", want: "the system message is not the instruction alone"},
+	{name: "items chat_json: an item missing a field accepted", file: itChat, from: "if it.Task == nil || it.Owner == nil || it.Due == nil || it.SegmentIDs == nil {", to: "if it.Task == nil {",
+		pkg: "./internal/items", test: "TestChatJSONParsesTheSchemaAndRefusesAnythingElse", want: `"owner":"","due":""}]}: err = <nil>`},
+	{name: "items client: a 429 not retried", file: itOR, from: "case status == http.StatusTooManyRequests, status == http.StatusRequestTimeout,", to: "case status == http.StatusRequestTimeout,",
+		pkg: "./internal/items", test: "TestErrorClasses", want: "429 {"},
+	{name: "items client: a 500 not retried", file: itOR, from: "status >= 500, status == 0:", to: "status > 500, status == 0:",
+		pkg: "./internal/items", test: "TestErrorClasses", want: "500 {"},
+	{name: "items client: a redirect followed with the key", file: itOR, from: "\th.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }\n", to: "",
+		pkg: "./internal/items", test: "TestTheKeyIsNeverSentOnARedirect", want: "a redirect was followed"},
+	{name: "items backoff: Retry-After ignored", file: itItems, from: "if retryAfter > d {", to: "if false {",
+		pkg: "./internal/items", test: "TestBackoff", want: "Retry-After 9s"},
+	{name: "items backoff: never doubles", file: itItems, from: "d = time.Second << (n - 1)", to: "d = time.Second",
+		pkg: "./internal/items", test: "TestBackoff", want: "Backoff(2) = 1s"},
+	{name: "items prefs: data_collection allow accepted", file: itCfg, from: "case dc != \"deny\":", to: "case false:",
+		pkg: "./internal/items", test: "TestProviderPrefsAlwaysDenyDataCollection", want: `{"data_collection":"allow"}, extract) err = <nil>`},
+	{name: "items prefs: deny not added when absent", file: itCfg, from: "case !ok:\n\t\tp[\"data_collection\"] = \"deny\"", to: "case !ok:",
+		pkg: "./internal/items", test: "TestProviderPrefsAlwaysDenyDataCollection", want: "ParsePrefs(, extract) = {}"},
+	{name: "items prefs: an unpinned chat_json model accepted", file: itCfg, from: "if adapter == AdapterChatJSON && !pinned(p) {", to: "if false {",
+		pkg: "./internal/items", test: "TestProviderPrefsAlwaysDenyDataCollection", want: "ParsePrefs(, chat_json) err = <nil>"},
+	{name: "items prefs: order with fallbacks counted as a pin", file: itCfg, from: `return ok && len(o) > 0 && p["allow_fallbacks"] == false`, to: "return ok && len(o) > 0",
+		pkg: "./internal/items", test: "TestProviderPrefsAlwaysDenyDataCollection", want: `"allow_fallbacks":true}, chat_json) err = <nil>`},
+
+	// ---- action items: the evaluation harness (cmd/items-eval) ----
+	{name: "items-eval score: one match counted as a duplicate", file: ieScore, from: "if h > 1 {", to: "if h >= 1 {",
+		pkg: "./cmd/items-eval", test: "TestScoreAgainstAHandComputedFixture", want: "duplicate rate = 0.75"},
+	{name: "items-eval score: the assignee compared with its case", file: ieScore, from: "s = strings.ToLower(strings.TrimSpace(s))", to: "s = strings.TrimSpace(s)",
+		pkg: "./cmd/items-eval", test: "TestScoreAgainstAHandComputedFixture", want: "assignee accuracy = 0.333"},
+	{name: "items-eval score: a missing cost read as free", file: ieScore, from: "} else {\n\t\t\t\t\tm.CostKnown = false\n", to: "} else {\n",
+		pkg: "./cmd/items-eval", test: "TestACostOpenRouterDidNotReportFailsTheGate", want: "want it failed as unknown"},
+	{name: "items-eval worst: the best run's recall scored", file: ieScore, from: "w.Recall = math.Min(w.Recall, r.Recall)", to: "w.Recall = math.Max(w.Recall, r.Recall)",
+		pkg: "./cmd/items-eval", test: "TestWorstIsEachMetricsWorstRun", want: "worst ="},
+	{name: "items-eval controls: the oracle's check removed", file: ieCtl, from: "o.Recall == 1 && o.Precision == 1, o})", to: "true, o})",
+		pkg: "./cmd/items-eval", test: "TestAFailedControlStopsTheRunBeforeAnyModel", want: "a failing oracle: exit 0"},
+	{name: "items-eval controls: a failed control does not stop the run", file: ieMain, from: "if !ControlsPass(res.Controls) {", to: "if false {",
+		pkg: "./cmd/items-eval", test: "TestAFailedControlStopsTheRunBeforeAnyModel", want: "a failing oracle: exit 0"},
+	{name: "items-eval controls: the liar cites only the window", file: ieCtl, from: "in = []int64{in[0], top + 1000}", to: "in = []int64{in[0]}",
+		pkg: "./cmd/items-eval", test: "TestTheControlsScoreAsStatedOnTheCorpus", want: "control liar"},
+	{name: "items-eval replay: a model scored without the guards", file: ieReplay, from: "if o.NoGuards {", to: "if true {",
+		pkg: "./cmd/items-eval", test: "TestTheControlsScoreAsStatedOnTheCorpus", want: "control liar"},
+	{name: "items-eval replay: the anchor moved after a 429", file: ieReplay, from: "\t\t\t\tfails++\n", to: "\t\t\t\tfails++\n\t\t\t\tlast = items.LastID(segs, last)\n",
+		pkg: "./cmd/items-eval", test: "TestReplayCoversTheGapAfterRetriesAndSpendsASchemaFailure", want: "does not cover the first failed window"},
+	{name: "items-eval lint: the no-item share unchecked", file: ieCorpus, from: "if st.NoItemShare < minNoItemShare {", to: "if false {",
+		pkg: "./cmd/items-eval", test: "TestTheLintCatchesEachProblem", want: "too few no-item windows"},
+	{name: "items-eval lint: a citation outside the meeting accepted", file: ieCorpus, from: "if !inMeeting[id] {", to: "if false {",
+		pkg: "./cmd/items-eval", test: "TestTheLintCatchesEachProblem", want: "a label citing a segment not in its meeting"},
+	{name: "items-eval lint: a missing hard case accepted", file: ieCorpus, from: "if st.HardCases[k] < minPerHardCase {", to: "if false {",
+		pkg: "./cmd/items-eval", test: "TestTheLintCatchesEachProblem", want: "no retracted case"},
 
 	// ---- /enter: the frame gate (sign-in CSRF) ----
 	{name: "frame gate: removed", file: srv, from: `if ok, why := framed(r); !ok {`, to: `if ok, why := framed(r); false && !ok {`,

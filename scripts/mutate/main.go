@@ -1204,7 +1204,7 @@ var mutants = []mutant{
 	{name: "retention: an end path that does not close the recording", file: parts, from: "\treturn closeEnded(ctx, tx)\n", to: "\treturn nil\n",
 		pkg: "./internal/store", test: "TestTheEndClosesAnOpenGapAndScreenShare", want: "gaps after the end"},
 	{name: "retention: any number of days", file: recSt, from: "\t\tok = ok || v.RecordingRetentionDays == c\n", to: "\t\tok = ok || v.RecordingRetentionDays == c || true\n",
-		pkg: "./internal/store", test: "TestRetentionIsThirtyByDefaultAndOnlyThirtyOr365", want: "days: <nil>"},
+		pkg: "./internal/store", test: "TestRetentionIsThirtyByDefaultAndOnlyThirtyOr365", want: "0 days: constraint failed"},
 	{name: "migration 6: an ended meeting gets no purge time", file: st, from: "\tUPDATE meetings SET purge_recording_at = ended_at + 30 * 86400000 WHERE state = 'ended' AND ended_at IS NOT NULL;\n", to: "",
 		pkg: "./internal/store", test: "TestMigration6KeepsEveryRowAndStampsEndedMeetings", want: "after migration 6"},
 	{name: "no bucket: the recording's routes mounted", file: srv, from: "\tif cfg.S3 != nil {\n\t\ts.recordingRoutes()", to: "\tif true {\n\t\ts.recordingRoutes()",

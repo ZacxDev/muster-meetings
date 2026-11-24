@@ -81,6 +81,15 @@ type transcriber struct {
 	// (serveIngest) one step each, so neither can fall between the other's
 	// check and write and leave a gap open while audio flows.
 	gapMu sync.Mutex
+	// regMu makes "is a current stream registered? if not, draw a new
+	// nonce" (egressLoop) and "register this stream" (serveIngest) one step
+	// each. Without it an attempt that checked before a stream registered
+	// (then spent its time asking LiveKit for the room) drew a new nonce
+	// AFTER the stream registered, and cut off a stream that had connected
+	// with the current nonce (TestAConnectedStreamStopsTheStartRetries, red
+	// in CI 3 times). A stream whose token check passed before the new nonce
+	// is still stale, and cut, as designed (TestALateStreamOfAnOlderAttempt…).
+	regMu sync.Mutex
 	// amends is meeting → the lines amended in place (a late closing mark,
 	// stt.Segment.Lead), in order of amendSeq, the last MaxAmendLog kept:
 	// what each event stream re-sends as an `amend` event for a line it has
@@ -454,7 +463,17 @@ func (s *Server) egressLoop(ctx context.Context, track string) {
 		}
 		if err == nil {
 			nonce := ingest.NewNonce()
-			if err = s.store.SetNonce(ctx, track, nonce); err == nil {
+			// Checked again with the new nonce in one step against a
+			// stream's registration (regMu): one that registered while
+			// LiveKit was asked keeps its nonce.
+			s.tr.regMu.Lock()
+			if s.streamingCurrent(ctx, track) {
+				s.tr.regMu.Unlock()
+				return
+			}
+			err = s.store.SetNonce(ctx, track, nonce)
+			s.tr.regMu.Unlock()
+			if err == nil {
 				url := s.cfg.IngestURL + ingest.Path(track, ingest.Token(s.cfg.IngestKey, t.MeetingID, track, nonce, t.MeetingExp))
 				var info livekit.EgressInfo
 				if info, err = s.cfg.LiveKit.StartTrackEgress(ctx, room, track, url); err == nil {
@@ -685,6 +704,7 @@ func (s *Server) ingestAllowed(ctx context.Context, track, nonce string) bool {
 // track replaces it.
 func (s *Server) serveIngest(conn *ingest.Conn, t store.Track) {
 	lc := &liveConn{conn: conn, nonce: t.Nonce}
+	s.tr.regMu.Lock()
 	s.tr.mu.Lock()
 	if old := s.tr.conns[t.Track]; old != nil {
 		old.conn.Close(ingest.CloseNormal, "replaced by a newer stream")
@@ -692,6 +712,7 @@ func (s *Server) serveIngest(conn *ingest.Conn, t store.Track) {
 	s.tr.conns[t.Track] = lc
 	s.tr.meetings[t.Track] = t.MeetingID
 	s.tr.mu.Unlock()
+	s.tr.regMu.Unlock()
 	ctx, cancel := context.WithCancel(s.bg)
 	defer func() {
 		cancel()

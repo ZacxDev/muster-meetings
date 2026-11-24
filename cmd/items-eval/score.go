@@ -10,16 +10,42 @@ import (
 	"github.com/ZacxDev/muster-meetings/internal/items"
 )
 
-// The pass bars (design: "Action-item evaluation").
+// The pass bars (design: "Action-item evaluation"). Every bar but latency
+// is the same for both profiles.
 const (
 	barRecall      = 0.80
 	barPrecision   = 0.80
 	barDupRate     = 0.05
 	barAssignee    = 0.85
-	barP95         = 4 * time.Second
 	barSchemaRate  = 0.01
 	barCostPerHour = 0.05
 )
+
+// The two uses a model is judged for, each with its own latency bar
+// (operator's decision: separate bars, quality over speed).
+const (
+	// profileLive is the in-call panel: items.Loop, a window every 10 s. Its
+	// p95 bar is the window period (it was 4 s): a call slower than that
+	// still lands before the next window is due.
+	profileLive = "live"
+	// profilePostCall is the pass over the whole meeting after End
+	// (items.PostCall), feeding the owner-approved emails: 60 s a call.
+	profilePostCall = "postcall"
+)
+
+// profiles is every profile, in the order they are run and reported.
+var profiles = []string{profileLive, profilePostCall}
+
+// barP95 is a profile's latency bar; an unknown profile has none and fails.
+func barP95(profile string) (time.Duration, bool) {
+	switch profile {
+	case profileLive:
+		return 10 * time.Second, true
+	case profilePostCall:
+		return 60 * time.Second, true
+	}
+	return 0, false
+}
 
 // Metrics is one run's score (or the worst of several).
 type Metrics struct {
@@ -27,8 +53,11 @@ type Metrics struct {
 	Emitted         int `json:"emitted"`
 	MatchedLabels   int `json:"matched_labels"`
 	MatchingEmitted int `json:"matching_emitted"`
-	DupLabels       int `json:"dup_labels"`
-	AssigneeRight   int `json:"assignee_right"`
+	// DupLabels is the labels at least one duplicate is charged to;
+	// DupItems the duplicates (match.go).
+	DupLabels     int `json:"dup_labels"`
+	DupItems      int `json:"dup_items"`
+	AssigneeRight int `json:"assignee_right"`
 
 	Recall    float64 `json:"recall"`
 	Precision float64 `json:"precision"`
@@ -56,20 +85,6 @@ type Metrics struct {
 	RewrittenUnicode int `json:"rewritten_unicode"`
 }
 
-// matches reports whether emitted item e matches label l: their cited
-// segments intersect. Both are of the same meeting (Score never compares
-// across meetings), and no wording is compared: no model judges a model.
-func matches(e items.Item, l Label) bool {
-	for _, a := range e.Segments {
-		for _, b := range l.Segments {
-			if a == b {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // normName is an assignee for comparison: case, space and a " (guest)"
 // suffix ignored.
 func normName(s string) string {
@@ -87,31 +102,23 @@ func Score(runs []MeetingRun) Metrics {
 		labels := r.Meeting.Labels
 		m.Labels += len(labels)
 		m.Emitted += len(r.Emitted)
-		hits := make([]int, len(labels))
-		for _, e := range r.Emitted {
-			matched := false
-			right := false
-			for i, l := range labels {
-				if matches(e, l) {
-					matched = true
-					hits[i]++
-					if normName(e.Assignee) == normName(l.Assignee) {
-						right = true
-					}
-				}
-			}
-			if matched {
+		mt := match(r.Emitted, labels)
+		dup := make([]bool, len(labels))
+		for i, e := range r.Emitted {
+			if j := mt.label[i]; j >= 0 {
+				m.MatchedLabels++
 				m.MatchingEmitted++
-				if right {
+				if normName(e.Assignee) == normName(labels[j].Assignee) {
 					m.AssigneeRight++
 				}
 			}
-		}
-		for _, h := range hits {
-			if h >= 1 {
-				m.MatchedLabels++
+			if j := mt.dupOf[i]; j >= 0 {
+				m.DupItems++
+				dup[j] = true
 			}
-			if h > 1 {
+		}
+		for _, d := range dup {
+			if d {
 				m.DupLabels++
 			}
 		}
@@ -219,20 +226,21 @@ type Gate struct {
 	Gating bool   `json:"gating"`
 }
 
-// Gates are m's verdicts for an adapter: assignee accuracy is reported, not
-// gated, for extract.
-func Gates(m Metrics, adapter string) []Gate {
+// Gates are m's verdicts for an adapter under a profile: assignee accuracy
+// is reported, not gated, for extract; the latency bar is the profile's.
+func Gates(m Metrics, adapter, profile string) []Gate {
 	f2 := func(x float64) string { return fmt.Sprintf("%.2f", x) }
 	cost := "unknown"
 	if m.CostKnown {
 		cost = fmt.Sprintf("$%.4f", m.CostPerHour)
 	}
+	p95, known := barP95(profile)
 	return []Gate{
 		{"recall", f2(m.Recall), "≥ 0.80", m.Recall >= barRecall, true},
 		{"precision", f2(m.Precision), "≥ 0.80", m.Precision >= barPrecision, true},
 		{"duplicate rate", f2(m.DupRate), "≤ 0.05", m.DupRate <= barDupRate, true},
 		{"assignee accuracy", f2(m.Assignee), "≥ 0.85", m.Assignee >= barAssignee, adapter != items.AdapterExtract},
-		{"latency p95", m.P95.Round(time.Millisecond).String(), "≤ 4s", m.Calls > 0 && m.P95 <= barP95, true},
+		{"latency p95", m.P95.Round(time.Millisecond).String(), fmt.Sprintf("≤ %ds", int(p95.Seconds())), known && m.Calls > 0 && m.P95 <= p95, true},
 		{"schema failures", fmt.Sprintf("%.1f%%", m.SchemaRate*100), "≤ 1%", m.Calls > 0 && m.SchemaRate <= barSchemaRate, true},
 		// A cost OpenRouter did not report fails: it is not read as free.
 		{"cost per meeting-hour", cost, "≤ $0.05", m.CostKnown && m.CostPerHour <= barCostPerHour, true},
@@ -264,10 +272,10 @@ type Verdict struct {
 	Pass  bool      `json:"pass"`
 }
 
-// Judge is the verdict on runs for an adapter.
-func Judge(runs []Metrics, adapter string) Verdict {
+// Judge is the verdict on runs for an adapter under a profile.
+func Judge(runs []Metrics, adapter, profile string) Verdict {
 	v := Verdict{Runs: runs, Worst: Worst(runs)}
-	v.Gates = Gates(v.Worst, adapter)
+	v.Gates = Gates(v.Worst, adapter, profile)
 	v.Pass = len(runs) > 0 && Passes(v.Gates)
 	return v
 }
@@ -278,8 +286,10 @@ func Judge(runs []Metrics, adapter string) Verdict {
 // from synthesised speech)"), and Combined: each metric the worse of the
 // two. Combined is the gate: a model passes only if it passes on both.
 type Scored struct {
-	Model    string  `json:"model"`
-	Adapter  string  `json:"adapter"`
+	Model   string `json:"model"`
+	Adapter string `json:"adapter"`
+	// Profile is the use it is judged for: profileLive or profilePostCall.
+	Profile  string  `json:"profile"`
 	Prefs    any     `json:"provider_prefs"`
 	Clean    Verdict `json:"clean"`
 	STT      Verdict `json:"stt"`
@@ -287,11 +297,11 @@ type Scored struct {
 	Pass     bool    `json:"pass"`
 }
 
-// NewScored judges a model's clean and STT runs, and their worst-of-both;
-// it passes when that does.
-func NewScored(model, adapter string, prefs any, clean, stt []Metrics) Scored {
-	s := Scored{Model: model, Adapter: adapter, Prefs: prefs, Clean: Judge(clean, adapter), STT: Judge(stt, adapter)}
-	s.Combined = Combine(s.Clean, s.STT, adapter)
+// NewScored judges a model's clean and STT runs under a profile, and their
+// worst-of-both; it passes when that does.
+func NewScored(model, adapter, profile string, prefs any, clean, stt []Metrics) Scored {
+	s := Scored{Model: model, Adapter: adapter, Profile: profile, Prefs: prefs, Clean: Judge(clean, adapter, profile), STT: Judge(stt, adapter, profile)}
+	s.Combined = Combine(s.Clean, s.STT, adapter, profile)
 	s.Pass = s.Combined.Pass
 	return s
 }
@@ -299,22 +309,23 @@ func NewScored(model, adapter string, prefs any, clean, stt []Metrics) Scored {
 // Combine is the worst-of-both verdict: each metric the worse of the two
 // corpora's worst runs (Worst), gated as one. A corpus with no runs fails
 // it.
-func Combine(clean, stt Verdict, adapter string) Verdict {
+func Combine(clean, stt Verdict, adapter, profile string) Verdict {
 	if len(clean.Runs) == 0 || len(stt.Runs) == 0 {
 		return Verdict{}
 	}
 	w := Worst([]Metrics{clean.Worst, stt.Worst})
-	g := Gates(w, adapter)
+	g := Gates(w, adapter, profile)
 	return Verdict{Worst: w, Gates: g, Pass: Passes(g)}
 }
 
-// Choose is the default model (design: "Choice"): of the models passing
-// every gate on both corpora, the better worst-of-both recall, then the
-// cheaper worst-of-both cost; "off" if none passes.
-func Choose(ss []Scored) string {
+// Choose is a profile's default model (design: "Choice"): of the models
+// judged for that profile and passing every gate on both corpora, the
+// better worst-of-both recall, then the cheaper worst-of-both cost; "off" if
+// none passes. A model's verdict for another profile is never read.
+func Choose(ss []Scored, profile string) string {
 	best := -1
 	for i, s := range ss {
-		if !s.Pass {
+		if s.Profile != profile || !s.Pass {
 			continue
 		}
 		w, b := s.Combined.Worst, Metrics{}

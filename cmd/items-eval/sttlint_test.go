@@ -183,7 +183,7 @@ func TestAFailedSTTControlStopsTheRunBeforeAnyModel(t *testing.T) {
 			}
 			return ""
 		}, &so, &se)
-	clean, sttc, _ := strings.Cut(so.String(), "controls, stt corpus:")
+	clean, sttc, _ := strings.Cut(so.String(), "controls, live, stt corpus:")
 	if !strings.Contains(clean, "oracle                         pass") || !strings.Contains(sttc, "oracle                         FAIL") {
 		t.Fatalf("the fixture: want the clean oracle passing and the STT oracle failing:\n%s\n%s", so.String(), se.String())
 	}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -166,19 +167,31 @@ func TestTheControlsScoreAsStatedOnTheSTTCorpus(t *testing.T) {
 	testControls(t, loadSTT(t))
 }
 
+// The controls through each profile's replay: five live (the duplicator
+// raw and guarded), four post-call (guarded only).
 func testControls(t *testing.T, ms []*Meeting) {
 	t.Helper()
-	cs := RunControls(ms)
-	if len(cs) != 5 {
-		t.Fatalf("%d controls, want 5", len(cs))
-	}
-	for _, c := range cs {
-		if !c.Pass {
-			t.Errorf("control %s: want %s, got %s", c.Name, c.Want, c.Got)
+	for _, c := range []struct {
+		profile string
+		want    string
+	}{
+		{profileLive, "[null oracle duplicator duplicator through the guards liar]"},
+		{profilePostCall, "[null oracle duplicator through the guards liar]"},
+	} {
+		cs := RunControls(ms, c.profile)
+		var names []string
+		for _, x := range cs {
+			names = append(names, x.Name)
+			if !x.Pass {
+				t.Errorf("%s control %s: want %s, got %s", c.profile, x.Name, x.Want, x.Got)
+			}
 		}
-	}
-	if !ControlsPass(cs) {
-		t.Error("ControlsPass = false")
+		if fmt.Sprint(names) != c.want {
+			t.Errorf("%s controls %v, want %s", c.profile, names, c.want)
+		}
+		if !ControlsPass(cs) {
+			t.Errorf("%s: ControlsPass = false", c.profile)
+		}
 	}
 }
 
@@ -223,10 +236,23 @@ func TestARunGoesThroughProductionsClientWithItsProviderObject(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d: %s %s", code, so.String(), se.String())
 	}
-	// Every model is replayed on both corpora: the clean one and the STT one.
+	// Every model is replayed on both corpora (the clean one and the STT
+	// one) under both profiles: live, one request per window; postcall, one
+	// per meeting (every corpus meeting fits one chunk).
 	windows := CorpusStats(load(t)).Windows + CorpusStats(loadSTT(t)).Windows
-	if len(f.bodies) != 2*windows {
-		t.Errorf("%d requests, want one per window per corpus per model (2 × %d)", len(f.bodies), windows)
+	meetings := len(load(t)) + len(loadSTT(t))
+	if len(f.bodies) != 2*(windows+meetings) {
+		t.Errorf("%d requests, want per model one per window and one per meeting per corpus (2 × (%d + %d))", len(f.bodies), windows, meetings)
+	}
+	maxTokens := map[float64]int{}
+	for _, b := range f.bodies {
+		if b["model"] == "deepseek/deepseek-v4.1-flash-1017" {
+			mt, _ := b["max_tokens"].(float64)
+			maxTokens[mt]++
+		}
+	}
+	if maxTokens[4096] != windows || maxTokens[8192] != meetings {
+		t.Errorf("DeepSeek max_tokens %v, want 4096 on each of %d live windows and 8192 on each of %d post-call meetings", maxTokens, windows, meetings)
 	}
 	for _, b := range f.bodies {
 		p, _ := b["provider"].(map[string]any)
@@ -242,8 +268,16 @@ func TestARunGoesThroughProductionsClientWithItsProviderObject(t *testing.T) {
 	if err := json.Unmarshal(raw, &res); err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Requests) != 2*windows || res.Requests[0].Provider != "FakeProvider" || res.Choice != "off" || len(res.Models) != 2 {
-		t.Errorf("result: %d requests, first %+v, choice %s, %d models", len(res.Requests), res.Requests[0], res.Choice, len(res.Models))
+	if len(res.Requests) != 2*(windows+meetings) || res.Requests[0].Provider != "FakeProvider" || !res.Requests[0].CostKnown ||
+		fmt.Sprint(res.Choices) != "map[live:off postcall:off]" || len(res.Models) != 4 {
+		t.Errorf("result: %d requests, first %+v, choices %v, %d models", len(res.Requests), res.Requests[0], res.Choices, len(res.Models))
+	}
+	byProfile := map[string]int{}
+	for _, r := range res.Requests {
+		byProfile[r.Profile]++
+	}
+	if byProfile[profileLive] != 2*windows || byProfile[profilePostCall] != 2*meetings {
+		t.Errorf("requests by profile %v, want live %d and postcall %d", byProfile, 2*windows, 2*meetings)
 	}
 	if res.Models[0].Pass || res.Models[0].STT.Worst.Recall != 0 || res.Models[0].Clean.Worst.Recall != 0 {
 		t.Errorf("a model that found nothing passed: %+v", res.Models[0].STT.Gates)
@@ -252,10 +286,10 @@ func TestARunGoesThroughProductionsClientWithItsProviderObject(t *testing.T) {
 	for _, r := range res.Requests {
 		corpora[r.Corpus]++
 	}
-	if corpora["clean"] == 0 || corpora["stt"] == 0 || len(res.STTMeetings) != 12 || len(res.STTControls) != 5 {
-		t.Errorf("requests per corpus %v, %d stt meetings, %d stt controls", corpora, len(res.STTMeetings), len(res.STTControls))
+	if corpora["clean"] == 0 || corpora["stt"] == 0 || len(res.STTMeetings) != 12 || len(res.STTControls) != 5 || len(res.STTPostCallControls) != 4 {
+		t.Errorf("requests per corpus %v, %d stt meetings, %d stt controls, %d stt post-call controls", corpora, len(res.STTMeetings), len(res.STTControls), len(res.STTPostCallControls))
 	}
-	if !strings.Contains(so.String(), "**Choice:** `off`.") {
+	if !strings.Contains(so.String(), "**Choices:** live `off`, postcall `off`.") {
 		t.Errorf("stdout has no choice:\n%s", so.String())
 	}
 }

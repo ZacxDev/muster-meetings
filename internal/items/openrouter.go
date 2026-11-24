@@ -26,8 +26,18 @@ type client struct {
 	prefs            map[string]any
 	// pin is true for a chat_json model: every request must still pin its
 	// provider when it is sent.
-	pin  bool
-	http *http.Client
+	pin bool
+	// maxTokens is Config.MaxTokens: 0 is the adapter's own default.
+	maxTokens int
+	http      *http.Client
+}
+
+// tokens is the max_tokens a request sends: the configured bound, else def.
+func (c *client) tokens(def int) int {
+	if c.maxTokens > 0 {
+		return c.maxTokens
+	}
+	return def
 }
 
 func newClient(c Config, hc *http.Client) *client {
@@ -45,7 +55,7 @@ func newClient(c Config, hc *http.Client) *client {
 	if base == "" {
 		base = DefaultBaseURL
 	}
-	return &client{model: c.Model, key: c.APIKey, base: base, prefs: c.Prefs, pin: c.Adapter == AdapterChatJSON, http: &h}
+	return &client{model: c.Model, key: c.APIKey, base: base, prefs: c.Prefs, pin: c.Adapter == AdapterChatJSON, maxTokens: c.MaxTokens, http: &h}
 }
 
 type message struct {
@@ -76,11 +86,15 @@ type answer struct {
 		Message struct {
 			Content *string `json:"content"`
 		} `json:"message"`
+		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage *struct {
-		PromptTokens     int      `json:"prompt_tokens"`
-		CompletionTokens int      `json:"completion_tokens"`
-		Cost             *float64 `json:"cost"`
+		PromptTokens            int      `json:"prompt_tokens"`
+		CompletionTokens        int      `json:"completion_tokens"`
+		Cost                    *float64 `json:"cost"`
+		CompletionTokensDetails *struct {
+			ReasoningTokens int `json:"reasoning_tokens"`
+		} `json:"completion_tokens_details"`
 	} `json:"usage"`
 	Error *struct {
 		Code    json.RawMessage `json:"code"`
@@ -162,22 +176,39 @@ func (c *client) complete(ctx context.Context, body request) (string, Result, er
 	if jerr != nil {
 		return "", Result{}, &Error{Class: Schema, Status: 200, Msg: "the answer is not JSON"}
 	}
-	// OpenRouter can answer 200 with an error object (an upstream failure
-	// after the stream began): classified by the code it carries.
-	if a.Error != nil {
-		code, _ := strconv.Atoi(strings.Trim(string(a.Error.Code), `"`))
-		e := &Error{Class: classify(code), Status: code, Msg: "openrouter answered an error"}
-		return "", Result{}, &DetailError{e, a.Error.Message}
-	}
-	if len(a.Choices) == 0 || a.Choices[0].Message.Content == nil {
-		return "", Result{}, &Error{Class: Schema, Status: 200, Msg: "the answer has no message content"}
-	}
+	// 🔴 What OpenRouter says it ran and charged is kept on EVERY answer from
+	// here on, failed or not: a schema failure is still a billed call, and
+	// dropping its usage is what read the first run's cost as "unknown".
 	res := Result{Provider: a.Provider, Model: a.Model}
 	if a.Usage != nil {
 		res.Usage = Usage{PromptTokens: a.Usage.PromptTokens, CompletionTokens: a.Usage.CompletionTokens}
 		if a.Usage.Cost != nil {
 			res.Usage.CostUSD, res.Usage.CostKnown = *a.Usage.Cost, true
 		}
+		if d := a.Usage.CompletionTokensDetails; d != nil {
+			res.Usage.ReasoningTokens = d.ReasoningTokens
+		}
+	}
+	if len(a.Choices) > 0 {
+		res.FinishReason = a.Choices[0].FinishReason
+	}
+	// OpenRouter can answer 200 with an error object (an upstream failure
+	// after the stream began): classified by the code it carries.
+	if a.Error != nil {
+		code, _ := strconv.Atoi(strings.Trim(string(a.Error.Code), `"`))
+		e := &Error{Class: classify(code), Status: code, Msg: "openrouter answered an error"}
+		return "", res, &DetailError{e, a.Error.Message}
+	}
+	// An answer cut off at max_tokens is never parsed, whatever its content
+	// (empty, when a reasoning model spent the budget thinking; a prefix of
+	// the JSON otherwise): it says so, with the tokens, rather than pass as
+	// a malformed answer.
+	if res.FinishReason == "length" {
+		return "", res, &Error{Class: Schema, Status: 200, Msg: fmt.Sprintf("the answer was cut off at max_tokens (finish_reason length: %d completion tokens, %d of them reasoning)",
+			res.Usage.CompletionTokens, res.Usage.ReasoningTokens)}
+	}
+	if len(a.Choices) == 0 || a.Choices[0].Message.Content == nil {
+		return "", res, &Error{Class: Schema, Status: 200, Msg: fmt.Sprintf("the answer has no message content (finish_reason %q)", res.FinishReason)}
 	}
 	return *a.Choices[0].Message.Content, res, nil
 }

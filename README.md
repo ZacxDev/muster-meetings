@@ -1283,12 +1283,44 @@ STT from synthesised speech (`<name>.stt.yaml`, made by
 `cmd/items-corpus-stt`), reports both, and **gates on both**: a model
 passes only if it passes on each, every metric taking the worse of the two,
 and the choice reads those worst-of-both numbers.
+
+It judges every model per **profile**, and chooses per profile (a model, or
+`off`), so a model can be chosen for one use and not the other:
+
+| profile | what it replays | latency bar |
+|---|---|---|
+| `live` | the in-call panel: `items.Loop`, a window every 10 s | p95 ≤ 10 s (the window period) |
+| `postcall` | the pass over the whole meeting after End, feeding the owner-approved emails: `items.PostCall` itself, with `items.PostCallConfig` | p95 ≤ 60 s a call |
+
+Every other bar is the same for both: recall ≥ 0.80, precision ≥ 0.80,
+duplicates ≤ 0.05, assignee accuracy ≥ 0.85 (`chat_json`), schema failures
+≤ 1%, cost ≤ $0.05 a meeting-hour (a cost OpenRouter did not report fails),
+no fatal failure. `items.PostCall` reads a meeting as one call up to
+`items.PostCallChunkChars` of speech (about 83 minutes at the corpus's rate),
+else in chunks overlapping by the live window's 90 s; every chunk goes
+through the live window's guards, deduped against what earlier chunks kept,
+with at most `items.PostCallCap` items a meeting (3 a minute, at least 10).
+**Scoring is one to one** (`cmd/items-eval/match.go`). An emitted item can
+match a label when they cite a segment in common; of those pairs the score
+takes a maximum matching (as many pairs as possible, each item and each
+label in at most one), preferring pairs that share a segment that is the
+label's own (no other label of the meeting cites it: a recap restating
+several items is no label's own), then more shared segments, then the
+earlier item with the earlier label. Recall is paired labels over labels;
+precision paired items over items; assignee accuracy is over the pairs. An
+item left unpaired although it could match a label (every such label went
+to another item) is a **duplicate**, not a false positive (both count
+against precision), charged to the label it would have preferred. The
+duplicate rate keeps the design's definition, labels emitted more than
+once over labels: a label counts when at least one duplicate is charged to
+it (such a label is always paired, since a maximum matching leaves no
+unpaired item next to an unpaired label).
 **It costs money and needs a key, so it is run by hand, never in CI:**
 
 ```sh
 OPENROUTER_API_KEY=… go run ./cmd/items-eval \
   -prefs 'deepseek/deepseek-v4.1-flash-1017={"order":["<provider>"],"allow_fallbacks":false}' \
-  -md docs/items-eval-$(date -u +%F).md
+  -md docs/items-eval-$(date -u +%F).md            # -profiles live,postcall is the default
 go run ./cmd/items-eval -controls-only   # the lint and the controls alone: no key, no cost
 ```
 
@@ -1324,7 +1356,7 @@ phase 4b.
 | `deploy/kubernetes`, `deploy/example-overlay` | the kustomize base (the plugin, LiveKit, Services, NetworkPolicies) and an example tenant overlay |
 | `compose.meetings.yml` | the fragment for muster's Compose stack |
 | `deploy/deploy_test.go` | the rendered objects and both LiveKit configs, pinned |
-| `internal/items` | action items: the `extract` and `chat_json` adapters, their OpenRouter client, the guards after the model, the window selection and the worker's loop (`items.Loop`), `MEETINGS_ITEMS_PROVIDER_PREFS` |
+| `internal/items` | action items: the `extract` and `chat_json` adapters, their OpenRouter client, the guards after the model, the window selection and the worker's loop (`items.Loop`), the post-call pass (`items.PostCall`), `MEETINGS_ITEMS_PROVIDER_PREFS` |
 | `cmd/items-eval`, `testdata/items-eval` | the action-item evaluation (run by hand) and its labelled synthetic corpus, as written and through the real STT |
 | `cmd/items-corpus-stt`, `internal/sttcorpus` | makes the STT corpus (Piper, then the plugin's STT engine; run by hand), its word error rate and its writer |
 | `scripts/mutate` | the security-gate mutation sweep |

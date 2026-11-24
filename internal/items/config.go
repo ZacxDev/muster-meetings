@@ -37,6 +37,20 @@ type Config struct {
 	BaseURL string
 	// Timeout bounds one request (default 30 s).
 	Timeout time.Duration
+	// MaxTokens bounds an answer's max_tokens; 0 is the adapter's default
+	// (ChatJSONMaxTokens, ExtractMaxTokens). PostCallConfig sets it.
+	MaxTokens int
+}
+
+// PostCallConfig is c for the post-call pass (PostCall): one request reads a
+// whole chunk of the meeting, so it may answer for longer and write more.
+// The live loop's Config is c as it is.
+func PostCallConfig(c Config) Config {
+	c.Timeout = PostCallTimeout
+	if c.Adapter == AdapterChatJSON {
+		c.MaxTokens = PostCallMaxTokens
+	}
+	return c
 }
 
 // AdapterFor is the adapter a slug implies: ScaleDown's extract models are

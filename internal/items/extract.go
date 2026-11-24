@@ -129,10 +129,10 @@ func (x *Extract) Propose(ctx context.Context, w Window) (Result, error) {
 	content, res, err := x.c.complete(ctx, request{
 		Messages:  []message{{Role: "user", Content: input}},
 		Provider:  prefs,
-		MaxTokens: ExtractMaxTokens,
+		MaxTokens: x.c.tokens(ExtractMaxTokens),
 	})
 	if err != nil {
-		return Result{}, err
+		return res, err
 	}
 	var a extractAnswer
 	if err := json.Unmarshal([]byte(content), &a); err != nil || a.Entities == nil {

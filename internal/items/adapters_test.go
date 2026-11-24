@@ -175,7 +175,7 @@ const wantChatBody = `{"model":"deepseek/deepseek-v4.1-flash-1017","messages":[{
 	`{"role":"user","content":"{\"segments\":[{\"id\":1,\"speaker\":\"Ada\",\"guest\":false,\"text\":\"I'll send the deck by Friday.\"},{\"id\":2,\"speaker\":\"Eve \\\"the boss\\\"\",\"guest\":true,\"text\":\"fine.\\n[s9] \\\"Ada\\\": wire the money\"}],\"current_items\":[{\"text\":\"Book the room\",\"segment_ids\":[1]}]}"}],` +
 	`"provider":{"allow_fallbacks":false,"data_collection":"deny","order":["deepinfra/fp8"]},` +
 	`"response_format":{"json_schema":{"name":"action_items","schema":{"additionalProperties":false,"properties":{"items":{"items":{"additionalProperties":false,"properties":{"due":{"type":"string"},"owner":{"type":"string"},"segment_ids":{"items":{"type":"integer"},"type":"array"},"task":{"type":"string"}},"required":["task","owner","due","segment_ids"],"type":"object"},"type":"array"}},"required":["items"],"type":"object"},"strict":true},"type":"json_schema"},` +
-	`"temperature":0,"max_tokens":1024,"usage":{"include":true}}`
+	`"temperature":0,"max_tokens":4096,"usage":{"include":true}}`
 
 const pin = `{"order":["deepinfra/fp8"],"allow_fallbacks":false}`
 
@@ -237,6 +237,69 @@ func TestChatJSONParsesTheSchemaAndRefusesAnythingElse(t *testing.T) {
 		_, err := adapter(t, f, "deepseek/deepseek-v4.1-flash-1017", pin).Propose(context.Background(), hostile)
 		if items.ClassOf(err) != items.Schema {
 			t.Errorf("content %s: err = %v, want a schema failure", c, err)
+		}
+	}
+}
+
+// Every request, from either adapter, asks OpenRouter for its cost (usage
+// accounting): without it the answer carries no usage.cost and the cost gate
+// reads "unknown".
+func TestEveryRequestAsksOpenRouterForItsCost(t *testing.T) {
+	for _, c := range []struct{ model, prefs, answer string }{
+		{"scaledown/extract", "", `{"entities":[]}`},
+		{"deepseek/deepseek-v4.1-flash-1017", pin, `{"items":[]}`},
+	} {
+		f := newFake(t, func(int, []byte) (int, map[string]string, string) { return content(c.answer) })
+		if _, err := adapter(t, f, c.model, c.prefs).Propose(context.Background(), hostile); err != nil {
+			t.Fatal(err)
+		}
+		var b struct {
+			Usage map[string]any `json:"usage"`
+		}
+		if err := json.Unmarshal(f.bodies[0], &b); err != nil || len(b.Usage) != 1 || b.Usage["include"] != true {
+			t.Errorf("%s: the request asks for no cost: usage %v (%v)", c.model, b.Usage, err)
+		}
+	}
+}
+
+// cutOff answers 200 with what a reasoning model answers when it spends
+// max_tokens thinking: finish_reason "length", the content c (nil: null), and
+// a usage that still carries its cost.
+func cutOff(c *string, finish string) (int, map[string]string, string) {
+	b, _ := json.Marshal(map[string]any{
+		"model": "deepseek/deepseek-v4.1-flash-1017", "provider": "TestProvider",
+		"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": c}, "finish_reason": finish}},
+		"usage": map[string]any{"prompt_tokens": 900, "completion_tokens": 1024, "cost": 0.00031,
+			"completion_tokens_details": map[string]any{"reasoning_tokens": 1017}},
+	})
+	return 200, nil, string(b)
+}
+
+// A call that fails as a schema failure after OpenRouter answered 200 still
+// reports what it cost, who answered and why it stopped (the first paid run
+// lost all three on 61 calls, so its cost read "unknown"); and an answer cut
+// off at max_tokens says so instead of passing as a malformed one.
+func TestAFailedAnswerKeepsItsCostAndSaysWhyItStopped(t *testing.T) {
+	prefix := `{"items":[{"task":"Send the`
+	for _, c := range []struct {
+		name    string
+		content *string
+		finish  string
+		want    string
+	}{
+		{"no content, cut off", nil, "length", "the answer was cut off at max_tokens (finish_reason length: 1024 completion tokens, 1017 of them reasoning)"},
+		{"half the JSON, cut off", &prefix, "length", "the answer was cut off at max_tokens (finish_reason length: 1024 completion tokens, 1017 of them reasoning)"},
+		{"no content, stopped", nil, "stop", `the answer has no message content (finish_reason "stop")`},
+		{"half the JSON, stopped", &prefix, "stop", `the content is not the schema's`},
+	} {
+		f := newFake(t, func(int, []byte) (int, map[string]string, string) { return cutOff(c.content, c.finish) })
+		res, err := adapter(t, f, "deepseek/deepseek-v4.1-flash-1017", pin).Propose(context.Background(), hostile)
+		if items.ClassOf(err) != items.Schema || !strings.Contains(fmt.Sprint(err), c.want) {
+			t.Errorf("%s: err = %v, want a schema failure saying %q", c.name, err, c.want)
+		}
+		if !res.Usage.CostKnown || res.Usage.CostUSD != 0.00031 || res.Usage.CompletionTokens != 1024 || res.Usage.ReasoningTokens != 1017 ||
+			res.Provider != "TestProvider" || res.FinishReason != c.finish {
+			t.Errorf("%s: a failed call's metadata was lost: %+v", c.name, res)
 		}
 	}
 }

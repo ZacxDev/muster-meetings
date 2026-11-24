@@ -23,10 +23,24 @@
 // the worst of the two (each metric the worse corpus's: it must pass on
 // both), and the choice reads those worst-of-both numbers.
 //
+// Every model is judged per PROFILE (-profiles, default both), each with
+// its own latency bar and its own choice, so a model can be chosen for one
+// and not the other:
+//
+//   - live: the in-call panel, items.Loop replayed every 10 s of the
+//     meeting's clock, p95 ≤ 10 s (the window period);
+//   - postcall: the pass over the whole meeting after End, items.PostCall
+//     itself (items.PostCallConfig's timeout and max_tokens), p95 ≤ 60 s a
+//     call.
+//
+// Every other bar is the same for both.
+//
 // Order, every run: the lint of both corpora (every source must have its
-// variant), then the four controls on each (a failure of either stops the
-// run before any model is called), then each model -runs times. It prints a table per model and writes the machine-readable result
-// to -out (the markdown table, for docs/items-eval-<date>.md, to -md).
+// variant), then the controls on each corpus through each profile's replay
+// (a failure of any stops the run before any model is called), then each
+// model -runs times per profile. It prints a table per model and profile and
+// writes the machine-readable result to -out (the markdown tables, for
+// docs/items-eval-<date>.md, to -md).
 // Exit status: 0 when the controls passed and every model was scored
 // (whatever the gates said; the choice is in the output), 1 otherwise.
 package main
@@ -67,14 +81,22 @@ type Result struct {
 	STTCorpus   Stats           `json:"stt_corpus"`
 	STTControls []ControlResult `json:"stt_controls"`
 	STTMeetings []STTMeeting    `json:"stt_meetings"`
-	Models      []Scored        `json:"models"`
-	Requests    []Request       `json:"requests"`
-	Choice      string          `json:"choice"`
+	// Controls and STTControls are the live profile's controls;
+	// PostCallControls and STTPostCallControls the same through the
+	// post-call pass. A profile not run has none.
+	PostCallControls    []ControlResult `json:"postcall_controls,omitempty"`
+	STTPostCallControls []ControlResult `json:"stt_postcall_controls,omitempty"`
+	Profiles            []string        `json:"profiles"`
+	Models              []Scored        `json:"models"`
+	Requests            []Request       `json:"requests"`
+	// Choices is each profile's choice: a model, or "off".
+	Choices map[string]string `json:"choices"`
 }
 
 // Request is one call, for the record of which provider answered it.
 type Request struct {
 	Model    string        `json:"model"`
+	Profile  string        `json:"profile"`
 	Corpus   string        `json:"corpus"`
 	Run      int           `json:"run"`
 	Meeting  string        `json:"meeting"`
@@ -83,7 +105,17 @@ type Request struct {
 	Answered string        `json:"answered_model"`
 	Elapsed  time.Duration `json:"elapsed_ns"`
 	Class    string        `json:"class,omitempty"`
-	CostUSD  float64       `json:"cost_usd"`
+	// Error is the failure as items.Error says it (never OpenRouter's own
+	// message, which goes to stderr only).
+	Error     string  `json:"error,omitempty"`
+	CostUSD   float64 `json:"cost_usd"`
+	CostKnown bool    `json:"cost_known"`
+	// FinishReason and the tokens are what OpenRouter reported, failed call
+	// or not (reasoning tokens count against max_tokens).
+	FinishReason     string `json:"finish_reason,omitempty"`
+	PromptTokens     int    `json:"prompt_tokens,omitempty"`
+	CompletionTokens int    `json:"completion_tokens,omitempty"`
+	ReasoningTokens  int    `json:"reasoning_tokens,omitempty"`
 }
 
 // STTMeeting is one variant's record.
@@ -115,11 +147,17 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 	out := fs.String("out", "items-eval-"+date+".json", "the result file")
 	md := fs.String("md", "", "also write the result tables as markdown here")
 	base := fs.String("base", items.DefaultBaseURL, "OpenRouter's API root")
-	timeout := fs.Duration("timeout", 30*time.Second, "per-request timeout")
+	timeout := fs.Duration("timeout", 30*time.Second, "per-request timeout, live profile (postcall's is items.PostCallTimeout)")
+	profFlag := fs.String("profiles", strings.Join(profiles, ","), "comma-separated profiles to judge: live, postcall")
 	controlsOnly := fs.Bool("controls-only", false, "lint the corpus and run the controls, then stop (no key, no cost)")
 	prefs := prefFlags{}
 	fs.Var(prefs, "prefs", "model=JSON: that model's OpenRouter provider object (repeatable)")
 	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+	profs, err := parseProfiles(*profFlag)
+	if err != nil {
+		fmt.Fprintln(stderr, "items-eval:", err)
 		return 1
 	}
 	ms, err := LoadCorpus(*corpus)
@@ -132,7 +170,7 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 		fmt.Fprintln(stderr, "items-eval:", err)
 		return 1
 	}
-	res := Result{Date: date, Corpus: CorpusStats(ms), STTCorpus: CorpusStats(sms)}
+	res := Result{Date: date, Corpus: CorpusStats(ms), STTCorpus: CorpusStats(sms), Profiles: profs, Choices: map[string]string{}}
 	for _, v := range sms {
 		if v.STT != nil && v.STT.WER != nil {
 			res.STTMeetings = append(res.STTMeetings, STTMeeting{v.ID, v.STT.Engine, *v.STT.WER, v.STT.Words, v.STT.Tool})
@@ -151,12 +189,23 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 
 	fmt.Fprintf(stdout, "stt corpus: %s\n\n", sttSummary(res))
 
-	res.Controls = RunControls(ms)
-	res.STTControls = RunControls(sms)
-	for _, set := range []struct {
+	type set struct {
 		name string
 		cs   []ControlResult
-	}{{"controls", res.Controls}, {"controls, stt corpus", res.STTControls}} {
+	}
+	var sets []set
+	for _, prof := range profs {
+		c, sc := RunControls(ms, prof), RunControls(sms, prof)
+		if prof == profileLive {
+			res.Controls, res.STTControls = c, sc
+		} else {
+			res.PostCallControls, res.STTPostCallControls = c, sc
+		}
+		sets = append(sets, set{"controls, " + prof, c}, set{"controls, " + prof + ", stt corpus", sc})
+	}
+	controlsPass := true
+	for _, set := range sets {
+		controlsPass = controlsPass && ControlsPass(set.cs)
 		fmt.Fprintf(stdout, "%s:\n", set.name)
 		for _, c := range set.cs {
 			mark := "pass"
@@ -167,7 +216,7 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 		}
 		fmt.Fprintln(stdout)
 	}
-	if !ControlsPass(res.Controls) || !ControlsPass(res.STTControls) {
+	if !controlsPass {
 		fmt.Fprintln(stderr, "items-eval: a control did not score as stated; no model is scored")
 		writeResult(*out, res, stderr)
 		return 1
@@ -198,38 +247,49 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 			ok = false
 			continue
 		}
-		var clean, sttRuns []Metrics
-		for r := range *runs {
-			a, err := items.New(items.Config{Model: model, Adapter: ad, Prefs: p, APIKey: key, BaseURL: *base, Timeout: *timeout}, nil)
-			if err != nil {
-				fmt.Fprintf(stderr, "items-eval: %s: %v\n", model, err)
-				return 1
-			}
-			o := ReplayOpts{Sleep: time.Sleep, Detail: func(meeting string, seq int, d string) {
-				fmt.Fprintf(stderr, "  %s run %d %s window %d: openrouter said: %s\n", model, r+1, meeting, seq, d)
-			}}
-			for _, c := range []struct {
-				name string
-				ms   []*Meeting
-				out  *[]Metrics
-			}{{corpusClean, ms, &clean}, {corpusSTT, sms, &sttRuns}} {
-				var mr []MeetingRun
-				for _, m := range c.ms {
-					x := Replay(context.Background(), a, m, o)
-					mr = append(mr, x)
-					for _, w := range x.Windows {
-						res.Requests = append(res.Requests, Request{model, c.name, r + 1, m.ID, w.Seq, w.Provider, w.Model, w.Elapsed, w.Class, w.CostUSD})
-					}
+		for _, prof := range profs {
+			var clean, sttRuns []Metrics
+			replay := replayer(prof)
+			for r := range *runs {
+				cfg := items.Config{Model: model, Adapter: ad, Prefs: p, APIKey: key, BaseURL: *base, Timeout: *timeout}
+				if prof == profilePostCall {
+					cfg = items.PostCallConfig(cfg)
 				}
-				met := Score(mr)
-				*c.out = append(*c.out, met)
-				fmt.Fprintf(stdout, "%s run %d, %s corpus: recall %.2f, precision %.2f, duplicates %.2f, p95 %v, %d calls\n",
-					model, r+1, c.name, met.Recall, met.Precision, met.DupRate, met.P95.Round(time.Millisecond), met.Calls)
+				a, err := items.New(cfg, nil)
+				if err != nil {
+					fmt.Fprintf(stderr, "items-eval: %s: %v\n", model, err)
+					return 1
+				}
+				o := ReplayOpts{Sleep: time.Sleep, Detail: func(meeting string, seq int, d string) {
+					fmt.Fprintf(stderr, "  %s %s run %d %s call %d: openrouter said: %s\n", model, prof, r+1, meeting, seq, d)
+				}}
+				for _, c := range []struct {
+					name string
+					ms   []*Meeting
+					out  *[]Metrics
+				}{{corpusClean, ms, &clean}, {corpusSTT, sms, &sttRuns}} {
+					var mr []MeetingRun
+					for _, m := range c.ms {
+						x := replay(context.Background(), a, m, o)
+						mr = append(mr, x)
+						for _, w := range x.Windows {
+							res.Requests = append(res.Requests, Request{Model: model, Profile: prof, Corpus: c.name, Run: r + 1, Meeting: m.ID, Window: w.Seq,
+								Provider: w.Provider, Answered: w.Model, Elapsed: w.Elapsed, Class: w.Class, Error: w.Error, CostUSD: w.CostUSD, CostKnown: w.CostKnown,
+								FinishReason: w.FinishReason, PromptTokens: w.PromptTokens, CompletionTokens: w.CompletionTokens, ReasoningTokens: w.ReasoningTokens})
+						}
+					}
+					met := Score(mr)
+					*c.out = append(*c.out, met)
+					fmt.Fprintf(stdout, "%s %s run %d, %s corpus: recall %.2f, precision %.2f, duplicates %.2f, p95 %v, %d calls\n",
+						model, prof, r+1, c.name, met.Recall, met.Precision, met.DupRate, met.P95.Round(time.Millisecond), met.Calls)
+				}
 			}
+			res.Models = append(res.Models, NewScored(model, ad, prof, p, clean, sttRuns))
 		}
-		res.Models = append(res.Models, NewScored(model, ad, p, clean, sttRuns))
 	}
-	res.Choice = Choose(res.Models)
+	for _, prof := range profs {
+		res.Choices[prof] = Choose(res.Models, prof)
+	}
 	table := Tables(res)
 	fmt.Fprintln(stdout)
 	fmt.Fprint(stdout, table)
@@ -277,15 +337,44 @@ func sttSummary(res Result) string {
 		len(res.STTMeetings), wer, sc.words, providers(engines), strings.Join(per, ", "))
 }
 
-// Tables is the result as markdown: one table per model, its gates on the
-// worst of both corpora (the gate) beside each corpus's own values, and the
-// choice.
+// Tables is the result as markdown: per profile, one table per model, its
+// gates on the worst of both corpora (the gate) beside each corpus's own
+// values, and the profile's choice; then every choice in one line.
 func Tables(res Result) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Action-item evaluation, %s\n\n", res.Date)
 	st := res.Corpus
 	fmt.Fprintf(&b, "Corpus: %d meetings, %d labels, %d windows (%.0f%% with no item), each as written (clean) and through the real STT from synthesised speech (stt: %s). Controls: all passed on both. **The gate is the worse of the two corpora, per metric:** a model passes only if it passes on both, and the choice reads the same worst-of-both numbers.\n\n",
 		st.Meetings, st.Labels, st.Windows, st.NoItemShare*100, sttSummary(res))
+	for _, prof := range res.Profiles {
+		fmt.Fprintf(&b, "## Profile `%s`: %s\n\n", prof, profileUse[prof])
+		for _, s := range res.Models {
+			if s.Profile == prof {
+				modelTable(&b, s)
+			}
+		}
+		fmt.Fprintf(&b, "**Choice, %s:** `%s`.\n\n", prof, res.Choices[prof])
+	}
+	b.WriteString("**Choices:**")
+	for i, prof := range res.Profiles {
+		sep := ","
+		if i == len(res.Profiles)-1 {
+			sep = "."
+		}
+		fmt.Fprintf(&b, " %s `%s`%s", prof, res.Choices[prof], sep)
+	}
+	b.WriteString("\n")
+	return b.String()
+}
+
+// profileUse is each profile's one-line description in the tables.
+var profileUse = map[string]string{
+	profileLive:     "the in-call panel (`items.Loop`, a window every 10 s), latency p95 ≤ 10 s",
+	profilePostCall: "one pass over the whole meeting after End (`items.PostCall`), feeding the owner-approved emails, latency p95 ≤ 60 s a call",
+}
+
+// modelTable is one model's table under one profile.
+func modelTable(b *strings.Builder, s Scored) {
 	val := func(gs []Gate, i int) string {
 		if i < len(gs) {
 			return gs[i].Value
@@ -298,32 +387,51 @@ func Tables(res Result) string {
 		}
 		return "fails"
 	}
-	for _, s := range res.Models {
-		pj, _ := json.Marshal(s.Prefs)
-		fmt.Fprintf(&b, "## `%s` (%s), %d runs, worst per metric\n\nProvider object: `%s`. Answered by: %s.\n\n", s.Model, s.Adapter, len(s.STT.Runs), pj, providers(mergeCounts(s.STT.Worst.Providers, s.Clean.Worst.Providers)))
-		b.WriteString("| metric | worst of both (the gate) | stt | clean | bar | pass |\n|---|---|---|---|---|---|\n")
-		for i, g := range s.Combined.Gates {
-			p := "yes"
-			if !g.Pass {
-				p = "**no**"
-			}
-			if !g.Gating {
-				p += " (reported, not a gate)"
-			}
-			fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s |\n", g.Name, g.Value, val(s.STT.Gates, i), val(s.Clean.Gates, i), g.Bar, p)
+	pj, _ := json.Marshal(s.Prefs)
+	fmt.Fprintf(b, "### `%s` (%s), %s, %d runs, worst per metric\n\nProvider object: `%s`. Answered by: %s.\n\n", s.Model, s.Adapter, s.Profile, len(s.STT.Runs), pj, providers(mergeCounts(s.STT.Worst.Providers, s.Clean.Worst.Providers)))
+	b.WriteString("| metric | worst of both (the gate) | stt | clean | bar | pass |\n|---|---|---|---|---|---|\n")
+	for i, g := range s.Combined.Gates {
+		p := "yes"
+		if !g.Pass {
+			p = "**no**"
 		}
-		fmt.Fprintf(&b, "| latency p50 | %v | %v | %v | — | — |\n", s.Combined.Worst.P50.Round(time.Millisecond), s.STT.Worst.P50.Round(time.Millisecond), s.Clean.Worst.P50.Round(time.Millisecond))
-		if s.Adapter == items.AdapterExtract {
-			fmt.Fprintf(&b, "| spans whose `text` was not the input, whole corpus | %d | %d | %d | — | — |\n", s.Combined.Worst.Rewritten, s.STT.Worst.Rewritten, s.Clean.Worst.Rewritten)
+		if !g.Gating {
+			p += " (reported, not a gate)"
 		}
-		verdict := "passes every gate on both corpora"
-		if !s.Pass {
-			verdict = "fails"
-		}
-		fmt.Fprintf(&b, "\n**%s %s** (on its own, the STT corpus %s and the clean corpus %s).\n\n", s.Model, verdict, pass(s.STT.Pass), pass(s.Clean.Pass))
+		fmt.Fprintf(b, "| %s | %s | %s | %s | %s | %s |\n", g.Name, g.Value, val(s.STT.Gates, i), val(s.Clean.Gates, i), g.Bar, p)
 	}
-	fmt.Fprintf(&b, "**Choice:** `%s`.\n", res.Choice)
-	return b.String()
+	fmt.Fprintf(b, "| latency p50 | %v | %v | %v | — | — |\n", s.Combined.Worst.P50.Round(time.Millisecond), s.STT.Worst.P50.Round(time.Millisecond), s.Clean.Worst.P50.Round(time.Millisecond))
+	fmt.Fprintf(b, "| calls, fewest in a run | %d | %d | %d | — | — |\n", s.Combined.Worst.Calls, s.STT.Worst.Calls, s.Clean.Worst.Calls)
+	if s.Adapter == items.AdapterExtract {
+		fmt.Fprintf(b, "| spans whose `text` was not the input, whole corpus | %d | %d | %d | — | — |\n", s.Combined.Worst.Rewritten, s.STT.Worst.Rewritten, s.Clean.Worst.Rewritten)
+	}
+	verdict := "passes every gate on both corpora"
+	if !s.Pass {
+		verdict = "fails"
+	}
+	fmt.Fprintf(b, "\n**%s %s, %s** (on its own, the STT corpus %s and the clean corpus %s).\n\n", s.Model, verdict, s.Profile, pass(s.STT.Pass), pass(s.Clean.Pass))
+}
+
+// parseProfiles reads -profiles: known names, at least one, each once, in
+// the order given.
+func parseProfiles(v string) ([]string, error) {
+	var out []string
+	seen := map[string]bool{}
+	for _, p := range strings.Split(v, ",") {
+		p = strings.TrimSpace(p)
+		if p == "" || seen[p] {
+			continue
+		}
+		if _, ok := barP95(p); !ok {
+			return nil, fmt.Errorf("-profiles: unknown profile %q (want %s)", p, strings.Join(profiles, ", "))
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	if len(out) == 0 {
+		return nil, errors.New("-profiles: no profile")
+	}
+	return out, nil
 }
 
 func mergeCounts(a, b map[string]int) map[string]int {

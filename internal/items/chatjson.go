@@ -19,8 +19,15 @@ Answer only NEW action items: a task a person in the meeting commits to do, or i
 
 For each item give: "task", a short imperative sentence; "owner", the speaker name of the person who will do it, exactly as it appears in segments ("" if nobody took it); "due", when it is due as it was said ("" if not said); "segment_ids", the ids of the segments that state it (the request and the acceptance both, when one person asks and another agrees). Answer {"items": []} when there is none.`
 
-// ChatJSONMaxTokens bounds a chat_json answer.
-const ChatJSONMaxTokens = 1024
+// ChatJSONMaxTokens bounds a chat_json answer (one live window). A reasoning
+// model's thinking counts against it: at 1024, the first paid run lost 61 of
+// 864 DeepSeek calls (7%) with no content at all, every one of them 11–17 s
+// long where a call that answered took 3.8 s at the median, and its one
+// malformed answer cost what the costliest answered calls cost ($0.00031,
+// against a top band of $0.00031–0.00033, all 12–13.5 s): a ceiling, which
+// is the budget, not the schema. 4096 is four times it; the request
+// timeout, not this, bounds how long a call may run.
+const ChatJSONMaxTokens = 4096
 
 // chatJSONSchema is the strict schema (strict mode: every property
 // required, no others).
@@ -112,10 +119,10 @@ func (c *ChatJSON) Propose(ctx context.Context, w Window) (Result, error) {
 		Provider:       prefs,
 		ResponseFormat: chatJSONSchema,
 		Temperature:    &zero,
-		MaxTokens:      ChatJSONMaxTokens,
+		MaxTokens:      c.c.tokens(ChatJSONMaxTokens),
 	})
 	if err != nil {
-		return Result{}, err
+		return res, err
 	}
 	d := json.NewDecoder(bytes.NewReader([]byte(strings.TrimSpace(content))))
 	d.DisallowUnknownFields()

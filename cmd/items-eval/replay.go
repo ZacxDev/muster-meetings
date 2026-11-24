@@ -25,6 +25,38 @@ type WindowRun struct {
 	CostUSD   float64 `json:"cost_usd"`
 	CostKnown bool    `json:"cost_known"`
 	Rewritten int     `json:"rewritten,omitempty"`
+	// What OpenRouter said about the answer, failed or not: why it stopped,
+	// and its tokens (reasoning counts against max_tokens).
+	FinishReason     string `json:"finish_reason,omitempty"`
+	PromptTokens     int    `json:"prompt_tokens,omitempty"`
+	CompletionTokens int    `json:"completion_tokens,omitempty"`
+	ReasoningTokens  int    `json:"reasoning_tokens,omitempty"`
+}
+
+// windowRun records one call.
+func windowRun(seq int, atMS int64, st items.Step, m *Meeting, o ReplayOpts) WindowRun {
+	u := st.Result.Usage
+	wr := WindowRun{Seq: seq, AtMS: atMS, Proposed: len(st.Result.Items), Kept: len(st.Kept), Elapsed: st.Elapsed,
+		Provider: st.Result.Provider, Model: st.Result.Model, CostUSD: u.CostUSD, CostKnown: u.CostKnown,
+		Rewritten: st.Result.Rewritten, FinishReason: st.Result.FinishReason,
+		PromptTokens: u.PromptTokens, CompletionTokens: u.CompletionTokens, ReasoningTokens: u.ReasoningTokens}
+	for _, s := range st.Window.Segments {
+		wr.Segments = append(wr.Segments, s.ID)
+	}
+	for _, d := range st.Dropped {
+		if wr.Dropped == nil {
+			wr.Dropped = map[string]int{}
+		}
+		wr.Dropped[d.Reason]++
+	}
+	if st.Err != nil {
+		wr.Class, wr.Error = items.ClassOf(st.Err).String(), st.Err.Error()
+		var de *items.DetailError
+		if o.Detail != nil && errors.As(st.Err, &de) {
+			o.Detail(m.ID, wr.Seq, de.Detail)
+		}
+	}
+	return wr
 }
 
 // MeetingRun is one meeting replayed through one adapter.
@@ -67,26 +99,7 @@ func Replay(ctx context.Context, a items.Adapter, m *Meeting, o ReplayOpts) Meet
 		if !called {
 			continue
 		}
-		wr := WindowRun{Seq: len(run.Windows), AtMS: t, Proposed: len(st.Result.Items), Kept: len(st.Kept), Elapsed: st.Elapsed,
-			Provider: st.Result.Provider, Model: st.Result.Model, CostUSD: st.Result.Usage.CostUSD, CostKnown: st.Result.Usage.CostKnown,
-			Rewritten: st.Result.Rewritten}
-		for _, s := range st.Window.Segments {
-			wr.Segments = append(wr.Segments, s.ID)
-		}
-		for _, d := range st.Dropped {
-			if wr.Dropped == nil {
-				wr.Dropped = map[string]int{}
-			}
-			wr.Dropped[d.Reason]++
-		}
-		if st.Err != nil {
-			wr.Class, wr.Error = items.ClassOf(st.Err).String(), st.Err.Error()
-			var de *items.DetailError
-			if o.Detail != nil && errors.As(st.Err, &de) {
-				o.Detail(m.ID, wr.Seq, de.Detail)
-			}
-		}
-		run.Windows = append(run.Windows, wr)
+		run.Windows = append(run.Windows, windowRun(len(run.Windows), t, st, m, o))
 		if err := l.Stopped(); err != nil {
 			run.Fatal = err.Error()
 			break
@@ -96,5 +109,29 @@ func Replay(ctx context.Context, a items.Adapter, m *Meeting, o ReplayOpts) Meet
 		}
 	}
 	run.Emitted = append(run.Emitted, l.Items()...)
+	return run
+}
+
+// ReplayPostCall runs meeting m through the post-call pass, as phase 4b will
+// after End: items.PostCall itself over the meeting's final segments, every
+// call recorded (at the meeting's end, its clock), its items the emitted
+// ones. NoGuards does not apply: the pass has no unguarded mode.
+func ReplayPostCall(ctx context.Context, a items.Adapter, m *Meeting, o ReplayOpts) MeetingRun {
+	run := MeetingRun{Meeting: m, MeetingID: m.ID, DurationMS: m.DurationMS(), Emitted: []items.Item{}}
+	sleep := o.Sleep
+	if sleep == nil {
+		// The replay's nil is no wait; PostCall's would wait on the clock.
+		sleep = func(time.Duration) {}
+	}
+	got, err := items.PostCall(ctx, a, m.Timeline(), items.PostCallOpts{
+		Sleep: sleep,
+		OnCall: func(_ int, st items.Step) {
+			run.Windows = append(run.Windows, windowRun(len(run.Windows), m.DurationMS(), st, m, o))
+		},
+	})
+	if items.ClassOf(err) == items.Fatal {
+		run.Fatal = err.Error()
+	}
+	run.Emitted = append(run.Emitted, got...)
 	return run
 }

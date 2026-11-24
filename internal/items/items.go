@@ -10,8 +10,9 @@
 //   - chat_json: any OpenRouter chat model under a strict JSON schema, which
 //     rewrites each item as owner, task and due, citing segment ids.
 //
-// This package is phase 4a's: the adapters, the guards and the window
-// selection, all of which cmd/items-eval replays. It stores nothing; the
+// This package is phase 4a's: the adapters, the guards, the window
+// selection and the live loop (Loop), and the post-call pass over the whole
+// meeting after End (PostCall), all of which cmd/items-eval replays. It stores nothing; the
 // live worker, its table and its panel are phase 4b's.
 //
 // 🔴 What was said is untrusted text (README: "The transcript"). Every
@@ -73,6 +74,10 @@ type Usage struct {
 	// read a missing cost as free).
 	CostUSD   float64 `json:"cost_usd"`
 	CostKnown bool    `json:"cost_known"`
+	// ReasoningTokens is the completion tokens the model spent reasoning
+	// (usage.completion_tokens_details.reasoning_tokens; 0 when none was
+	// reported). They count against max_tokens.
+	ReasoningTokens int `json:"reasoning_tokens"`
 }
 
 // Result is one adapter call's answer, before the guards.
@@ -83,6 +88,11 @@ type Result struct {
 	Provider string
 	Model    string
 	Usage    Usage
+	// FinishReason is the first choice's finish_reason ("stop", "length",
+	// …; "" when none was given). It and Usage are kept on a failed call
+	// whenever OpenRouter answered 200, so a schema failure still says what
+	// it cost and why it stopped.
+	FinishReason string
 	// Rewritten counts extract spans whose `text` was not input[start:end]
 	// (S6 saw 1 in 22); a high count on a non-ASCII input would also say the
 	// offsets are not in characters.

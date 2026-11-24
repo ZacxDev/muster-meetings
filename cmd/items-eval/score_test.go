@@ -95,45 +95,68 @@ func TestACostOpenRouterDidNotReportFailsTheGate(t *testing.T) {
 	runs := scoringFixture()
 	runs[1].Windows[1].CostKnown = false
 	m := Score(runs)
-	for _, g := range Gates(m, items.AdapterChatJSON) {
+	for _, g := range Gates(m, items.AdapterChatJSON, profileLive) {
 		if g.Name == "cost per meeting-hour" && (g.Pass || g.Value != "unknown") {
 			t.Errorf("an unreported cost: gate %+v, want it failed as unknown", g)
 		}
 	}
 }
 
+// Every bar, exactly at it and just past it, under each profile: the
+// quality bars are the same for both; the latency bar is 10 s live and 60 s
+// post-call, written out here, not read from the code.
 func TestGatesAtTheirBars(t *testing.T) {
-	ok := Metrics{Recall: 0.80, Precision: 0.80, DupRate: 0.05, Assignee: 0.85, Calls: 100, P95: 4 * time.Second, SchemaRate: 0.01, CostKnown: true, CostPerHour: 0.05}
-	if g := Gates(ok, items.AdapterChatJSON); !Passes(g) {
-		t.Errorf("every metric exactly at its bar must pass: %+v", g)
-	}
-	bad := map[string]func(*Metrics){
-		"recall":                func(m *Metrics) { m.Recall = 0.79 },
-		"precision":             func(m *Metrics) { m.Precision = 0.79 },
-		"duplicate rate":        func(m *Metrics) { m.DupRate = 0.06 },
-		"assignee accuracy":     func(m *Metrics) { m.Assignee = 0.84 },
-		"latency p95":           func(m *Metrics) { m.P95 = 4*time.Second + time.Millisecond },
-		"schema failures":       func(m *Metrics) { m.SchemaRate = 0.011 },
-		"cost per meeting-hour": func(m *Metrics) { m.CostPerHour = 0.051 },
-		"fatal failures":        func(m *Metrics) { m.FatalFailures = 1 },
-	}
-	for name, f := range bad {
-		m := ok
-		f(&m)
-		gs := Gates(m, items.AdapterChatJSON)
-		if Passes(gs) {
-			t.Errorf("%s just past its bar: the run passed", name)
+	for _, pr := range []struct {
+		profile string
+		p95     time.Duration
+		bar     string
+	}{{profileLive, 10 * time.Second, "≤ 10s"}, {profilePostCall, 60 * time.Second, "≤ 60s"}} {
+		ok := Metrics{Recall: 0.80, Precision: 0.80, DupRate: 0.05, Assignee: 0.85, Calls: 100, P95: pr.p95, SchemaRate: 0.01, CostKnown: true, CostPerHour: 0.05}
+		if g := Gates(ok, items.AdapterChatJSON, pr.profile); !Passes(g) {
+			t.Errorf("%s: every metric exactly at its bar must pass: %+v", pr.profile, g)
 		}
-		for _, g := range gs {
-			if g.Name != name && !g.Pass {
-				t.Errorf("%s past its bar also failed %s", name, g.Name)
+		for _, g := range Gates(ok, items.AdapterChatJSON, pr.profile) {
+			if g.Name == "latency p95" && g.Bar != pr.bar {
+				t.Errorf("%s: the latency bar reads %q, want %q", pr.profile, g.Bar, pr.bar)
 			}
 		}
+		bad := map[string]func(*Metrics){
+			"recall":                func(m *Metrics) { m.Recall = 0.79 },
+			"precision":             func(m *Metrics) { m.Precision = 0.79 },
+			"duplicate rate":        func(m *Metrics) { m.DupRate = 0.06 },
+			"assignee accuracy":     func(m *Metrics) { m.Assignee = 0.84 },
+			"latency p95":           func(m *Metrics) { m.P95 = pr.p95 + time.Millisecond },
+			"schema failures":       func(m *Metrics) { m.SchemaRate = 0.011 },
+			"cost per meeting-hour": func(m *Metrics) { m.CostPerHour = 0.051 },
+			"fatal failures":        func(m *Metrics) { m.FatalFailures = 1 },
+		}
+		for name, f := range bad {
+			m := ok
+			f(&m)
+			gs := Gates(m, items.AdapterChatJSON, pr.profile)
+			if Passes(gs) {
+				t.Errorf("%s: %s just past its bar: the run passed", pr.profile, name)
+			}
+			for _, g := range gs {
+				if g.Name != name && !g.Pass {
+					t.Errorf("%s: %s past its bar also failed %s", pr.profile, name, g.Name)
+				}
+			}
+		}
+		m := ok
+		m.Assignee = 0.5
+		if !Passes(Gates(m, items.AdapterExtract, pr.profile)) {
+			t.Errorf("%s: assignee accuracy is reported, not a gate, for extract", pr.profile)
+		}
 	}
-	m := ok
-	m.Assignee = 0.5
-	if !Passes(Gates(m, items.AdapterExtract)) {
-		t.Error("assignee accuracy is reported, not a gate, for extract")
+	// The same p95, 30 s, between the two bars: post-call passes, live fails.
+	m := Metrics{Recall: 1, Precision: 1, Assignee: 1, Calls: 12, P95: 30 * time.Second, CostKnown: true}
+	if Passes(Gates(m, items.AdapterChatJSON, profileLive)) || !Passes(Gates(m, items.AdapterChatJSON, profilePostCall)) {
+		t.Errorf("p95 30 s: live passes %v, postcall passes %v; want false and true",
+			Passes(Gates(m, items.AdapterChatJSON, profileLive)), Passes(Gates(m, items.AdapterChatJSON, profilePostCall)))
+	}
+	if Passes(Gates(Metrics{Recall: 1, Precision: 1, Assignee: 1, Calls: 12, P95: 0, CostKnown: true}, items.AdapterChatJSON, "batch")) {
+		t.Error("an unknown profile has no latency bar and must fail it")
 	}
 }
 
@@ -155,7 +178,7 @@ func TestChoose(t *testing.T) {
 		// The choice reads the worst-of-both numbers: each corpus alone says
 		// the opposite.
 		inv := Verdict{Worst: Metrics{Recall: 1 - recall, CostPerHour: 1 - cost}}
-		return Scored{Model: model, Pass: pass, Combined: Verdict{Worst: Metrics{Recall: recall, CostPerHour: cost}}, STT: inv, Clean: inv}
+		return Scored{Model: model, Profile: profileLive, Pass: pass, Combined: Verdict{Worst: Metrics{Recall: recall, CostPerHour: cost}}, STT: inv, Clean: inv}
 	}
 	cases := []struct {
 		ss   []Scored
@@ -168,7 +191,7 @@ func TestChoose(t *testing.T) {
 		{[]Scored{s("scaledown/extract", false, 0.95, 0.005), s("deepseek/x", false, 0.99, 0.03)}, "off"},
 	}
 	for i, c := range cases {
-		if got := Choose(c.ss); got != c.want {
+		if got := Choose(c.ss, profileLive); got != c.want {
 			t.Errorf("case %d: Choose = %s, want %s", i, got, c.want)
 		}
 	}
@@ -177,18 +200,32 @@ func TestChoose(t *testing.T) {
 func TestTablesNameTheModelTheProviderAndTheChoice(t *testing.T) {
 	m := Score(scoringFixture())
 	p := Score(passingFixture())
-	res := Result{Date: "2026-11-24", Choice: "off", Models: []Scored{NewScored("deepseek/deepseek-v4.1-flash-1017", items.AdapterChatJSON,
-		map[string]any{"data_collection": "deny"}, []Metrics{p}, []Metrics{m})},
+	const ds = "deepseek/deepseek-v4.1-flash-1017"
+	deny := map[string]any{"data_collection": "deny"}
+	res := Result{Date: "2026-11-24", Profiles: []string{profileLive, profilePostCall},
+		Choices: map[string]string{profileLive: "off", profilePostCall: ds},
+		Models: []Scored{
+			NewScored(ds, items.AdapterChatJSON, profileLive, deny, []Metrics{p}, []Metrics{m}),
+			NewScored(ds, items.AdapterChatJSON, profilePostCall, deny, []Metrics{p}, []Metrics{p}),
+		},
 		STTMeetings: []STTMeeting{{"m01", "nemotron", 0.1, 100, "items-corpus-stt 1"}, {"m02", "nemotron", 0.4, 300, "items-corpus-stt 1"}}}
 	out := Tables(res)
-	for _, want := range []string{"# Action-item evaluation, 2026-11-24", "`deepseek/deepseek-v4.1-flash-1017` (chat_json)", `{"data_collection":"deny"}`,
-		"P1 (4), P2 (1)", "| metric | worst of both (the gate) | stt | clean | bar | pass |",
+	for _, want := range []string{"# Action-item evaluation, 2026-11-24",
+		"## Profile `live`: the in-call panel", "## Profile `postcall`: one pass over the whole meeting after End",
+		"### `deepseek/deepseek-v4.1-flash-1017` (chat_json), live, 1 runs", "### `deepseek/deepseek-v4.1-flash-1017` (chat_json), postcall, 1 runs",
+		`{"data_collection":"deny"}`, "P1 (4), P2 (1)", "| metric | worst of both (the gate) | stt | clean | bar | pass |",
 		"| recall | 0.75 | 0.75 | 1.00 | ≥ 0.80 | **no** |",
 		// precision: clean 1.00, stt 0.60; the worst is the STT's.
 		"| precision | 0.60 | 0.60 | 1.00 | ≥ 0.80 | **no** |",
+		// the same 5 s p95 against each profile's bar
+		"| latency p95 | 5s | 5s | 100ms | ≤ 10s | yes |", "| latency p95 | 100ms | 100ms | 100ms | ≤ 60s | yes |",
+		"| calls, fewest in a run | 1 | 5 | 1 | — | — |",
 		// (0.1·100 + 0.4·300) / 400 = 0.325
 		"word error rate 0.325 over 400 words (engines: nemotron (2); per meeting: m01 0.100, m02 0.400)",
-		"fails** (on its own, the STT corpus fails and the clean corpus passes)", "**Choice:** `off`."} {
+		"fails, live** (on its own, the STT corpus fails and the clean corpus passes)",
+		"passes every gate on both corpora, postcall** (on its own, the STT corpus passes and the clean corpus passes)",
+		"**Choice, live:** `off`.", "**Choice, postcall:** `deepseek/deepseek-v4.1-flash-1017`.",
+		"**Choices:** live `off`, postcall `deepseek/deepseek-v4.1-flash-1017`."} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the table has no %q:\n%s", want, out)
 		}
@@ -215,12 +252,12 @@ func ok(r float64) Metrics {
 // of the two; and the choice reads those worst-of-both numbers.
 func TestAModelMustPassBothCorpora(t *testing.T) {
 	good, bad := Score(passingFixture()), Score(scoringFixture())
-	if !Passes(Gates(good, items.AdapterChatJSON)) || Passes(Gates(bad, items.AdapterChatJSON)) {
+	if !Passes(Gates(good, items.AdapterChatJSON, profileLive)) || Passes(Gates(bad, items.AdapterChatJSON, profileLive)) {
 		t.Fatal("the fixtures: passing must pass and scoring must fail")
 	}
-	cleanOnly := NewScored("a/clean-only", items.AdapterChatJSON, nil, []Metrics{good}, []Metrics{bad})
-	sttOnly := NewScored("b/stt-only", items.AdapterChatJSON, nil, []Metrics{bad}, []Metrics{good})
-	both := NewScored("c/both", items.AdapterChatJSON, nil, []Metrics{good}, []Metrics{good})
+	cleanOnly := NewScored("a/clean-only", items.AdapterChatJSON, profileLive, nil, []Metrics{good}, []Metrics{bad})
+	sttOnly := NewScored("b/stt-only", items.AdapterChatJSON, profileLive, nil, []Metrics{bad}, []Metrics{good})
+	both := NewScored("c/both", items.AdapterChatJSON, profileLive, nil, []Metrics{good}, []Metrics{good})
 	if cleanOnly.Pass || !cleanOnly.Clean.Pass || cleanOnly.STT.Pass {
 		t.Errorf("perfect on clean, 0.75 on stt: pass %v (clean %v, stt %v), want a failure", cleanOnly.Pass, cleanOnly.Clean.Pass, cleanOnly.STT.Pass)
 	}
@@ -236,7 +273,7 @@ func TestAModelMustPassBothCorpora(t *testing.T) {
 	if w := cleanOnly.Combined.Worst; w.Recall != 0.75 || w.Precision != 0.60 || !near(w.CostPerHour, 0.010) {
 		t.Errorf("worst of both = recall %v precision %v cost %v, want 0.75 0.60 0.010", w.Recall, w.Precision, w.CostPerHour)
 	}
-	if got := Choose([]Scored{cleanOnly, sttOnly}); got != "off" {
+	if got := Choose([]Scored{cleanOnly, sttOnly}, profileLive); got != "off" {
 		t.Errorf("each passing one corpus only: Choose = %s, want off", got)
 	}
 	// Two models passing both. A: clean 1.00, stt 0.85; B: 0.90 on both.
@@ -247,21 +284,21 @@ func TestAModelMustPassBothCorpora(t *testing.T) {
 		name string
 		a    *Scored
 	}{
-		{"A better on clean", ptr(NewScored("a/x", items.AdapterChatJSON, nil, []Metrics{ok(1)}, []Metrics{ok(0.85)}))},
-		{"A better on stt", ptr(NewScored("a/x", items.AdapterChatJSON, nil, []Metrics{ok(0.85)}, []Metrics{ok(1)}))},
+		{"A better on clean", ptr(NewScored("a/x", items.AdapterChatJSON, profileLive, nil, []Metrics{ok(1)}, []Metrics{ok(0.85)}))},
+		{"A better on stt", ptr(NewScored("a/x", items.AdapterChatJSON, profileLive, nil, []Metrics{ok(0.85)}, []Metrics{ok(1)}))},
 	} {
-		b := NewScored("b/y", items.AdapterChatJSON, nil, []Metrics{ok(0.9)}, []Metrics{ok(0.9)})
+		b := NewScored("b/y", items.AdapterChatJSON, profileLive, nil, []Metrics{ok(0.9)}, []Metrics{ok(0.9)})
 		if !c.a.Pass || !b.Pass {
 			t.Fatalf("%s: both must pass: %v %v", c.name, c.a.Pass, b.Pass)
 		}
-		if got := Choose([]Scored{*c.a, b}); got != "b/y" {
+		if got := Choose([]Scored{*c.a, b}, profileLive); got != "b/y" {
 			t.Errorf("%s: Choose = %s, want b/y (worst-of-both recall 0.90 against 0.85)", c.name, got)
 		}
 	}
-	if v := Judge(nil, items.AdapterChatJSON); v.Pass {
+	if v := Judge(nil, items.AdapterChatJSON, profileLive); v.Pass {
 		t.Error("a corpus with no runs passed")
 	}
-	if v := Combine(Judge([]Metrics{good}, items.AdapterChatJSON), Judge(nil, items.AdapterChatJSON), items.AdapterChatJSON); v.Pass {
+	if v := Combine(Judge([]Metrics{good}, items.AdapterChatJSON, profileLive), Judge(nil, items.AdapterChatJSON, profileLive), items.AdapterChatJSON, profileLive); v.Pass {
 		t.Error("a model with no STT runs passed")
 	}
 }
@@ -277,7 +314,7 @@ func TestARewrittenSpanInTheNonASCIIMeetingFailsExtract(t *testing.T) {
 		t.Fatalf("rewritten %d, in the non-ASCII meeting %d; want 3 and 1", m.Rewritten, m.RewrittenUnicode)
 	}
 	gate := func(adapter string) Gate {
-		for _, g := range Gates(m, adapter) {
+		for _, g := range Gates(m, adapter, profileLive) {
 			if g.Name == "rewritten spans, non-ASCII meeting" {
 				return g
 			}

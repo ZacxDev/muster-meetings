@@ -48,15 +48,20 @@ type Step struct {
 	Err     error
 }
 
-// Run calls a on w and guards the answer.
+// Run calls a on w and guards the answer (at most MaxPerWindow kept).
 func Run(ctx context.Context, a Adapter, w Window) Step {
+	return run(ctx, a, w, MaxPerWindow)
+}
+
+// run is Run keeping at most limit.
+func run(ctx context.Context, a Adapter, w Window, limit int) Step {
 	t0 := time.Now()
 	res, err := a.Propose(ctx, w)
 	st := Step{Window: w, Result: res, Elapsed: time.Since(t0), Err: err}
 	if err != nil {
 		return st
 	}
-	st.Kept, st.Dropped = Guard(w, res.Items)
+	st.Kept, st.Dropped = GuardCap(w, res.Items, limit)
 	return st
 }
 

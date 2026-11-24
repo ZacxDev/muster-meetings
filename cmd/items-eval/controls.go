@@ -72,10 +72,19 @@ type ControlResult struct {
 	Metrics Metrics `json:"metrics"`
 }
 
-func replayAll(ms []*Meeting, mk func(*Meeting) items.Adapter, o ReplayOpts) []MeetingRun {
+// replayer is a profile's replay: Replay (live) or ReplayPostCall.
+func replayer(profile string) func(context.Context, items.Adapter, *Meeting, ReplayOpts) MeetingRun {
+	if profile == profilePostCall {
+		return ReplayPostCall
+	}
+	return Replay
+}
+
+func replayAll(ms []*Meeting, mk func(*Meeting) items.Adapter, o ReplayOpts, profile string) []MeetingRun {
 	var runs []MeetingRun
+	replay := replayer(profile)
 	for _, m := range ms {
-		runs = append(runs, Replay(context.Background(), mk(m), m, o))
+		runs = append(runs, replay(context.Background(), mk(m), m, o))
 	}
 	return runs
 }
@@ -86,29 +95,33 @@ func oracle(copies int, lie bool) func(*Meeting) items.Adapter {
 	}
 }
 
-// RunControls runs the four controls (the duplicator twice: raw, and
-// through the guards) on ms.
-func RunControls(ms []*Meeting) []ControlResult {
+// RunControls runs the four controls on ms through a profile's replay: for
+// live, the duplicator twice (raw, and through the guards); for postcall,
+// through the guards only (the raw duplicator checks the scorer, which is
+// the same for both, and the pass has no unguarded mode).
+func RunControls(ms []*Meeting, profile string) []ControlResult {
 	var out []ControlResult
 
-	n := Score(replayAll(ms, func(*Meeting) items.Adapter { return nullAdapter{} }, ReplayOpts{}))
+	n := Score(replayAll(ms, func(*Meeting) items.Adapter { return nullAdapter{} }, ReplayOpts{}, profile))
 	out = append(out, ControlResult{"null", "recall 0", fmt.Sprintf("recall %.2f, %d emitted", n.Recall, n.Emitted),
 		n.Recall == 0 && n.Emitted == 0, n})
 
-	o := Score(replayAll(ms, oracle(1, false), ReplayOpts{}))
+	o := Score(replayAll(ms, oracle(1, false), ReplayOpts{}, profile))
 	out = append(out, ControlResult{"oracle", "recall 1.00 and precision 1.00", fmt.Sprintf("recall %.2f, precision %.2f", o.Recall, o.Precision),
 		o.Recall == 1 && o.Precision == 1, o})
 
 	// Scored raw, the duplicator must FAIL the duplicate gate: the scorer
 	// can go red on it.
-	d := Score(replayAll(ms, oracle(2, false), ReplayOpts{NoGuards: true}))
-	out = append(out, ControlResult{"duplicator", "fails the duplicate gate (rate > 0.05)", fmt.Sprintf("duplicate rate %.2f", d.DupRate),
-		d.DupRate > barDupRate, d})
+	if profile == profileLive {
+		d := Score(replayAll(ms, oracle(2, false), ReplayOpts{NoGuards: true}, profile))
+		out = append(out, ControlResult{"duplicator", "fails the duplicate gate (rate > 0.05)", fmt.Sprintf("duplicate rate %.2f", d.DupRate),
+			d.DupRate > barDupRate, d})
+	}
 
 	// Through the guards, the same output must lose every second copy: at
 	// least half of what it proposed is dropped as a duplicate, and no label
 	// is matched twice. (Recall is the oracle's to check.)
-	dgr := replayAll(ms, oracle(2, false), ReplayOpts{})
+	dgr := replayAll(ms, oracle(2, false), ReplayOpts{}, profile)
 	dg := Score(dgr)
 	dprop, ddup := 0, 0
 	for _, r := range dgr {
@@ -121,7 +134,7 @@ func RunControls(ms []*Meeting) []ControlResult {
 		fmt.Sprintf("duplicate rate %.2f, %d of %d dropped as duplicates", dg.DupRate, ddup, dprop),
 		dg.DupRate == 0 && dprop > 0 && 2*ddup >= dprop, dg})
 
-	lr := replayAll(ms, oracle(1, true), ReplayOpts{})
+	lr := replayAll(ms, oracle(1, true), ReplayOpts{}, profile)
 	l := Score(lr)
 	proposed, outside := 0, 0
 	for _, r := range lr {

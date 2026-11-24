@@ -42,6 +42,12 @@ type Dropped struct {
 //
 // The kept items' citations are deduplicated, in the model's order.
 func Guard(w Window, proposed []Item) (kept []Item, dropped []Dropped) {
+	return GuardCap(w, proposed, MaxPerWindow)
+}
+
+// GuardCap is Guard keeping at most limit items: the post-call pass's cap is
+// what is left of the meeting's (PostCallMaxItems), not 5 per window.
+func GuardCap(w Window, proposed []Item, limit int) (kept []Item, dropped []Dropped) {
 	seen := append([]Item{}, w.Existing...)
 	for _, it := range proposed {
 		it.Segments = uniq(it.Segments)
@@ -68,7 +74,7 @@ func Guard(w Window, proposed []Item) (kept []Item, dropped []Dropped) {
 			dropped = append(dropped, Dropped{it, why})
 			continue
 		}
-		if len(kept) >= MaxPerWindow {
+		if len(kept) >= limit {
 			dropped = append(dropped, Dropped{it, DropOverCap})
 			continue
 		}

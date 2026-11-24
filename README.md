@@ -478,6 +478,11 @@ needs about 1.7 CPUs per recording at once (the sizing rule in
 route, no sweeper (`internal/server/norecording_test.go` pins every answer to
 the pre-recording commit's).
 
+- **Off means off.** An egress may run only while its meeting is live with
+  Record on: every report of one (its start's answer, each webhook, each
+  15 s reconcile pass) stops one that is not, again until it ends, so a stop
+  that failed once, or Record off landing while a start was in flight,
+  leaves nothing recording.
 - **The badge.** Everyone in the call sees "Recording · …" while Record is
   on, and **"Recording failed · …"** while the recording should run and does
   not: its start was refused (no Egress capacity), or its egress died and the
@@ -488,7 +493,8 @@ the pre-recording commit's).
   Chrome starting up) and from a part's end to the next part's first frame
   (`failed`) are stored as recording gaps; the share page names them.
 - **Time alignment.** A part's start is stored in **meeting time** (the
-  transcript's time base: ms from when the owner first joined) as **the
+  transcript's time base: ms from the meeting's origin, frozen at the
+  earlier of the owner's first join and the first admit) as **the
   egress itself reported it**: Egress's `FileInfo.started_at`, set when its
   pipeline reached PLAYING (the file's first frame), never when its webhook
   arrived. A segment at meeting time `T` is in the part `p` with
@@ -522,7 +528,9 @@ the pre-recording commit's).
   sweeper alone purges the finite choices**: an hourly pass deletes each
   due part's **object, then its row**; with the store down it deletes
   neither and tries again next hour, and an object already gone is not an
-  error. It logs counts, never a key or a title. There is **no bucket
+  error (a store that accepts the connection and never answers costs a call
+  at most 60 s; connecting is bounded at 10 s and every answer's headers at
+  30 s, streams included). It logs counts, never a key or a title. There is **no bucket
   lifecycle rule** (it would delete what is kept forever), so a sweeper
   that stops running keeps recordings past their time until it runs again.
 - **Delete now** (`DELETE /api/meetings/{id}/recording`, the archive's
@@ -533,7 +541,10 @@ the pre-recording commit's).
   part's object is deleted, then its row. With the store down nothing more
   is lost: the answer says `"pending"`, the parts stay queued, the archive
   says the files are being removed, and the hourly sweeper finishes them.
-  The transcript stays.
+  A part whose egress has not ended yet (Egress stays ENDING while it
+  uploads) is also pending: its row stays until its end arrives, and that
+  end deletes the uploaded object (nothing is deleted before the file is
+  final, so a late upload cannot outlive the delete). The transcript stays.
 - **For the analysis** (`GET /api/meetings/{id}/timeline`, owner only): the
   meeting, its parts and gaps, its screen shares, every segment with its
   `recording: {part, offset_ms}` (or `null`) and `screen_share`, and a frame
@@ -542,7 +553,12 @@ the pre-recording commit's).
   answers that moment as a JPEG (at most 1280 wide), with `X-Meeting-Ms`,
   `X-Recording-Part` and `X-Recording-Offset-Ms`. It runs ffmpeg against the
   store through a loopback range proxy (`internal/frames`), never copying the
-  file to disk. No model is called by this release.
+  file to disk. No model is called by this release. **Memory:** one ffmpeg
+  at a time, each with one thread (`-threads 1 -filter_threads 1`): a 1080p
+  H.264 frame peaked at **64.5 MiB** that way, against 198 MiB with ffmpeg's
+  default threads (measured on an 8-core host, ffmpeg 7.1). The plugin's
+  256 MiB limit therefore holds the plugin plus one sampling run; a second
+  request waits for the first.
 
 **Setting it up** (the operator; nothing here is applied for you):
 

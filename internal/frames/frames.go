@@ -154,10 +154,7 @@ func (s Sampler) Sample(ctx context.Context, parts []timeline.Part, open func(pa
 // one frame, scaled to at most MaxWidth, as JPEG on stdout.
 func (s Sampler) extract(ctx context.Context, input string, offsetMS int64) ([]byte, error) {
 	sec := strconv.FormatFloat(float64(offsetMS)/1000, 'f', 3, 64)
-	cmd := exec.CommandContext(ctx, s.FFmpeg, "-nostdin", "-hide_banner", "-loglevel", "error",
-		"-ss", sec, "-i", input, "-frames:v", "1", "-an", "-sn",
-		"-vf", fmt.Sprintf("scale='min(%d,iw)':-2", MaxWidth),
-		"-f", "image2pipe", "-c:v", "mjpeg", "-q:v", "3", "pipe:1")
+	cmd := exec.CommandContext(ctx, s.FFmpeg, Args(input, sec)...)
 	var stdout bytes.Buffer
 	cmd.Stdout = &limitWriter{w: &stdout, n: MaxJPEG}
 	cmd.Stderr = io.Discard // its text names the loopback URL; nothing in it is needed
@@ -169,6 +166,17 @@ func (s Sampler) extract(ctx context.Context, input string, offsetMS int64) ([]b
 		return nil, errors.New("frames: ffmpeg wrote no JPEG")
 	}
 	return b, nil
+}
+
+// Args is one extraction's ffmpeg arguments. 🔴 One thread everywhere
+// (decoder, filters, encoder): ffmpeg's defaults start a thread per core with
+// a frame's buffers each, ~198 MiB for a 1080p H.264 run (measured), in a
+// plugin limited to 256 MiB; the plugin also runs one ffmpeg at a time.
+func Args(input, offsetSeconds string) []string {
+	return []string{"-nostdin", "-hide_banner", "-loglevel", "error", "-threads", "1", "-filter_threads", "1",
+		"-ss", offsetSeconds, "-i", input, "-frames:v", "1", "-an", "-sn",
+		"-vf", fmt.Sprintf("scale='min(%d,iw)':-2", MaxWidth),
+		"-threads", "1", "-f", "image2pipe", "-c:v", "mjpeg", "-q:v", "3", "pipe:1"}
 }
 
 type limitWriter struct {

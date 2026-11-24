@@ -60,7 +60,10 @@ type recorder struct {
 }
 
 func newRecorder() *recorder {
-	return &recorder{runs: map[string]*run{}, restarts: map[string]int{}, frames: make(chan struct{}, 2)}
+	// 🔴 One ffmpeg at a time (frames.go: one decode thread, ~one frame's
+	// buffers): two 1080p runs measured ~198 MiB each without -threads, beside
+	// a plugin whose memory limit is 256 MiB.
+	return &recorder{runs: map[string]*run{}, restarts: map[string]int{}, frames: make(chan struct{}, 1)}
 }
 
 // noticeOf is the notice of a meeting for the streams: noticeFor, with the
@@ -144,12 +147,22 @@ func (s *Server) recordLoop(ctx context.Context, meetingID string) {
 			return
 		}
 		s.hub.Changed(meetingID)
-		info, err := s.cfg.LiveKit.StartRoomCompositeEgress(ctx, store.RoomName(meetingID), p.ObjectKey)
+		// 🔴 The start is never cancelled half-way (Record off cancels this
+		// loop): LiveKit may start the egress whatever happens to our side of
+		// the request, so its answer is always read and the egress stored,
+		// and then the meeting is asked again whether it is still wanted. Off
+		// or an end that landed while the start was in flight stops it here;
+		// one that lands after this is stopped by stopRecording (it now finds
+		// the egress), and the reconcile stops anything both missed.
+		info, err := s.cfg.LiveKit.StartRoomCompositeEgress(context.WithoutCancel(ctx), store.RoomName(meetingID), p.ObjectKey)
 		if err == nil {
 			if err := s.store.SetRecordingEgress(context.WithoutCancel(ctx), p.ID, info.EgressID); err != nil {
 				s.cfg.Log.Printf("recording: meeting %s part %d: storing its egress: %v", meetingID, p.Part, err)
 			}
 			s.cfg.Log.Printf("recording: meeting %s part %d: egress started", meetingID, p.Part)
+			if ref, err := s.store.RecordingByEgress(context.WithoutCancel(ctx), info.EgressID, s.cfg.Now()); err == nil && !wanted(ref) {
+				s.stopUnwanted(context.WithoutCancel(ctx), ref, info.EgressID)
+			}
 			return
 		}
 		// The part is failed (its gap stays open); the next attempt is a new
@@ -222,6 +235,22 @@ func fileOf(info livekit.EgressInfo) *livekit.FileInfo {
 	return nil
 }
 
+// wanted is THE rule for a part's egress: it may run only while its meeting
+// is live with Record on. Every path that sees an egress (its start, its
+// webhooks, the reconcile) asks it.
+func wanted(ref store.RecordingRef) bool { return ref.MeetingLive && ref.Record }
+
+// stopUnwanted stops an egress its meeting no longer wants (Record off, or
+// the meeting over). A stop that fails is logged; the next webhook or
+// reconcile pass of the still-running egress asks again, until it ends.
+func (s *Server) stopUnwanted(ctx context.Context, ref store.RecordingRef, egressID string) {
+	if err := s.cfg.LiveKit.StopEgress(ctx, egressID); err != nil {
+		s.cfg.Log.Printf("recording: meeting %s part %d: stopping an egress the meeting no longer wants: %s (the reconcile retries)", ref.MeetingID, ref.Part, lkKind(err))
+		return
+	}
+	s.cfg.Log.Printf("recording: meeting %s part %d: stopped an egress the meeting no longer wants", ref.MeetingID, ref.Part)
+}
+
 // onRecordingEgress acts on an egress webhook (or a reconcile's ListEgress
 // answer) if the egress records a part, and answers whether it did. A part
 // is found by its egress id, else by its file's key (a start that LiveKit
@@ -257,8 +286,15 @@ func (s *Server) onRecordingEgress(ctx context.Context, info livekit.EgressInfo)
 	switch {
 	case info.Ended():
 		s.onRecordingEnded(ctx, ref, info)
+		return true
 	case fileOf(info) != nil:
 		s.onRecordingBegan(ctx, ref, info)
+	}
+	// 🔴 A running egress its meeting no longer wants is stopped, on every
+	// report of it (a webhook, a reconcile pass): a stop that failed once is
+	// tried again until the egress ends.
+	if !wanted(ref) {
+		s.stopUnwanted(ctx, ref, info.EgressID)
 	}
 	return true
 }
@@ -302,21 +338,30 @@ func (s *Server) onRecordingEnded(ctx context.Context, ref store.RecordingRef, i
 			e.Bytes = &b
 		}
 	}
-	wanted := ref.MeetingLive && ref.Record
-	if wanted {
+	want := wanted(ref)
+	if want {
 		at := s.sinceStart(ref.MeetingStart)
 		if e.StartMS != nil && e.DurationMS != nil {
 			at = *e.StartMS + *e.DurationMS
 		}
 		e.GapAtMS = &at
 	}
-	if err := s.store.EndRecording(ctx, ref.ID, e, s.cfg.Now()); err != nil {
+	moved, err := s.store.EndRecording(ctx, ref.ID, e, s.cfg.Now())
+	if err != nil {
 		s.cfg.Log.Printf("recording: meeting %s part %d: storing its end: %v", ref.MeetingID, ref.Part, err)
+		return
+	}
+	// 🔴 A duplicate or late end (the part had already ended) changes
+	// nothing: no restart, which would cancel a start in flight.
+	if !moved {
 		return
 	}
 	s.cfg.Log.Printf("recording: meeting %s part %d ended (%s)", ref.MeetingID, ref.Part, info.Status)
 	s.hub.Changed(ref.MeetingID)
-	if wanted {
+	// 🔴 The recording was deleted (Delete now, or its purge time) while this
+	// part's egress still ran: its object, now uploaded, is deleted at once.
+	s.purgeMeeting(ctx, ref.MeetingID)
+	if want {
 		wait := s.recordingRestartWait(ref.MeetingID, e.DurationMS)
 		s.cfg.Log.Printf("recording: meeting %s: its egress ended while the meeting is recorded; a new part in %s", ref.MeetingID, wait)
 		s.startRecordingAfter(ref.MeetingID, wait)
@@ -441,6 +486,22 @@ func (s *Server) SweepRecordings(ctx context.Context) (deleted, left int) {
 	}
 	if deleted+left > 0 {
 		s.cfg.Log.Printf("retention: %d recording parts deleted, %d left for the next pass", deleted, left)
+	}
+	return deleted, left
+}
+
+// purgeMeeting deletes the due parts of one meeting (purge) and, once none
+// is left, its share links and gaps. Nothing is due unless the meeting's
+// purge time has passed.
+func (s *Server) purgeMeeting(ctx context.Context, meetingID string) (deleted, left int) {
+	now := s.cfg.Now()
+	due, err := s.store.DueRecordingsOf(ctx, meetingID, now)
+	if err != nil || len(due) == 0 {
+		return 0, 0
+	}
+	deleted, left = s.purge(ctx, due)
+	if _, err := s.store.PurgeRecordingMeta(ctx, now); err != nil {
+		s.cfg.Log.Printf("recording: %v", err)
 	}
 	return deleted, left
 }
@@ -613,17 +674,13 @@ func (s *Server) handleDeleteRecording(w http.ResponseWriter, r *http.Request, r
 		s.meetingErr(w, err)
 		return
 	}
-	due, err := s.store.DueRecordingsOf(r.Context(), id, now)
-	if err != nil {
-		s.meetingErr(w, err)
-		return
-	}
-	deleted, left := s.purge(r.Context(), due)
-	if _, err := s.store.PurgeRecordingMeta(r.Context(), now); err != nil {
-		s.cfg.Log.Printf("recording: delete now: %v", err)
-	}
-	s.cfg.Log.Printf("recording: meeting %s: deleted now (%d parts; %d objects deleted, %d left for the sweeper)", id, n, deleted, left)
-	writeJSON(w, http.StatusOK, map[string]any{"deleted": deleted, "pending": left})
+	// A part whose egress has not ended (still ENDING while it uploads) is
+	// not due yet: its end deletes it (onRecordingEnded). It counts as pending.
+	deleted, left := s.purgeMeeting(r.Context(), id)
+	pending := n - deleted
+	s.cfg.Log.Printf("recording: meeting %s: deleted now (%d parts; %d objects deleted, %d left for the store, %d waiting for their egress to end)",
+		id, n, deleted, left, pending-left)
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": deleted, "pending": pending})
 }
 
 func (s *Server) handleRecording(w http.ResponseWriter, r *http.Request, repo *store.OwnerRepo) {

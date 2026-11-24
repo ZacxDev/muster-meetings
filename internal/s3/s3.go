@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -57,6 +58,16 @@ type Client struct {
 	// HTTP is used for every call; Now is the clock (default time.Now).
 	HTTP *http.Client
 	Now  func() time.Time
+	// CallTimeout bounds a whole Size or Delete (default DefaultCallTimeout).
+	CallTimeout time.Duration
+}
+
+// bounded is ctx cut to CallTimeout, for a call that is not a stream.
+func (c *Client) bounded(ctx context.Context) (context.Context, context.CancelFunc) {
+	if c.CallTimeout <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, c.CallTimeout)
 }
 
 // New checks cfg and returns a client. The endpoint must be http(s) with a
@@ -79,8 +90,27 @@ func New(cfg Config) (*Client, error) {
 		return nil, errors.New("s3: the bucket is not an S3 bucket name (3 to 63 lowercase letters, digits, '.' and '-')")
 	}
 	u.Path = ""
-	return &Client{cfg: cfg, base: u, HTTP: &http.Client{Timeout: 0}, Now: time.Now}, nil
+	// No overall timeout on the client: a recording streamed to a viewer can
+	// take as long as they watch. Instead: connecting, TLS and the answer's
+	// headers are bounded (a store that never answers), and every call that
+	// is not a stream (Size, Delete) is bounded as a whole by CallTimeout.
+	tr := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: DefaultHeaderTimeout,
+		IdleConnTimeout:       90 * time.Second,
+		MaxIdleConnsPerHost:   4,
+	}
+	return &Client{cfg: cfg, base: u, HTTP: &http.Client{Transport: tr}, Now: time.Now, CallTimeout: DefaultCallTimeout}, nil
 }
+
+// The store's timeouts: an answer's headers (every call, the streams
+// included), and a whole call that is not a stream.
+const (
+	DefaultHeaderTimeout = 30 * time.Second
+	DefaultCallTimeout   = 60 * time.Second
+)
 
 // Bucket is the bucket's name.
 func (c *Client) Bucket() string { return c.cfg.Bucket }
@@ -207,6 +237,8 @@ func (c *Client) Get(ctx context.Context, key, rng string) (*http.Response, erro
 
 // Size is key's size in bytes.
 func (c *Client) Size(ctx context.Context, key string) (int64, error) {
+	ctx, cancel := c.bounded(ctx)
+	defer cancel()
 	req, err := c.newRequest(ctx, http.MethodHead, key, nil)
 	if err != nil {
 		return 0, err
@@ -226,6 +258,8 @@ func (c *Client) Size(ctx context.Context, key string) (int64, error) {
 // Delete deletes key. 🔴 An object that is already gone is not an error: the
 // outcome is the same, so the sweeper can repeat a delete it is unsure of.
 func (c *Client) Delete(ctx context.Context, key string) error {
+	ctx, cancel := c.bounded(ctx)
+	defer cancel()
 	req, err := c.newRequest(ctx, http.MethodDelete, key, nil)
 	if err != nil {
 		return err

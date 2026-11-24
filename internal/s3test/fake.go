@@ -35,6 +35,24 @@ type Fake struct {
 	objects map[string][]byte
 	calls   []string
 	down    bool
+	hang    chan struct{}
+}
+
+// Hang makes every request wait, sending nothing, until the returned func
+// is called (a store that accepts the connection and never answers).
+func (f *Fake) Hang() (release func()) {
+	ch := make(chan struct{})
+	f.mu.Lock()
+	f.hang = ch
+	f.mu.Unlock()
+	return func() {
+		f.mu.Lock()
+		if f.hang == ch {
+			f.hang = nil
+		}
+		f.mu.Unlock()
+		close(ch)
+	}
 }
 
 // New starts a fake; Close it when done.
@@ -105,8 +123,15 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		c += " " + rg
 	}
 	f.calls = append(f.calls, c)
-	down := f.down
+	down, hang := f.down, f.hang
 	f.mu.Unlock()
+	if hang != nil {
+		select {
+		case <-hang:
+		case <-r.Context().Done():
+			return
+		}
+	}
 	if down {
 		s3err(w, http.StatusServiceUnavailable, "ServiceUnavailable")
 		return

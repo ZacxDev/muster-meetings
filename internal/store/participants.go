@@ -550,6 +550,15 @@ func (r *OwnerRepo) Move(ctx context.Context, meetingID, pid string, ev Event, n
 	if err != nil {
 		return Moved{}, err
 	}
+	if ev == EvAdmit {
+		// 🔴 The meeting's time origin is frozen at the earlier of the owner's
+		// first join (MarkStarted) and the first admit: from either on, a
+		// guest's speech and the recording are placed in meeting time, and
+		// both must count from one instant that never moves.
+		if _, err := tx.ExecContext(ctx, `UPDATE meetings SET started_at = ? WHERE id = ? AND started_at IS NULL`, ms(now), meetingID); err != nil {
+			return Moved{}, err
+		}
+	}
 	if err := audit(ctx, tx, now, r.subject, meetingID, "participant."+string(t.to), pid); err != nil {
 		return Moved{}, err
 	}

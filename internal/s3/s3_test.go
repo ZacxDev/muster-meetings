@@ -137,3 +137,24 @@ func errorsAs(err error, target **s3.Error) bool {
 	}
 	return ok
 }
+
+// 🟢 A store that accepts the connection and never answers: a Delete gives
+// up after CallTimeout instead of holding the sweeper forever.
+func TestACallToAStoreThatNeverAnswersIsBounded(t *testing.T) {
+	f := s3test.New()
+	defer f.Close()
+	c := client(t, f)
+	c.CallTimeout = 300 * time.Millisecond
+	release := f.Hang()
+	defer release()
+	done := make(chan error, 1)
+	go func() { done <- c.Delete(context.Background(), "k") }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a Delete the store never answered said it worked")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("a Delete to a store that never answers did not return within 3 s")
+	}
+}

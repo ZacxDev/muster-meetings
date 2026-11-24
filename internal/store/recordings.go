@@ -320,15 +320,16 @@ type RecordingEnd struct {
 	GapAtMS *int64
 }
 
-// EndRecording records a part's end. A part already ended keeps its first
-// end (a repeated webhook, or the reconcile and the webhook both).
-func (s *Store) EndRecording(ctx context.Context, id int64, e RecordingEnd, now time.Time) error {
+// EndRecording records a part's end, and answers whether it did: a part
+// already ended keeps its first end (a repeated webhook, or the reconcile and
+// the webhook both), and moved is then false.
+func (s *Store) EndRecording(ctx context.Context, id int64, e RecordingEnd, now time.Time) (moved bool, err error) {
 	if e.State != RecComplete && e.State != RecFailed {
-		return errors.New("store: a part ends complete or failed")
+		return false, errors.New("store: a part ends complete or failed")
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer tx.Rollback()
 	var meetingID string
@@ -336,18 +337,18 @@ func (s *Store) EndRecording(ctx context.Context, id int64, e RecordingEnd, now 
 		WHERE id = ? AND state IN ('starting', 'active') RETURNING meeting_id`,
 		e.State, nullable(e.StartMS), nullable(e.DurationMS), nullable(e.Bytes), e.Error, ms(now), id).Scan(&meetingID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
 	if e.GapAtMS != nil {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO recording_gaps (meeting_id, from_ms, why) SELECT ?, ?, 'failed'
 			WHERE NOT EXISTS (SELECT 1 FROM recording_gaps WHERE meeting_id = ? AND to_ms IS NULL)`, meetingID, max(*e.GapAtMS, 0), meetingID); err != nil {
-			return err
+			return false, err
 		}
 	}
-	return tx.Commit()
+	return true, tx.Commit()
 }
 
 func nullable(v *int64) any {
@@ -695,11 +696,18 @@ type Due struct {
 	ObjectKey string
 }
 
-// DueRecordings is up to limit parts past their meeting's purge time, oldest
-// first.
+// doneSQL is a part whose egress has ended (complete or failed): only then
+// is its object final. 🔴 A part still starting or active (an egress still
+// running, or ENDING while it uploads) is never due: deleting its object and
+// row then would let the upload land afterwards with nothing left to delete
+// it. It becomes due when its end is recorded.
+const doneSQL = `r.state IN ('complete', 'failed')`
+
+// DueRecordings is up to limit parts past their meeting's purge time whose
+// egress has ended, oldest first.
 func (s *Store) DueRecordings(ctx context.Context, now time.Time, limit int) ([]Due, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT r.id, r.meeting_id, r.object_key FROM recordings r JOIN meetings m ON m.id = r.meeting_id
-		WHERE m.purge_recording_at IS NOT NULL AND m.purge_recording_at <= ? ORDER BY m.purge_recording_at, r.id LIMIT ?`, ms(now), limit)
+		WHERE m.purge_recording_at IS NOT NULL AND m.purge_recording_at <= ? AND `+doneSQL+` ORDER BY m.purge_recording_at, r.id LIMIT ?`, ms(now), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -902,10 +910,11 @@ func (r *OwnerRepo) DeleteRecording(ctx context.Context, meetingID string, now t
 	return parts, tx.Commit()
 }
 
-// DueRecordingsOf is DueRecordings for one meeting.
+// DueRecordingsOf is DueRecordings for one meeting (parts whose egress has
+// ended only).
 func (s *Store) DueRecordingsOf(ctx context.Context, meetingID string, now time.Time) ([]Due, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT r.id, r.meeting_id, r.object_key FROM recordings r JOIN meetings m ON m.id = r.meeting_id
-		WHERE r.meeting_id = ? AND m.purge_recording_at IS NOT NULL AND m.purge_recording_at <= ? ORDER BY r.id`, meetingID, ms(now))
+		WHERE r.meeting_id = ? AND m.purge_recording_at IS NOT NULL AND m.purge_recording_at <= ? AND `+doneSQL+` ORDER BY r.id`, meetingID, ms(now))
 	if err != nil {
 		return nil, err
 	}

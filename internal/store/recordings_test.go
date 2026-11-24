@@ -171,7 +171,7 @@ func TestPartsAndGapsThroughAFailureAndARestart(t *testing.T) {
 	if st, _ := s.RecordingStatus(ctx, id); st != "" {
 		t.Fatalf("status while recording = %q", st)
 	}
-	if err := s.EndRecording(ctx, p1.ID, store.RecordingEnd{State: store.RecFailed, StartMS: i64(12_400), DurationMS: i64(57_600), Bytes: i64(21_000_000),
+	if _, err := s.EndRecording(ctx, p1.ID, store.RecordingEnd{State: store.RecFailed, StartMS: i64(12_400), DurationMS: i64(57_600), Bytes: i64(21_000_000),
 		Error: "EGRESS_FAILED", GapAtMS: i64(70_000)}, t0); err != nil {
 		t.Fatal(err)
 	}
@@ -201,9 +201,9 @@ func TestPartsAndGapsThroughAFailureAndARestart(t *testing.T) {
 		gaps[1].FromMS != want[1].FromMS || *gaps[1].ToMS != *want[1].ToMS || gaps[1].Why != want[1].Why {
 		t.Fatalf("gaps = %+v", gaps)
 	}
-	// A repeated end report changes nothing.
-	if err := s.EndRecording(ctx, p1.ID, store.RecordingEnd{State: store.RecComplete, DurationMS: i64(1)}, t0); err != nil {
-		t.Fatal(err)
+	// A repeated end report changes nothing, and says so.
+	if moved, err := s.EndRecording(ctx, p1.ID, store.RecordingEnd{State: store.RecComplete, DurationMS: i64(1)}, t0); err != nil || moved {
+		t.Fatalf("a repeated end: moved %v, %v", moved, err)
 	}
 	if recs, _, _ := r.Recordings(ctx, id); *recs[0].DurationMS != 57_600 || recs[0].State != store.RecFailed {
 		t.Fatalf("a second end rewrote part 1: %+v", recs[0])

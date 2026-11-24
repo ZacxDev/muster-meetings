@@ -119,7 +119,18 @@ type Fake struct {
 	Upload        func(key string) int64
 	// refuseComposite is how many of the next composite starts are refused.
 	refuseComposite int
+	// CompositeHook, when set, runs (outside the fake's lock) after a
+	// composite is accepted and before the start is answered, and may block:
+	// a test holds a start in flight with it.
+	CompositeHook func()
+	// failStop is how many of the next StopEgress calls fail (503) and stop
+	// nothing.
+	failStop int
 }
+
+// FailStop makes the next n StopEgress calls fail as an unreachable Egress
+// does: the egress keeps running.
+func (f *Fake) FailStop(n int) { f.mu.Lock(); f.failStop = n; f.mu.Unlock() }
 
 // Egress is one track egress the fake accepted.
 type Egress struct {
@@ -795,9 +806,12 @@ func (f *Fake) egressTwirp(w http.ResponseWriter, r *http.Request) {
 			active: true, stop: make(chan string, 1)}
 		f.egresses = append(f.egresses, e)
 		f.rooms[in.RoomName].Participants[e.ID] = Joined{Identity: e.ID, Kind: livekit.KindEgress}
-		auto := f.CompositeAuto
+		auto, hook := f.CompositeAuto, f.CompositeHook
 		out := f.egressJSON(e)
 		f.mu.Unlock()
+		if hook != nil {
+			hook()
+		}
 		writeOK(out)
 		go func() {
 			if url := f.WebhookURL; url != "" {
@@ -822,6 +836,12 @@ func (f *Fake) egressTwirp(w http.ResponseWriter, r *http.Request) {
 			if x.ID == in.EgressID {
 				e = x
 			}
+		}
+		if f.failStop > 0 {
+			f.failStop--
+			f.mu.Unlock()
+			twirpErr(w, 503, "unavailable", "no response from servers")
+			return
 		}
 		f.mu.Unlock()
 		if e == nil {

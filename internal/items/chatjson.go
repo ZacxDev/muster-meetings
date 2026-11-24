@@ -99,13 +99,17 @@ type chatAnswer struct {
 
 // Propose asks the model for the window's new items.
 func (c *ChatJSON) Propose(ctx context.Context, w Window) (Result, error) {
+	prefs, err := c.c.sendPrefs()
+	if err != nil {
+		return Result{}, err
+	}
 	zero := 0.0
 	content, res, err := c.c.complete(ctx, request{
 		Messages: []message{
 			{Role: "system", Content: ChatJSONSystem},
 			{Role: "user", Content: chatJSONInput(w)},
 		},
-		Provider:       prefsWith(c.c.prefs),
+		Provider:       prefs,
 		ResponseFormat: chatJSONSchema,
 		Temperature:    &zero,
 		MaxTokens:      ChatJSONMaxTokens,

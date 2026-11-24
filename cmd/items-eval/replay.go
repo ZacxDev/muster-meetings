@@ -54,34 +54,23 @@ type ReplayOpts struct {
 // trying, as the live worker would, to cover segments a failed call left.
 const extraTicks = 6
 
-// Replay runs meeting m window by window through a, as the worker would:
-// a tick every 10 s of meeting time, items.Select's window (anchored on the
-// last segment a successful call covered), items.Run's guards, and the
-// meeting's items so far as the window's context.
+// Replay runs meeting m window by window through a, as the worker will:
+// items.Loop (the worker's own anchor, guards, failure and backoff rules),
+// ticked every 10 s of the meeting's clock.
 func Replay(ctx context.Context, a items.Adapter, m *Meeting, o ReplayOpts) MeetingRun {
 	run := MeetingRun{Meeting: m, MeetingID: m.ID, DurationMS: m.DurationMS(), Emitted: []items.Item{}}
 	tl := m.Timeline()
 	every := items.DefaultEvery.Milliseconds()
-	var last int64
-	fails := 0
+	l := &items.Loop{Adapter: a, Raw: o.NoGuards}
 	for t := every; t <= m.DurationMS()+every*extraTicks; t += every {
-		segs, ok := items.Select(tl, t, last)
-		if !ok {
+		st, called := l.Tick(ctx, tl, t)
+		if !called {
 			continue
-		}
-		w := items.Window{Segments: segs, Existing: append([]items.Item{}, run.Emitted...)}
-		var st items.Step
-		if o.NoGuards {
-			t0 := time.Now()
-			res, err := a.Propose(ctx, w)
-			st = items.Step{Window: w, Result: res, Kept: res.Items, Elapsed: time.Since(t0), Err: err}
-		} else {
-			st = items.Run(ctx, a, w)
 		}
 		wr := WindowRun{Seq: len(run.Windows), AtMS: t, Proposed: len(st.Result.Items), Kept: len(st.Kept), Elapsed: st.Elapsed,
 			Provider: st.Result.Provider, Model: st.Result.Model, CostUSD: st.Result.Usage.CostUSD, CostKnown: st.Result.Usage.CostKnown,
 			Rewritten: st.Result.Rewritten}
-		for _, s := range segs {
+		for _, s := range st.Window.Segments {
 			wr.Segments = append(wr.Segments, s.ID)
 		}
 		for _, d := range st.Dropped {
@@ -91,40 +80,21 @@ func Replay(ctx context.Context, a items.Adapter, m *Meeting, o ReplayOpts) Meet
 			wr.Dropped[d.Reason]++
 		}
 		if st.Err != nil {
-			c := items.ClassOf(st.Err)
-			wr.Class, wr.Error = c.String(), st.Err.Error()
+			wr.Class, wr.Error = items.ClassOf(st.Err).String(), st.Err.Error()
 			var de *items.DetailError
 			if o.Detail != nil && errors.As(st.Err, &de) {
 				o.Detail(m.ID, wr.Seq, de.Detail)
 			}
-			run.Windows = append(run.Windows, wr)
-			switch c {
-			case items.Retry:
-				// The next window covers the gap: the anchor stays.
-				fails++
-				var e *items.Error
-				var after time.Duration
-				if errors.As(st.Err, &e) {
-					after = e.RetryAfter
-				}
-				if o.Sleep != nil {
-					o.Sleep(items.Backoff(fails, after))
-				}
-				continue
-			case items.Schema:
-				// The window is spent: its answer was unusable.
-				fails = 0
-				last = items.LastID(segs, last)
-				continue
-			default:
-				run.Fatal = st.Err.Error()
-				return run
-			}
 		}
-		fails = 0
 		run.Windows = append(run.Windows, wr)
-		run.Emitted = append(run.Emitted, st.Kept...)
-		last = items.LastID(segs, last)
+		if err := l.Stopped(); err != nil {
+			run.Fatal = err.Error()
+			break
+		}
+		if w := l.Wait(); w > 0 && o.Sleep != nil {
+			o.Sleep(w)
+		}
 	}
+	run.Emitted = append(run.Emitted, l.Items()...)
 	return run
 }

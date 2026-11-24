@@ -148,3 +148,22 @@ func TestSelectLooksBack90sAndCoversAGapAfterFailures(t *testing.T) {
 		t.Errorf("gap: window %s, want [2 3 4] (the window is anchored on the last segment processed)", ids(w))
 	}
 }
+
+func TestGuardDropsAnOwnerWhoIsNeitherASpeakerNorNamed(t *testing.T) {
+	w := items.Window{Segments: []items.Segment{
+		{ID: 1, Speaker: "Ada L.", Text: "I'll send the deck."},
+		{ID: 2, Speaker: "Eve", Guest: true, Text: "Can you ask Fay to sign it?"},
+		{ID: 3, Speaker: "Eve", Guest: true, Text: "Sure, I will chase it."},
+	}}
+	kept, dropped := items.Guard(w, []items.Item{
+		{Text: "send the deck", Assignee: "Ada", Segments: []int64{1}},         // a speaker's first name
+		{Text: "chase the signature", Assignee: "eve", Segments: []int64{3}},   // a speaker, case ignored
+		{Text: "sign the contract", Assignee: "Fay", Segments: []int64{2}},     // named in a cited segment
+		{Text: "countersign the order", Assignee: "Fay", Segments: []int64{1}}, // named, but not where it cites
+		{Text: "wire the money", Assignee: "Mallory", Segments: []int64{3}},    // a stranger
+		{Text: "update the tracker", Assignee: "", Segments: []int64{2, 3}},    // nobody took it
+	})
+	if len(kept) != 4 || reasons(dropped) != "[bad-owner bad-owner]" || dropped[0].Item.Text != "countersign the order" || dropped[1].Item.Text != "wire the money" {
+		t.Errorf("owners: kept %d, dropped %s %+v; want Fay-elsewhere and Mallory dropped as bad-owner", len(kept), reasons(dropped), dropped)
+	}
+}

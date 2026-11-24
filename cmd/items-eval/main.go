@@ -108,8 +108,8 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 		return 1
 	}
 	st := res.Corpus
-	fmt.Fprintf(stdout, "corpus: %d meetings, %d segments, %d labels, %d windows (%.0f%% with no item) of %d to %d segments (median %d, p90 %d), %.1f meeting-minutes\n\n",
-		st.Meetings, st.Segments, st.Labels, st.Windows, st.NoItemShare*100, st.WindowMin, st.WindowMax, st.WindowMedian, st.WindowP90, st.MinutesTotal)
+	fmt.Fprintf(stdout, "corpus: %d meetings (%d non-ASCII), %d segments, %d labels, %d windows (%.0f%% with no item) of %d to %d segments (median %d, p90 %d), %.1f meeting-minutes\n\n",
+		st.Meetings, st.UnicodeMeetings, st.Segments, st.Labels, st.Windows, st.NoItemShare*100, st.WindowMin, st.WindowMax, st.WindowMedian, st.WindowP90, st.MinutesTotal)
 
 	res.Controls = RunControls(ms)
 	fmt.Fprintln(stdout, "controls:")
@@ -230,7 +230,7 @@ func Tables(res Result) string {
 		}
 		fmt.Fprintf(&b, "| latency p50 | %v | — | — |\n", s.Worst.P50.Round(time.Millisecond))
 		if s.Adapter == items.AdapterExtract {
-			fmt.Fprintf(&b, "| spans whose `text` was not the input | %d | — | — |\n", s.Worst.Rewritten)
+			fmt.Fprintf(&b, "| spans whose `text` was not the input, whole corpus | %d | — | — |\n", s.Worst.Rewritten)
 		}
 		verdict := "passes every gate"
 		if !s.Pass {

@@ -116,14 +116,20 @@ func New(c Config, hc *http.Client) (Adapter, error) {
 	return nil, fmt.Errorf("items: unknown adapter %q", c.Adapter)
 }
 
-// prefsWith is a deep copy of the configured provider object, so an
-// adapter's additions never reach the shared Config.
-func prefsWith(p map[string]any) map[string]any {
+// copyPrefs is a deep copy of the configured provider object, so an
+// adapter's additions never reach the shared Config. An object that does
+// not encode (a +Inf, a channel: never one ParsePrefs built) is an error,
+// never an empty object.
+func copyPrefs(p map[string]any) (map[string]any, error) {
 	var b bytes.Buffer
-	_ = json.NewEncoder(&b).Encode(p)
+	if err := json.NewEncoder(&b).Encode(p); err != nil {
+		return nil, fmt.Errorf("the provider preferences do not encode: %v", err)
+	}
 	out := map[string]any{}
 	d := json.NewDecoder(&b)
 	d.UseNumber()
-	_ = d.Decode(&out)
-	return out
+	if err := d.Decode(&out); err != nil || out == nil {
+		return nil, errors.New("the provider preferences do not encode to an object")
+	}
+	return out, nil
 }

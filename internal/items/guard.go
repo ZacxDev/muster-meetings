@@ -15,6 +15,7 @@ const DupJaccard = 0.7
 const (
 	DropNoCitation  = "no-citation"
 	DropOutOfWindow = "out-of-window"
+	DropBadOwner    = "bad-owner"
 	DropDupText     = "duplicate-text"
 	DropDupCitation = "duplicate-citation"
 	DropOverCap     = "over-cap"
@@ -31,6 +32,9 @@ type Dropped struct {
 //
 //   - an item citing no segment, or ANY segment outside the window, is
 //     dropped;
+//   - an item whose owner is neither a speaker in the window nor a name said
+//     in one of its cited segments is dropped (a model, or speech that
+//     reached it, cannot name a stranger as the owner); no owner is allowed;
 //   - an item whose normalised text has token Jaccard ≥ 0.7 with an
 //     existing item (or one kept earlier in this window), or whose cited
 //     segments are all cited by one such item, is a duplicate and dropped;
@@ -54,6 +58,10 @@ func Guard(w Window, proposed []Item) (kept []Item, dropped []Dropped) {
 		}
 		if !in {
 			dropped = append(dropped, Dropped{it, DropOutOfWindow})
+			continue
+		}
+		if !ownerKnown(it, w) {
+			dropped = append(dropped, Dropped{it, DropBadOwner})
 			continue
 		}
 		if why := duplicate(it, seen); why != "" {
@@ -84,6 +92,34 @@ func duplicate(it Item, seen []Item) string {
 		}
 	}
 	return ""
+}
+
+// ownerKnown reports it's owner is "", a window speaker (or a speaker's
+// first name), or a name said, as whole words, in a segment it cites. Case
+// is ignored.
+func ownerKnown(it Item, w Window) bool {
+	o := words(it.Assignee)
+	if o == "" {
+		return true
+	}
+	for _, s := range w.Segments {
+		if o == words(s.Speaker) || o == words(firstWord(s.Speaker)) {
+			return true
+		}
+	}
+	for _, s := range w.Segments {
+		for _, id := range it.Segments {
+			if s.ID == id && strings.Contains(" "+words(s.Text)+" ", " "+o+" ") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// words is s lower-cased with every run of non-letters one space.
+func words(s string) string {
+	return strings.Join(strings.FieldsFunc(strings.ToLower(s), func(r rune) bool { return !unicode.IsLetter(r) }), " ")
 }
 
 func subset(a, b []int64) bool {

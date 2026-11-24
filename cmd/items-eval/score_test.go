@@ -181,3 +181,28 @@ func TestTablesNameTheModelTheProviderAndTheChoice(t *testing.T) {
 		}
 	}
 }
+
+func TestARewrittenSpanInTheNonASCIIMeetingFailsExtract(t *testing.T) {
+	runs := scoringFixture()
+	runs[1].Meeting.Unicode = true // meeting B; A's 2 rewrites are not in a non-ASCII meeting
+	runs[1].Windows[1].Rewritten = 1
+	m := Score(runs)
+	if m.RewrittenUnicode != 1 || m.Rewritten != 3 {
+		t.Fatalf("rewritten %d, in the non-ASCII meeting %d; want 3 and 1", m.Rewritten, m.RewrittenUnicode)
+	}
+	gate := func(adapter string) Gate {
+		for _, g := range Gates(m, adapter) {
+			if g.Name == "rewritten spans, non-ASCII meeting" {
+				return g
+			}
+		}
+		t.Fatal("no rewritten-span gate")
+		return Gate{}
+	}
+	if g := gate(items.AdapterExtract); g.Pass || !g.Gating {
+		t.Errorf("a rewritten span in the non-ASCII meeting: extract gate %+v, want a failing gate", g)
+	}
+	if g := gate(items.AdapterChatJSON); g.Gating {
+		t.Errorf("chat_json has no offsets: gate %+v, want it reported, not gating", g)
+	}
+}

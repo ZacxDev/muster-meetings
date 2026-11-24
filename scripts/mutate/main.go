@@ -165,6 +165,7 @@ const (
 	itOR     = "internal/items/openrouter.go"
 	itCfg    = "internal/items/config.go"
 	itItems  = "internal/items/items.go"
+	itLoop   = "internal/items/loop.go"
 	ieScore  = "cmd/items-eval/score.go"
 	ieCtl    = "cmd/items-eval/controls.go"
 	ieMain   = "cmd/items-eval/main.go"
@@ -184,7 +185,7 @@ var mutants = []mutant{
 		pkg: "./internal/items", test: "TestGuardDropsAnItemCitingNoSegment", want: "want both dropped as no-citation"},
 	{name: "items guard: an out-of-window citation kept", file: itGuard, from: "if !in {", to: "if !in && false {",
 		pkg: "./internal/items", test: "TestGuardDropsAnItemCitingASegmentOutsideTheWindow", want: "want only the item citing 4 and 6"},
-	{name: "items guard: only the first citation checked", file: itGuard, from: "for _, id := range it.Segments {", to: "for _, id := range it.Segments[:1] {",
+	{name: "items guard: only the first citation checked", file: itGuard, from: "\t\tfor _, id := range it.Segments {\n\t\t\tif !w.Has(id) {", to: "\t\tfor _, id := range it.Segments[:1] {\n\t\t\tif !w.Has(id) {",
 		pkg: "./internal/items", test: "TestGuardDropsAnItemCitingASegmentOutsideTheWindow", want: "want only the item citing 4 and 6"},
 	{name: "items guard: Jaccard 0.70 exactly not a duplicate", file: itGuard, from: ">= DupJaccard {", to: "> DupJaccard {",
 		pkg: "./internal/items", test: "TestGuardDropsADuplicateByTextAtJaccard0Point7", want: "J=7/10: kept"},
@@ -242,6 +243,35 @@ var mutants = []mutant{
 	{name: "items prefs: order with fallbacks counted as a pin", file: itCfg, from: `return ok && len(o) > 0 && p["allow_fallbacks"] == false`, to: "return ok && len(o) > 0",
 		pkg: "./internal/items", test: "TestProviderPrefsAlwaysDenyDataCollection", want: `"allow_fallbacks":true}, chat_json) err = <nil>`},
 
+	{name: "items guard: a stranger kept as the owner", file: itGuard, from: "if !ownerKnown(it, w) {", to: "if false {",
+		pkg: "./internal/items", test: "TestGuardDropsAnOwnerWhoIsNeitherASpeakerNorNamed", want: "want Fay-elsewhere and Mallory dropped"},
+	{name: "items guard: an owner named in any segment accepted", file: itGuard, from: "if s.ID == id && strings.Contains(", to: "if (s.ID == id || true) && strings.Contains(",
+		pkg: "./internal/items", test: "TestGuardDropsAnOwnerWhoIsNeitherASpeakerNorNamed", want: "want Fay-elsewhere and Mallory dropped"},
+	{name: "items loop: the anchor moved after a 429", file: itLoop, from: "\t\tl.wait = Backoff(l.fails, after)\n", to: "\t\tl.wait = Backoff(l.fails, after)\n\t\tl.last = LastID(segs, l.last)\n",
+		pkg: "./internal/items", test: "TestLoopKeepsTheAnchorAfterARetryAndCoversTheGap", want: "the anchor stays on a retry"},
+	{name: "items loop: a schema failure's window retried", file: itLoop, from: "case Schema:\n\t\tl.wait = 0\n\t\tl.last = LastID(segs, l.last)\n", to: "case Schema:\n\t\tl.wait = 0\n",
+		pkg: "./internal/items", test: "TestLoopSpendsASchemaFailuresWindow", want: "a schema failure moves the anchor"},
+	{name: "items loop: only retries counted toward paused", file: itLoop, from: "\tl.fails++\n\tswitch ClassOf(st.Err) {\n\tcase Retry:\n", to: "\tswitch ClassOf(st.Err) {\n\tcase Retry:\n\t\tl.fails++\n",
+		pkg: "./internal/items", test: "TestLoopPausesAfterThreeFailuresOfAnyClassAndASuccessClearsThem", want: "after call 1: failures 1"},
+	{name: "items loop: a success does not clear the failures", file: itLoop, from: "l.fails, l.wait = 0, 0", to: "l.wait = 0",
+		pkg: "./internal/items", test: "TestLoopPausesAfterThreeFailuresOfAnyClassAndASuccessClearsThem", want: "after call 3: failures 3"},
+	{name: "items loop: a fatal failure does not stop it", file: itLoop, from: "l.stopped = st.Err", to: "_ = st.Err",
+		pkg: "./internal/items", test: "TestLoopStopsOnAFatalFailure", want: "a call after a fatal failure"},
+	{name: "items loop: the guards skipped", file: itLoop, from: "if l.Raw {", to: "if true {",
+		pkg: "./internal/items", test: "TestLoopGuardsUnlessRaw", want: "guarded kept 2"},
+	{name: "items client: a request sent without deny", file: itOR, from: "if body.Provider == nil || body.Provider[\"data_collection\"] != \"deny\" {", to: "if false {",
+		pkg: "./internal/items", test: "TestTheProviderObjectIsCheckedWhenItIsSent", want: "sent without deny"},
+	{name: "items client: a chat_json request sent without its pin", file: itOR, from: "if c.pin && !pinned(body.Provider) {", to: "if false {",
+		pkg: "./internal/items", test: "TestTheProviderObjectIsCheckedWhenItIsSent", want: "sent without its pin"},
+	{name: "items client: an unencodable provider object copied as {}", file: itCfg, from: "return nil, fmt.Errorf(\"the provider preferences do not encode: %v\", err)", to: "return map[string]any{}, nil",
+		pkg: "./internal/items", test: "TestTheProviderObjectIsCheckedWhenItIsSent", want: "not refused as unencodable"},
+	{name: "items-eval gate: a rewrite in the non-ASCII meeting not counted", file: ieScore, from: "if r.Meeting.Unicode {", to: "if false {",
+		pkg: "./cmd/items-eval", test: "TestARewrittenSpanInTheNonASCIIMeetingFailsExtract", want: "in the non-ASCII meeting 0"},
+	{name: "items-eval lint: an injection said by a non-guest accepted", file: ieCorpus, from: "if !guestOf(m, sp) {", to: "if false {",
+		pkg: "./cmd/items-eval", test: "TestTheLintCatchesEachProblem", want: "an injection said by the owner"},
+	{name: "items-eval lint: no non-ASCII meeting accepted", file: ieCorpus, from: "if !unicodeMeeting(ms) {", to: "if false {",
+		pkg: "./cmd/items-eval", test: "TestTheLintCatchesEachProblem", want: "no non-ASCII meeting"},
+
 	// ---- action items: the evaluation harness (cmd/items-eval) ----
 	{name: "items-eval score: one match counted as a duplicate", file: ieScore, from: "if h > 1 {", to: "if h >= 1 {",
 		pkg: "./cmd/items-eval", test: "TestScoreAgainstAHandComputedFixture", want: "duplicate rate = 0.75"},
@@ -257,10 +287,8 @@ var mutants = []mutant{
 		pkg: "./cmd/items-eval", test: "TestAFailedControlStopsTheRunBeforeAnyModel", want: "a failing oracle: exit 0"},
 	{name: "items-eval controls: the liar cites only the window", file: ieCtl, from: "in = []int64{in[0], top + 1000}", to: "in = []int64{in[0]}",
 		pkg: "./cmd/items-eval", test: "TestTheControlsScoreAsStatedOnTheCorpus", want: "control liar"},
-	{name: "items-eval replay: a model scored without the guards", file: ieReplay, from: "if o.NoGuards {", to: "if true {",
+	{name: "items-eval replay: a model scored without the guards", file: ieReplay, from: "l := &items.Loop{Adapter: a, Raw: o.NoGuards}", to: "l := &items.Loop{Adapter: a, Raw: true}",
 		pkg: "./cmd/items-eval", test: "TestTheControlsScoreAsStatedOnTheCorpus", want: "control liar"},
-	{name: "items-eval replay: the anchor moved after a 429", file: ieReplay, from: "\t\t\t\tfails++\n", to: "\t\t\t\tfails++\n\t\t\t\tlast = items.LastID(segs, last)\n",
-		pkg: "./cmd/items-eval", test: "TestReplayCoversTheGapAfterRetriesAndSpendsASchemaFailure", want: "does not cover the first failed window"},
 	{name: "items-eval lint: the no-item share unchecked", file: ieCorpus, from: "if st.NoItemShare < minNoItemShare {", to: "if false {",
 		pkg: "./cmd/items-eval", test: "TestTheLintCatchesEachProblem", want: "too few no-item windows"},
 	{name: "items-eval lint: a citation outside the meeting accepted", file: ieCorpus, from: "if !inMeeting[id] {", to: "if false {",

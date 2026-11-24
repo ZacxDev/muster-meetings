@@ -17,13 +17,13 @@ import (
 // The meeting kinds the design names.
 var meetingKinds = []string{"standup", "planning", "customer", "one_to_one"}
 
-// The hard-case kinds: the design's, which the lint requires, and the
-// corpus's extra one (speech addressing the model), which it allows.
+// The hard-case kinds, every one required: the design's, and injection
+// (a guest's speech addressing the model: an instruction, a forged segment
+// id or speaker, a forged owner).
 var (
-	trapKinds     = []string{"hypothetical", "past_tense", "question", "retracted"}
+	trapKinds     = []string{"hypothetical", "past_tense", "question", "retracted", "injection"}
 	labelKinds    = []string{"cross_speaker", "restated"}
 	requiredKinds = append(append(append([]string{}, trapKinds...), labelKinds...), "asr_noise")
-	extraKinds    = []string{"injection"}
 )
 
 // The corpus's shape bars (design: "The corpus").
@@ -46,10 +46,14 @@ const (
 
 // Meeting is one corpus file.
 type Meeting struct {
-	ID       string    `yaml:"id"`
-	Kind     string    `yaml:"kind"`
-	Title    string    `yaml:"title"`
-	ASR      bool      `yaml:"asr"`
+	ID    string `yaml:"id"`
+	Kind  string `yaml:"kind"`
+	Title string `yaml:"title"`
+	ASR   bool   `yaml:"asr"`
+	// Unicode marks the meeting written to tell ScaleDown's offset unit:
+	// non-ASCII speaker names, curly apostrophes, a character outside the
+	// Basic Multilingual Plane. A rewritten span in it fails the run.
+	Unicode  bool      `yaml:"unicode"`
 	Speakers []Speaker `yaml:"speakers"`
 	Segments []CSeg    `yaml:"segments"`
 	Labels   []Label   `yaml:"labels"`
@@ -188,6 +192,7 @@ type Stats struct {
 	HardCases                                          map[string]int
 	Kinds                                              map[string]int
 	MinutesTotal                                       float64
+	UnicodeMeetings                                    int
 }
 
 // itemWindow reports whether w has an expected item: a label's segment is
@@ -215,6 +220,9 @@ func CorpusStats(ms []*Meeting) Stats {
 		st.Segments += len(m.Segments)
 		st.Labels += len(m.Labels)
 		st.MinutesTotal += float64(m.DurationMS()) / 60000
+		if m.Unicode {
+			st.UnicodeMeetings++
+		}
 		for _, w := range m.Windows() {
 			st.Windows++
 			sizes = append(sizes, len(w.Segments))
@@ -331,8 +339,15 @@ func Lint(ms []*Meeting) []string {
 		wins := m.Windows()
 		for _, t := range m.Traps {
 			what := "trap " + t.Kind
-			if !contains(trapKinds, t.Kind) && !contains(extraKinds, t.Kind) {
-				bad("%s: trap kind %q is not one of %v or %v", where, t.Kind, trapKinds, extraKinds)
+			if !contains(trapKinds, t.Kind) {
+				bad("%s: trap kind %q is not one of %v", where, t.Kind, trapKinds)
+			}
+			if t.Kind == "injection" {
+				for _, sp := range keys(speakersOf(m, t.Segments)) {
+					if !guestOf(m, sp) {
+						bad("%s: %s is said by %q, who is not a guest", where, what, sp)
+					}
+				}
 			}
 			cited(what, t.Segments)
 			for _, id := range t.Segments {
@@ -346,6 +361,9 @@ func Lint(ms []*Meeting) []string {
 				bad("%s: %s's segments arrive in different windows", where, what)
 			}
 		}
+	}
+	if !unicodeMeeting(ms) {
+		bad("corpus: no meeting marked unicode with a non-ASCII speaker name, a curly apostrophe, a character outside the BMP and a label")
 	}
 	st := CorpusStats(ms)
 	if st.Meetings != wantMeetings {
@@ -371,6 +389,51 @@ func Lint(ms []*Meeting) []string {
 		}
 	}
 	return p
+}
+
+// unicodeMeeting reports a meeting marked unicode that has what it is for:
+// a speaker name with a non-ASCII letter, a curly apostrophe (U+2019) and a
+// character outside the Basic Multilingual Plane in its text, and a label.
+func unicodeMeeting(ms []*Meeting) bool {
+	for _, m := range ms {
+		if !m.Unicode || len(m.Labels) == 0 {
+			continue
+		}
+		name, curly, astral := false, false, false
+		for _, sp := range m.Speakers {
+			for _, r := range sp.Name {
+				name = name || r > 127
+			}
+		}
+		for _, s := range m.Segments {
+			for _, r := range s.Text {
+				curly = curly || r == '\u2019'
+				astral = astral || r > 0xFFFF
+			}
+		}
+		if name && curly && astral {
+			return true
+		}
+	}
+	return false
+}
+
+func guestOf(m *Meeting, name string) bool {
+	for _, s := range m.Speakers {
+		if s.Name == name {
+			return s.Guest
+		}
+	}
+	return false
+}
+
+func keys(m map[string]bool) []string {
+	var out []string
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func firstWindow(ws []Win, id int64) int {

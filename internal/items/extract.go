@@ -111,7 +111,10 @@ type extractAnswer struct {
 // segment; the guards dedupe against them.
 func (x *Extract) Propose(ctx context.Context, w Window) (Result, error) {
 	input, spans := extractInput(w.Segments)
-	prefs := prefsWith(x.c.prefs)
+	prefs, err := x.c.sendPrefs()
+	if err != nil {
+		return Result{}, err
+	}
 	opts, _ := prefs["options"].(map[string]any)
 	if opts == nil {
 		opts = map[string]any{}

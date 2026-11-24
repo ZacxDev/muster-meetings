@@ -1023,9 +1023,10 @@ phase 2d's click path, with TURN, after 2c deploys it.
 
 `cmd/items-eval` replays the labelled corpus in `testdata/items-eval/`
 (twelve synthetic meetings; its README is the format) through the worker's
-own code: `items.Select`'s windows (a tick every 10 s, 90 s back, anchored
-on the last segment a successful call covered), the adapter, and
-`items.Guard`. It scores by cited segments (no model judges a model), runs
+own code: `items.Loop` (a tick every 10 s, `items.Select`'s window 90 s
+back and anchored on the last segment a successful call covered, the
+adapter, `items.Guard`, and the failure, backoff and "paused after 3"
+rules that phase 4b's worker drives on the wall clock). It scores by cited segments (no model judges a model), runs
 its four controls first (null, oracle, duplicator, liar: a control that
 does not score as stated stops the run before any model is called), and
 picks the default model. **It costs money and needs a key, so it is run by
@@ -1067,7 +1068,7 @@ phase 4b.
 | `deploy/kubernetes`, `deploy/example-overlay` | the kustomize base (the plugin, LiveKit, Services, NetworkPolicies) and an example tenant overlay |
 | `compose.meetings.yml` | the fragment for muster's Compose stack |
 | `deploy/deploy_test.go` | the rendered objects and both LiveKit configs, pinned |
-| `internal/items` | action items: the `extract` and `chat_json` adapters, their OpenRouter client, the guards after the model, the window selection, `MEETINGS_ITEMS_PROVIDER_PREFS` |
+| `internal/items` | action items: the `extract` and `chat_json` adapters, their OpenRouter client, the guards after the model, the window selection and the worker's loop (`items.Loop`), `MEETINGS_ITEMS_PROVIDER_PREFS` |
 | `cmd/items-eval`, `testdata/items-eval` | the action-item evaluation (run by hand) and its labelled synthetic corpus |
 | `scripts/mutate` | the security-gate mutation sweep |
 | `scripts/e2e-harness`, `e2e/` | the browser tests: the `/enter` frame gate, the lobby at 390×844, two owner devices, the transcript in both panels, live captions, and the UI (`ui-*.spec.ts`, goldens in `e2e/goldens/`); the harness also serves muster's UI kit from `e2e/fixtures/ui-kit` |

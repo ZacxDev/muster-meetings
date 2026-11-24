@@ -35,10 +35,13 @@ func TestTheCorpusPassesItsLint(t *testing.T) {
 	st := CorpusStats(ms)
 	// The design's corpus: 12 meetings, about 150 windows, ≥ 30% with no
 	// item, every hard case several times, all four kinds.
+	if st.UnicodeMeetings < 1 {
+		t.Errorf("no non-ASCII meeting: %+v", st)
+	}
 	if st.Meetings != 12 || st.Windows < 130 || st.Windows > 170 || st.NoItemShare < 0.30 {
 		t.Errorf("stats = %+v", st)
 	}
-	for _, k := range []string{"hypothetical", "past_tense", "question", "retracted", "cross_speaker", "restated", "asr_noise"} {
+	for _, k := range []string{"hypothetical", "past_tense", "question", "retracted", "injection", "cross_speaker", "restated", "asr_noise"} {
 		if st.HardCases[k] < 3 {
 			t.Errorf("hard case %s: %d", k, st.HardCases[k])
 		}
@@ -102,6 +105,30 @@ func TestTheLintCatchesEachProblem(t *testing.T) {
 					}
 					m.Labels = append(m.Labels, Label{ID: m.ID + "-all", Text: "x", Assignee: m.Speakers[0].Name, Segments: all})
 					m.Traps = nil
+				}
+			}},
+		{"no non-ASCII meeting", "no meeting marked unicode",
+			func(ms []*Meeting) {
+				for _, m := range ms {
+					m.Unicode = false
+				}
+			}},
+		{"a non-ASCII meeting with no character outside the BMP", "no meeting marked unicode",
+			func(ms []*Meeting) {
+				for _, m := range ms {
+					for i := range m.Segments {
+						m.Segments[i].Text = strings.ReplaceAll(m.Segments[i].Text, "🎉", "!")
+					}
+				}
+			}},
+		{"an injection said by the owner", `trap injection is said by "Tess", who is not a guest`,
+			func(ms []*Meeting) {
+				for _, m := range ms {
+					for i, x := range m.Traps {
+						if x.Kind == "injection" && m.ID == "m07" && x.Segments[0] == 712 {
+							m.Traps[i].Segments = []int64{701}
+						}
+					}
 				}
 			}},
 		{"a retraction in a later window", "trap retracted's segments arrive in different windows",

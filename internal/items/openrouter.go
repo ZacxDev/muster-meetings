@@ -24,7 +24,10 @@ const maxAnswer = 2 << 20
 type client struct {
 	model, key, base string
 	prefs            map[string]any
-	http             *http.Client
+	// pin is true for a chat_json model: every request must still pin its
+	// provider when it is sent.
+	pin  bool
+	http *http.Client
 }
 
 func newClient(c Config, hc *http.Client) *client {
@@ -42,7 +45,7 @@ func newClient(c Config, hc *http.Client) *client {
 	if base == "" {
 		base = DefaultBaseURL
 	}
-	return &client{model: c.Model, key: c.APIKey, base: base, prefs: c.Prefs, http: &h}
+	return &client{model: c.Model, key: c.APIKey, base: base, prefs: c.Prefs, pin: c.Adapter == AdapterChatJSON, http: &h}
 }
 
 type message struct {
@@ -97,9 +100,30 @@ type DetailError struct {
 func (e *DetailError) Error() string { return e.Err.Error() }
 func (e *DetailError) Unwrap() error { return e.Err }
 
+// sendPrefs is a request's own copy of the provider object.
+func (c *client) sendPrefs() (map[string]any, error) {
+	p, err := copyPrefs(c.prefs)
+	if err != nil {
+		return nil, &Error{Class: Fatal, Msg: err.Error()}
+	}
+	return p, nil
+}
+
 // complete sends body and answers the first choice's content and the
 // metadata.
+//
+// 🔴 The provider object is checked HERE, on the bytes about to be sent,
+// whatever built it: a request without data_collection "deny" (or, for a
+// chat_json model, without its provider pin) is refused and never leaves.
+// ParsePrefs checked the configuration once; nothing between it and the
+// wire may drop either.
 func (c *client) complete(ctx context.Context, body request) (string, Result, error) {
+	if body.Provider == nil || body.Provider["data_collection"] != "deny" {
+		return "", Result{}, &Error{Class: Fatal, Msg: `refused to send: the provider object has no data_collection "deny"`}
+	}
+	if c.pin && !pinned(body.Provider) {
+		return "", Result{}, &Error{Class: Fatal, Msg: "refused to send: a chat_json request must pin its provider"}
+	}
 	body.Model = c.model
 	body.Usage.Include = true
 	b, err := json.Marshal(body)

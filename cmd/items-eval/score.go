@@ -49,6 +49,11 @@ type Metrics struct {
 	CostPerHour float64        `json:"cost_per_meeting_hour"`
 	Providers   map[string]int `json:"providers"`
 	Rewritten   int            `json:"rewritten"`
+	// RewrittenUnicode is Rewritten in the meetings marked unicode: a span
+	// whose text is not the input there says the offsets are not counted
+	// as the adapter counts them (or the model rewrote it), and fails the
+	// run for extract.
+	RewrittenUnicode int `json:"rewritten_unicode"`
 }
 
 // matches reports whether emitted item e matches label l: their cited
@@ -132,6 +137,9 @@ func Score(runs []MeetingRun) Metrics {
 				m.Providers[w.Provider]++
 			}
 			m.Rewritten += w.Rewritten
+			if r.Meeting.Unicode {
+				m.RewrittenUnicode += w.Rewritten
+			}
 		}
 	}
 	m.Recall = ratio(m.MatchedLabels, m.Labels)
@@ -191,6 +199,7 @@ func Worst(runs []Metrics) Metrics {
 		w.RetryFailures = max(w.RetryFailures, r.RetryFailures)
 		w.SchemaFailures = max(w.SchemaFailures, r.SchemaFailures)
 		w.Rewritten = max(w.Rewritten, r.Rewritten)
+		w.RewrittenUnicode = max(w.RewrittenUnicode, r.RewrittenUnicode)
 		for p, n := range r.Providers {
 			w.Providers[p] += n
 		}
@@ -227,6 +236,9 @@ func Gates(m Metrics, adapter string) []Gate {
 		// A request refused for good (no provider under the policy, a bad
 		// key) is a failed run, never a skipped one.
 		{"fatal failures", fmt.Sprint(m.FatalFailures), "0", m.FatalFailures == 0, true},
+		// The non-ASCII meeting: every extract span there must be the input
+		// at its offsets, or the offset unit is in doubt.
+		{"rewritten spans, non-ASCII meeting", fmt.Sprint(m.RewrittenUnicode), "0", m.RewrittenUnicode == 0, adapter == items.AdapterExtract},
 	}
 }
 

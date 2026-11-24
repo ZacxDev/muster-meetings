@@ -191,9 +191,14 @@ func (s *Server) stopRecording(ctx context.Context, meetingID string, atMS *int6
 		return
 	}
 	s.cancelRecording(meetingID)
-	if cur, err := s.store.CurrentRecording(ctx, meetingID); err == nil && cur.EgressID != "" {
-		if err := s.cfg.LiveKit.StopEgress(ctx, cur.EgressID); err != nil {
-			s.cfg.Log.Printf("recording: meeting %s part %d: stopping its egress: %s", meetingID, cur.Part, lkKind(err))
+	// Every egress of the meeting whose end has not been seen: the current
+	// part's, and any whose start had failed and that LiveKit ran anyway. One
+	// whose stop fails is stopped by the reconcile (onRecordingEgress).
+	if live, err := s.store.LiveEgressesOf(ctx, meetingID); err == nil {
+		for _, p := range live {
+			if err := s.cfg.LiveKit.StopEgress(ctx, p.EgressID); err != nil {
+				s.cfg.Log.Printf("recording: meeting %s part %d: stopping its egress: %s", meetingID, p.Part, lkKind(err))
+			}
 		}
 	}
 	if atMS != nil {
@@ -274,26 +279,22 @@ func (s *Server) onRecordingEgress(ctx context.Context, info livekit.EgressInfo)
 	if err != nil {
 		return false
 	}
-	if ref.State == store.RecFailed && !info.Ended() {
-		// A start that was refused (to the plugin) and ran anyway: its
-		// successor is the meeting's recording, so it is stopped. Its file,
-		// if it wrote one, is under the part's key and goes with the
-		// meeting's other parts at the purge.
-		s.cfg.Log.Printf("recording: meeting %s part %d: an egress whose start had failed is running; stopping it", ref.MeetingID, ref.Part)
-		_ = s.cfg.LiveKit.StopEgress(ctx, info.EgressID)
-		return true
-	}
 	switch {
 	case info.Ended():
 		s.onRecordingEnded(ctx, ref, info)
 		return true
-	case fileOf(info) != nil:
+	case fileOf(info) != nil && ref.State != store.RecFailed:
+		// (A failed part's egress beginning is no part of the recording:
+		// it closes no gap.)
 		s.onRecordingBegan(ctx, ref, info)
 	}
 	// 🔴 A running egress its meeting no longer wants is stopped, on every
 	// report of it (a webhook, a reconcile pass): a stop that failed once is
-	// tried again until the egress ends.
-	if !wanted(ref) {
+	// tried again until its end is seen. A part marked failed (its start was
+	// refused, or timed out while LiveKit ran it anyway) is never the
+	// recording, so its egress is never wanted. One whose stop LiveKit has
+	// accepted (ENDING: it is uploading) is left to end.
+	if (ref.State == store.RecFailed || !wanted(ref)) && info.Status != "EGRESS_ENDING" {
 		s.stopUnwanted(ctx, ref, info.EgressID)
 	}
 	return true
@@ -351,16 +352,17 @@ func (s *Server) onRecordingEnded(ctx context.Context, ref store.RecordingRef, i
 		s.cfg.Log.Printf("recording: meeting %s part %d: storing its end: %v", ref.MeetingID, ref.Part, err)
 		return
 	}
+	// 🔴 Its egress has ended (EndRecording records it, whatever the part's
+	// state): if the recording was deleted (Delete now, or its purge time)
+	// while this egress still ran, its object, now final, is deleted at once.
+	s.purgeMeeting(ctx, ref.MeetingID)
 	// 🔴 A duplicate or late end (the part had already ended) changes
-	// nothing: no restart, which would cancel a start in flight.
+	// nothing else: no restart, which would cancel a start in flight.
 	if !moved {
 		return
 	}
 	s.cfg.Log.Printf("recording: meeting %s part %d ended (%s)", ref.MeetingID, ref.Part, info.Status)
 	s.hub.Changed(ref.MeetingID)
-	// 🔴 The recording was deleted (Delete now, or its purge time) while this
-	// part's egress still ran: its object, now uploaded, is deleted at once.
-	s.purgeMeeting(ctx, ref.MeetingID)
 	if want {
 		wait := s.recordingRestartWait(ref.MeetingID, e.DurationMS)
 		s.cfg.Log.Printf("recording: meeting %s: its egress ended while the meeting is recorded; a new part in %s", ref.MeetingID, wait)
@@ -386,9 +388,21 @@ func (s *Server) recordingRestartWait(meetingID string, ran *int64) time.Duratio
 // egress (its Redis restarted, say) before the reconcile calls it failed.
 const LostEgress = 2 * time.Minute
 
-// reconcileRecordings asks LiveKit about every running part, in case its
-// webhook was lost: an egress that has ended is ended here as the webhook
-// would have; one LiveKit does not know is failed after LostEgress.
+// reconcileRecordings asks LiveKit about every part whose egress's end has
+// not been seen (a webhook can be lost; a start's answer can be lost), and
+// acts as the webhooks would have:
+//
+//   - a part with an egress id: its egress is reported (onRecordingEgress:
+//     ended, began, or stopped while unwanted, again every pass until its
+//     end is seen); one LiveKit does not know is gone after LostEgress.
+//   - a part with NO egress id (its start timed out, or the plugin stopped
+//     mid-start): LiveKit's egresses in the meeting's room are listed, and
+//     one whose file is the part's key is adopted by it (and so stopped if
+//     unwanted); any other composite there writing under meetings/ that no
+//     part owns is stopped, so nothing records or uploads unowned. A part
+//     none matches after LostEgress has no egress: it is resolved (failed,
+//     its egress ended), so a deleted recording's rows can go, and a meeting
+//     still recorded starts its next part.
 func (s *Server) reconcileRecordings(ctx context.Context) {
 	if !s.Recording() {
 		return
@@ -397,21 +411,83 @@ func (s *Server) reconcileRecordings(ctx context.Context) {
 	if err != nil {
 		return
 	}
+	now := s.cfg.Now()
+	lost := func(p store.Recording) bool { return now.Sub(time.UnixMilli(p.RequestedAt)) >= LostEgress }
+	unowned := map[string][]store.Recording{}
+	var order []string
 	for _, p := range parts {
+		if p.EgressID == "" {
+			if unowned[p.MeetingID] == nil {
+				order = append(order, p.MeetingID)
+			}
+			unowned[p.MeetingID] = append(unowned[p.MeetingID], p)
+			continue
+		}
 		items, err := s.cfg.LiveKit.ListEgress(ctx, p.EgressID)
 		if err != nil {
 			s.cfg.Log.Printf("reconcile: LiveKit: %s", lkKind(err))
 			return
 		}
-		if len(items) == 0 {
-			if s.cfg.Now().Sub(time.UnixMilli(p.RequestedAt)) >= LostEgress {
-				s.onRecordingEgress(ctx, livekit.EgressInfo{EgressID: p.EgressID, Status: "EGRESS_ABORTED"})
-			}
-			continue
-		}
+		seen := false
 		for _, it := range items {
 			if it.EgressID == p.EgressID {
+				seen = true
 				s.onRecordingEgress(ctx, it)
+			}
+		}
+		if !seen && lost(p) {
+			// As an end would (EndRecording records its egress ended, opens
+			// the gap and restarts a recorded meeting).
+			s.onRecordingEgress(ctx, livekit.EgressInfo{EgressID: p.EgressID, Status: "EGRESS_ABORTED"})
+		}
+	}
+	for _, id := range order {
+		items, err := s.cfg.LiveKit.ListRoomEgress(ctx, store.RoomName(id))
+		if err != nil {
+			s.cfg.Log.Printf("reconcile: LiveKit: %s", lkKind(err))
+			return
+		}
+		keys := map[string]bool{}
+		for _, it := range items {
+			if len(it.Files) == 0 || it.Files[0].Filename == "" {
+				continue // not a file egress (a track's audio): not ours to judge here
+			}
+			key := it.Files[0].Filename
+			keys[key] = true
+			if s.onRecordingEgress(ctx, it) {
+				continue // a part's (adopted by its key if it had no id)
+			}
+			if strings.HasPrefix(key, "meetings/") && !it.Ended() && it.Status != "EGRESS_ENDING" {
+				s.cfg.Log.Printf("reconcile: meeting %s: a composite egress no part owns; stopping it", id)
+				if err := s.cfg.LiveKit.StopEgress(ctx, it.EgressID); err != nil {
+					s.cfg.Log.Printf("reconcile: stopping it: %s (retried next pass)", lkKind(err))
+				}
+			}
+		}
+		for _, p := range unowned[id] {
+			if !keys[p.ObjectKey] && lost(p) {
+				s.goneEgress(ctx, p)
+			}
+		}
+	}
+}
+
+// goneEgress resolves a part whose egress LiveKit does not know, LostEgress
+// after it was asked for: its egress has ended (none runs), so its object is
+// final and it is due if its recording was deleted; a meeting still
+// recorded with no part running starts its next.
+func (s *Server) goneEgress(ctx context.Context, p store.Recording) {
+	if err := s.store.EgressGone(ctx, p.ID, "lost", s.cfg.Now()); err != nil {
+		s.cfg.Log.Printf("reconcile: meeting %s part %d: %v", p.MeetingID, p.Part, err)
+		return
+	}
+	s.cfg.Log.Printf("reconcile: meeting %s part %d: LiveKit knows no egress for it; its egress is gone", p.MeetingID, p.Part)
+	s.purgeMeeting(ctx, p.MeetingID)
+	s.hub.Changed(p.MeetingID)
+	if ids, err := s.store.ToResume(ctx, s.cfg.Now()); err == nil {
+		for _, id := range ids {
+			if id == p.MeetingID {
+				s.startRecording(id)
 			}
 		}
 	}

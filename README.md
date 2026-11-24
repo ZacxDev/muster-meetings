@@ -479,10 +479,18 @@ route, no sweeper (`internal/server/norecording_test.go` pins every answer to
 the pre-recording commit's).
 
 - **Off means off.** An egress may run only while its meeting is live with
-  Record on: every report of one (its start's answer, each webhook, each
-  15 s reconcile pass) stops one that is not, again until it ends, so a stop
-  that failed once, or Record off landing while a start was in flight,
-  leaves nothing recording.
+  Record on, and a part marked failed is never the recording: every report
+  of an egress (its start's answer, each webhook, each 15 s reconcile pass)
+  stops one that is not wanted, again until its end is seen (an egress whose
+  stop LiveKit accepted, ENDING while it uploads, is left to end), so a stop
+  that failed once, Record off landing while a start was in flight, or a
+  start that timed out while LiveKit ran it anyway leaves nothing
+  recording. Whether a part's egress has ended is its own recorded fact
+  (`egress_ended`), never inferred from its state. A part with no egress id
+  (its start's answer was lost) is matched by its key among the room's
+  egresses LiveKit lists, and any composite there that no part owns is
+  stopped; one LiveKit knows nothing of two minutes after it was asked for
+  is resolved as gone.
 - **The badge.** Everyone in the call sees "Recording · …" while Record is
   on, and **"Recording failed · …"** while the recording should run and does
   not: its start was refused (no Egress capacity), or its egress died and the
@@ -541,8 +549,9 @@ the pre-recording commit's).
   part's object is deleted, then its row. With the store down nothing more
   is lost: the answer says `"pending"`, the parts stay queued, the archive
   says the files are being removed, and the hourly sweeper finishes them.
-  A part whose egress has not ended yet (Egress stays ENDING while it
-  uploads) is also pending: its row stays until its end arrives, and that
+  A part whose egress's end has not been seen yet (Egress stays ENDING while
+  it uploads, and a part whose start timed out may have one anyway) is also
+  pending: its row stays until its end arrives, and that
   end deletes the uploaded object (nothing is deleted before the file is
   final, so a late upload cannot outlive the delete). The transcript stays.
 - **For the analysis** (`GET /api/meetings/{id}/timeline`, owner only): the

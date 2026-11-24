@@ -336,8 +336,12 @@ func (s *Store) EndRecording(ctx context.Context, id int64, e RecordingEnd, now 
 	err = tx.QueryRowContext(ctx, `UPDATE recordings SET state = ?, start_ms = coalesce(start_ms, ?), duration_ms = ?, bytes = ?, error = ?, ended_at = ?
 		WHERE id = ? AND state IN ('starting', 'active') RETURNING meeting_id`,
 		e.State, nullable(e.StartMS), nullable(e.DurationMS), nullable(e.Bytes), e.Error, ms(now), id).Scan(&meetingID)
+	// Whatever the part's state, its egress has now ended.
+	if _, err2 := tx.ExecContext(ctx, `UPDATE recordings SET egress_ended = 1 WHERE id = ?`, id); err2 != nil {
+		return false, err2
+	}
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+		return false, tx.Commit()
 	}
 	if err != nil {
 		return false, err
@@ -372,10 +376,12 @@ func (s *Store) CurrentRecording(ctx context.Context, meetingID string) (Recordi
 		ORDER BY r.part DESC LIMIT 1`, meetingID))
 }
 
-// RunningRecordings is every part still starting or active, with an egress:
-// what the reconcile asks LiveKit about (a lost egress_ended webhook).
+// RunningRecordings is every part whose egress's end has not been observed,
+// whatever its state (a part marked failed whose start timed out may still
+// have an egress running), with or without an egress id: what the reconcile
+// asks LiveKit about.
 func (s *Store) RunningRecordings(ctx context.Context) ([]Recording, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+recCols+` FROM recordings r WHERE r.state IN ('starting', 'active') AND r.egress_id != '' ORDER BY r.id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+recCols+` FROM recordings r WHERE r.egress_ended = 0 ORDER BY r.id`)
 	if err != nil {
 		return nil, err
 	}
@@ -696,12 +702,14 @@ type Due struct {
 	ObjectKey string
 }
 
-// doneSQL is a part whose egress has ended (complete or failed): only then
-// is its object final. 🔴 A part still starting or active (an egress still
+// doneSQL is a part whose egress's end has been OBSERVED (its end webhook,
+// LiveKit's own answer, or none ever existed): only then is its object final.
+// Never inferred from the state: a part marked failed when its start timed
+// out may have an egress that LiveKit ran anyway, still uploading. 🔴 A part still starting or active (an egress still
 // running, or ENDING while it uploads) is never due: deleting its object and
 // row then would let the upload land afterwards with nothing left to delete
 // it. It becomes due when its end is recorded.
-const doneSQL = `r.state IN ('complete', 'failed')`
+const doneSQL = `r.egress_ended = 1`
 
 // DueRecordings is up to limit parts past their meeting's purge time whose
 // egress has ended, oldest first.
@@ -928,4 +936,25 @@ func (s *Store) DueRecordingsOf(ctx context.Context, meetingID string, now time.
 		out = append(out, d)
 	}
 	return out, rows.Err()
+}
+
+// EgressGone records that a part has no egress left running: LiveKit knows
+// none for it (lost, or a start that never ran). A part still starting is
+// failed with kind; its object, if any, is final, so it becomes due.
+func (s *Store) EgressGone(ctx context.Context, id int64, kind string, now time.Time) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE recordings SET egress_ended = 1,
+		state = CASE WHEN state IN ('starting', 'active') THEN 'failed' ELSE state END,
+		error = CASE WHEN state IN ('starting', 'active') THEN ? ELSE error END,
+		ended_at = coalesce(ended_at, ?) WHERE id = ? AND egress_ended = 0`, kind, ms(now), id)
+	return err
+}
+
+// LiveEgressesOf is every part of the meeting with an egress whose end has
+// not been observed: what stopping its recording stops.
+func (s *Store) LiveEgressesOf(ctx context.Context, meetingID string) ([]Recording, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+recCols+` FROM recordings r WHERE r.meeting_id = ? AND r.egress_ended = 0 AND r.egress_id != '' ORDER BY r.part`, meetingID)
+	if err != nil {
+		return nil, err
+	}
+	return scanRecordings(rows)
 }

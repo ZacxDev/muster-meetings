@@ -126,6 +126,25 @@ type Fake struct {
 	// failStop is how many of the next StopEgress calls fail (503) and stop
 	// nothing.
 	failStop int
+	// StopEnding makes StopEgress behave as Egress does with a file to
+	// upload: the egress is ENDING (egress_updated) and stays active until
+	// FinishEgress; without it a stop ends the egress at once.
+	StopEnding bool
+}
+
+// FinishEgress ends an egress that is ENDING (its upload done): COMPLETE.
+func (f *Fake) FinishEgress(id string) {
+	f.mu.Lock()
+	var e *Egress
+	for _, x := range f.egresses {
+		if x.ID == id {
+			e = x
+		}
+	}
+	f.mu.Unlock()
+	if e != nil {
+		f.endEgress(e, "EGRESS_COMPLETE")
+	}
 }
 
 // FailStop makes the next n StopEgress calls fail as an unreachable Egress
@@ -147,8 +166,10 @@ type Egress struct {
 	Composite bool
 	Filepath  string
 	StartedAt time.Time
-	active    bool
-	stop      chan string // the status it ends with
+	// Ending says a stop was accepted and the egress is still uploading.
+	Ending bool
+	active bool
+	stop   chan string // the status it ends with
 }
 
 // RTC is one connection attempt a client made with a token.
@@ -654,12 +675,20 @@ func (f *Fake) egressJSON(e *Egress) map[string]any {
 	if !e.StartedAt.IsZero() {
 		status = "EGRESS_ACTIVE"
 	}
+	if e.Ending {
+		status = "EGRESS_ENDING"
+	}
 	if !e.active {
 		status = "EGRESS_COMPLETE"
 	}
 	files := []map[string]any{}
-	if e.Composite && !e.StartedAt.IsZero() {
-		files = append(files, map[string]any{"filename": e.Filepath, "started_at": fmt.Sprint(e.StartedAt.UnixNano()),
+	if e.Composite {
+		// The file is named from the start (its started_at 0 until it began).
+		started := "0"
+		if !e.StartedAt.IsZero() {
+			started = fmt.Sprint(e.StartedAt.UnixNano())
+		}
+		files = append(files, map[string]any{"filename": e.Filepath, "started_at": started,
 			"ended_at": "0", "duration": "0", "size": "0", "location": ""})
 	}
 	return map[string]any{"egress_id": e.ID, "room_name": e.Room, "status": status, "started_at": fmt.Sprint(f.Now().UnixNano()),
@@ -824,7 +853,7 @@ func (f *Fake) egressTwirp(w http.ResponseWriter, r *http.Request) {
 	case "ListEgress":
 		var items []map[string]any
 		for _, x := range f.egresses {
-			if in.EgressID == "" || x.ID == in.EgressID {
+			if (in.EgressID == "" || x.ID == in.EgressID) && (in.RoomName == "" || x.Room == in.RoomName) {
 				items = append(items, f.egressJSON(x))
 			}
 		}
@@ -850,6 +879,26 @@ func (f *Fake) egressTwirp(w http.ResponseWriter, r *http.Request) {
 		}
 		if !e.Active() {
 			twirpErr(w, 412, "failed_precondition", "egress is not active")
+			return
+		}
+		f.mu.Lock()
+		ending, already := f.StopEnding && e.Composite, e.Ending
+		if ending {
+			e.Ending = true
+		}
+		url, room := f.WebhookURL, e.Room
+		f.mu.Unlock()
+		if ending {
+			if already {
+				twirpErr(w, 412, "failed_precondition", "egress is already ending")
+				return
+			}
+			writeOK(map[string]any{"egress_id": e.ID, "status": "EGRESS_ENDING"})
+			if url != "" {
+				go f.PostEvent(url, map[string]any{"event": "egress_updated", "room": map[string]any{"sid": "RM_fake", "name": room},
+					"egressInfo": map[string]any{"egressId": e.ID, "roomName": room, "status": "EGRESS_ENDING",
+						"fileResults": []map[string]any{{"filename": e.Filepath}}}})
+			}
 			return
 		}
 		f.endEgress(e, "EGRESS_COMPLETE")

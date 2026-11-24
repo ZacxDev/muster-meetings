@@ -453,3 +453,16 @@ func (c *Client) ListEgress(ctx context.Context, egressID string) ([]EgressInfo,
 	}
 	return out.Items, err
 }
+
+// ListRoomEgress is every egress LiveKit knows in room: how the reconcile
+// finds an egress it has no id for (a start whose answer never arrived).
+func (c *Client) ListRoomEgress(ctx context.Context, room string) ([]EgressInfo, error) {
+	var out struct {
+		Items []EgressInfo `json:"items"`
+	}
+	err := c.callService(ctx, "livekit.Egress", "ListEgress", VideoGrant{RoomRecord: true}, map[string]any{"room_name": room}, &out)
+	if NotFound(err) {
+		return nil, nil
+	}
+	return out.Items, err
+}

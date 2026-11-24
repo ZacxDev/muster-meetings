@@ -157,6 +157,13 @@ const (
 	ctOut   = "internal/contacts/outbox.go"
 	ctAcc   = "internal/contacts/accepting.go"
 	cardE2E = "contacts-card.spec.ts"
+	// the recording, phase 5
+	recGo    = "internal/server/recording.go"
+	recSt    = "internal/store/recordings.go"
+	tline    = "internal/timeline/timeline.go"
+	s3Go     = "internal/s3/s3.go"
+	framesGo = "internal/frames/frames.go"
+	recE2E   = "recording.spec.ts"
 )
 
 var mutants = []mutant{
@@ -1145,6 +1152,76 @@ var mutants = []mutant{
 	{name: "contacts deploy: the contacts token required in the Secret", file: kPlugin, from: "key: MEETINGS_CONTACTS_TOKEN, optional: true}", to: "key: MEETINGS_CONTACTS_TOKEN}",
 		pkg: "./deploy", test: "TestKubernetesPlugin", want: "MEETINGS_CONTACTS_TOKEN = "},
 
+	// ---- 🔴 the recording, phase 5 ----
+	{name: "recording offset: the part's start not subtracted", file: tline, from: "return &Offset{Part: p.N, OffsetMS: t - p.StartMS}", to: "return &Offset{Part: p.N, OffsetMS: t}",
+		pkg: "./internal/timeline", test: "TestLocateAtTheMeetingStartAndMidMeetingAfterARestart", want: "mid-meeting after the restart, 15 min in"},
+	{name: "recording offset: a running part covers its future", file: tline, from: "return ok && t >= p.StartMS && t < end", to: "return t >= p.StartMS && (!ok || t < end)",
+		pkg: "./internal/timeline", test: "TestAPartOfUnknownDurationCoversNothing", want: "a running part placed"},
+	{name: "recording start: the webhook's arrival, not the egress's report", file: recGo, from: "\tat := timeline.MeetingMS(f.StartedAt, ref.MeetingStart.UnixMilli())\n\tif _, err := s.store.RecordingBegan", to: "\tat := s.sinceStart(ref.MeetingStart)\n\tif _, err := s.store.RecordingBegan",
+		pkg: "./internal/server", test: "TestRecordingStartsAtTheFirstAdmitAndItsStartIsTheEgressReport", want: "not 9000 (its arrival)"},
+	{name: "recording start: before any guest is admitted", file: calls, from: "\tif err := repo.MarkStarted(r.Context(), m.ID, now); err != nil {", to: "\ts.startRecording(m.ID)\n\tif err := repo.MarkStarted(r.Context(), m.ID, now); err != nil {",
+		pkg: "./internal/server", test: "TestRecordingStartsAtTheFirstAdmitAndItsStartIsTheEgressReport", want: "composites before any guest was admitted"},
+	{name: "recording parts: a second egress while one runs", file: recSt, from: "\tif running > 0 {\n\t\treturn Recording{}, ErrRecordingRunning", to: "\tif false {\n\t\treturn Recording{}, ErrRecordingRunning",
+		pkg: "./internal/store", test: "TestPartsAndGapsThroughAFailureAndARestart", want: "a second start while part 1 runs"},
+	{name: "recording parts: Record off ignored", file: recSt, from: "\tif !isLive || rec != 1 {\n\t\treturn Recording{}, ErrNotRecorded", to: "\tif !isLive {\n\t\treturn Recording{}, ErrNotRecorded",
+		pkg: "./internal/store", test: "TestNoRecordingWithRecordOffOrOnAnEndedMeeting", want: "record off:"},
+	{name: "recording failure: a dead egress not restarted", file: recGo, from: "\tif wanted {\n\t\twait := s.recordingRestartWait", to: "\tif false {\n\t\twait := s.recordingRestartWait",
+		pkg: "./internal/server", test: "TestAFailedEgressRestartsAsANewPartWithItsGapAndTheBadgeSaysSo", want: "composite egress 2"},
+	{name: "recording failure: the gap opens at the retry, not where the file ended", file: recGo, from: "\t\te.GapAtMS = &at\n", to: "\t\t_ = at\n",
+		pkg: "./internal/server", test: "TestAFailedEgressRestartsAsANewPartWithItsGapAndTheBadgeSaysSo", want: "want the failure's gap, 60000 to 63500"},
+	{name: "recording gaps: the end's gap ignored by the store", file: recSt, from: "\tif e.GapAtMS != nil {\n\t\tif _, err := tx.ExecContext", to: "\tif false {\n\t\tif _, err := tx.ExecContext",
+		pkg: "./internal/store", test: "TestPartsAndGapsThroughAFailureAndARestart", want: "gaps ="},
+	{name: "recording badge: never says failed", file: recSt, from: "\tif n > 0 {\n\t\treturn RecStatusFailed, err", to: "\tif false {\n\t\treturn RecStatusFailed, err",
+		pkg: "./internal/server", test: "TestARefusedStartRetriesAndTheBadgeSaysFailedMeanwhile", want: "Recording failed"},
+	{name: "recording: Record off leaves the egress running", file: calls, from: "\t\t\t\ts.stopRecording(r.Context(), id, &at)\n", to: "\t\t\t\t_ = at\n",
+		pkg: "./internal/server", test: "TestRecordOffStopsTheEgressAndNothingRestartsIt", want: "Record off: the egress is still active"},
+	{name: "recording: End leaves the egress to DeleteRoom", file: calls, from: "\ts.stopRecording(r.Context(), id, nil)\n", to: "",
+		pkg: "./internal/server", test: "TestEndMeetingStopsTheEgressItself", want: "End: StopEgress of the composite"},
+	{name: "recording reconcile: a lost webhook never ends the part", file: machine, from: "\ts.reconcileRecordings(ctx)\n", to: "",
+		pkg: "./internal/server", test: "TestTheReconcileEndsAPartWhoseWebhookWasLost", want: "after the reconcile the part is"},
+	{name: "share door: a revoked link opens", file: recSt, from: "subtle.ConstantTimeCompare([]byte(stored), []byte(h)) != 1 || revoked.Valid ||", to: "subtle.ConstantTimeCompare([]byte(stored), []byte(h)) != 1 ||",
+		pkg: "./internal/store", test: "TestAShareLinkOpensUntilThePurgeAndNotOnceRevokedOrReplaced", want: "the replaced link still opens"},
+	{name: "share door: an expired link opens", file: recSt, from: "!purge.Valid || purge.Int64 <= ms(now) {\n\t\treturn Shared{}, ErrNotFound", to: "!purge.Valid {\n\t\treturn Shared{}, ErrNotFound",
+		pkg: "./internal/store", test: "TestAShareLinkOpensUntilThePurgeAndNotOnceRevokedOrReplaced", want: "open at the purge time"},
+	{name: "share door: the token stored in clear", file: recSt, from: "VALUES (?, ?, ?)`, Hash(tok), meetingID, ms(now)); err != nil {", to: "VALUES (?, ?, ?)`, tok, meetingID, ms(now)); err != nil {",
+		pkg: "./internal/store", test: "TestTheTokenIsStoredOnlyHashed", want: "the share token is in the database file"},
+	{name: "share door: the media's 404 is not the page's", file: recGo, from: "\tif err != nil {\n\t\ts.shareMissing(w)\n\t\treturn\n\t}\n\tn := atoi(r.PathValue(\"part\"))", to: "\tif err != nil {\n\t\twriteJSON(w, http.StatusNotFound, map[string]any{\"error\": \"not found\"})\n\t\treturn\n\t}\n\tn := atoi(r.PathValue(\"part\"))",
+		pkg: "./internal/server", test: "TestTheShareDoorAnswersOneNotFoundForEveryClosedLink", want: "an unknown token's media"},
+	{name: "share log: the token reaches the access log", file: srv, from: "\tif rest, ok := strings.CutPrefix(c, \"/r/\"); ok {", to: "\tif rest, ok := strings.CutPrefix(c, \"/r/\"); false && ok {",
+		pkg: "./internal/server", test: "TestRedactPathHidesAShareToken", want: "want \"/r/{token}\""},
+	{name: "media url: the expiry not checked", file: recGo, from: "|| s.cfg.Now().Unix() >= exp {", to: " {",
+		pkg: "./internal/server", test: "TestSignedMediaURLs", want: "an expired URL"},
+	{name: "media url: the path left out of the HMAC", file: recGo, from: "\tm.Write([]byte(path + \"\\n\" + strconv.FormatInt(exp, 10)))", to: "\tm.Write([]byte(strconv.FormatInt(exp, 10)))",
+		pkg: "./internal/server", test: "TestSignedMediaURLs", want: "another meeting's path under this signature"},
+	{name: "media url: the expiry left out of the HMAC", file: recGo, from: "\tm.Write([]byte(path + \"\\n\" + strconv.FormatInt(exp, 10)))", to: "\tm.Write([]byte(path))",
+		pkg: "./internal/server", test: "TestSignedMediaURLs", want: "a tampered expiry"},
+	{name: "sweeper: the row deleted while the store is down", file: recGo, from: "\t\t\tif err := s.cfg.S3.Delete(ctx, d.ObjectKey); err != nil {\n\t\t\t\tleft++\n\t\t\t\tcontinue\n\t\t\t}", to: "\t\t\t_ = s.cfg.S3.Delete(ctx, d.ObjectKey)",
+		pkg: "./internal/server", test: "TestTheSweeperDeletesTheObjectThenTheRowAndRetriesWhenTheStoreIsDown", want: "the store down: deleted 1, left 0"},
+	{name: "sweeper: the object never deleted", file: recGo, from: "\t\tif d.ObjectKey != \"\" {\n\t\t\tif err := s.cfg.S3.Delete", to: "\t\tif false {\n\t\t\tif err := s.cfg.S3.Delete",
+		pkg: "./internal/server", test: "TestTheSweeperDeletesTheObjectItself", want: "the object is still stored after its sweep"},
+	{name: "retention: the owner's setting ignored at the end", file: recSt, from: "86400000 * coalesce(\n\t\t\t(SELECT o.retention_days_recording FROM owners o WHERE o.subject = meetings.subject), ", to: "86400000 * coalesce(NULL, ",
+		pkg: "./internal/store", test: "TestEveryEndStampsTheRecordingPurgeTime", want: "End: purge at"},
+	{name: "retention: an end path that does not close the recording", file: parts, from: "\treturn closeEnded(ctx, tx)\n", to: "\treturn nil\n",
+		pkg: "./internal/store", test: "TestTheEndClosesAnOpenGapAndScreenShare", want: "gaps after the end"},
+	{name: "retention: any number of days", file: recSt, from: "\t\tok = ok || v.RecordingRetentionDays == c\n", to: "\t\tok = true\n",
+		pkg: "./internal/store", test: "TestRetentionIsThirtyByDefaultAndOnlyThirtyOr365", want: "days: <nil>"},
+	{name: "migration 6: an ended meeting gets no purge time", file: st, from: "\tUPDATE meetings SET purge_recording_at = ended_at + 30 * 86400000 WHERE state = 'ended' AND ended_at IS NOT NULL;\n", to: "",
+		pkg: "./internal/store", test: "TestMigration6KeepsEveryRowAndStampsEndedMeetings", want: "after migration 6"},
+	{name: "no bucket: the recording's routes mounted", file: srv, from: "\tif cfg.S3 != nil {\n\t\ts.recordingRoutes()", to: "\tif true {\n\t\ts.recordingRoutes()",
+		pkg: "./internal/server", test: "TestNoBucketChangesNothing", want: "with no bucket the surface changed"},
+	{name: "no bucket: one S3 variable alone accepted", file: mainGo, from: "\tcase set < 4:\n\t\treturn nil, ErrS3Half", to: "\tcase false:\n\t\treturn nil, ErrS3Half",
+		pkg: ".", test: "TestRecordingConfigIsAllOrNothing", want: "want ErrS3Half"},
+	{name: "s3 signature: the headers not sorted", file: s3Go, from: "\tsort.Strings(names)\n", to: "",
+		pkg: "./internal/s3", test: "TestSignMatchesAWSDocumentedGetObjectExample", want: "Authorization:"},
+	{name: "frames: a time outside the recording guessed", file: framesGo, from: "\t\tif at == nil {\n\t\t\tskips = append(skips, Skip{MeetingMS: t, Why: SkipNotRecorded})\n\t\t\tcontinue\n\t\t}", to: "\t\tif at == nil {\n\t\t\tat = &timeline.Offset{Part: 1}\n\t\t}",
+		pkg: "./internal/frames", test: "TestSampleExtractsTheFrameAtEachMeetingTimeFromTheStore", want: "frames, want 4"},
+	{name: "frames: the seek ignored", file: framesGo, from: "\"-ss\", sec, \"-i\", input,", to: "\"-ss\", \"0\", \"-i\", input,",
+		pkg: "./internal/frames", test: "TestSampleExtractsTheFrameAtEachMeetingTimeFromTheStore", want: "is red, want green"},
+	{name: "timeline: a frame ref outside any screen share", file: recGo, from: "\t\t\tif !ok {\n\t\t\t\tcontinue\n\t\t\t}\n\t\t\tbs.ScreenShare = true", to: "\t\t\tif !ok {\n\t\t\t\tov = timeline.Interval{FromMS: g.StartMS, ToMS: g.StartMS + 2}\n\t\t\t}\n\t\t\tbs.ScreenShare = true",
+		pkg: "./internal/server", test: "TestTheTimelineBundleNamesFramesWhileAScreenWasShared", want: "frames:"},
+	{name: "timeline: a screen share's end never recorded", file: machine, from: "\t\t\ts.onScreenShareEnded(ctx, *ev.Track)\n", to: "",
+		pkg: "./internal/server", test: "TestTheTimelineBundleNamesFramesWhileAScreenWasShared", want: "screen shares:"},
+
 	// ---- 🔴 contacts, phase 1b, in a browser (go run ./scripts/mutate -e2e) ----
 	{name: "contacts ui: the consent sentence reworded", file: guestJS, from: "', who will see that you were in this meeting. Nothing else is shared.'", to: "', who may see that you were in this meeting. Nothing else is shared.'",
 		e2e: cardE2E, test: "End: the guest's card .*\\(mobile\\)", want: "Your name and email go to Ada L., who will see"},
@@ -1154,6 +1231,14 @@ var mutants = []mutant{
 		e2e: cardE2E, test: "Leave: .*\\(desktop\\)", want: "#card"},
 	{name: "contacts ui: the card rises at a literal duration", file: appCSS, from: "animation: rise var(--mu-dur-slow) var(--mu-ease-enter);\n  transition: opacity", to: "animation: rise 320ms var(--mu-ease-enter);\n  transition: opacity",
 		e2e: cardE2E, test: "neither rises nor fades", want: "0.32s"},
+
+	// ---- 🔴 the recording, phase 5, in a browser (go run ./scripts/mutate -e2e) ----
+	{name: "recording ui: a line click does not seek the video", file: appJS, from: "          li.classList.add('playing');\n          play(at.part, at.offset_ms);", to: "          li.classList.add('playing');",
+		e2e: recE2E, test: "archive plays the recording", want: "toBeCloseTo"},
+	{name: "recording ui: the archive shows no video", file: appJS, from: "      if (b.parts && b.parts.some(function (p) { return p.duration_ms > 0; })) media.load(m);\n", to: "",
+		e2e: recE2E, test: "archive plays the recording", want: "archive-media"},
+	{name: "recording ui: the badge hides a failure", file: callJS, from: "    b.textContent = text;\n", to: "    b.textContent = text.replace(' failed', '');\n",
+		e2e: recE2E, test: "390x844 the owner and a guest see the recording badge", want: "Recording failed"},
 }
 
 func main() {

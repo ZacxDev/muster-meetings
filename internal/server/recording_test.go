@@ -140,9 +140,12 @@ func TestRecordingStartsAtTheFirstAdmitAndItsStartIsTheEgressReport(t *testing.T
 // gap, everyone's badge says "Recording failed" until the new part begins,
 // and each transcript line maps to its part's offset. Every value literal:
 // part 1's file began at 6 200 and the egress died at 60 000 (a 53 800 ms
-// file); part 2's file began at 63 500 and ended with the meeting at 120 000.
+// file); the retry asked for part 2 at 62 000 (the clock moved on before its
+// backoff ran out), and its file began at 63 500 and ended with the meeting
+// at 120 000. The gap starts where part 1's FILE ended (60 000), not at the
+// retry (62 000).
 func TestAFailedEgressRestartsAsANewPartWithItsGapAndTheBadgeSaysSo(t *testing.T) {
-	e, _ := recEnv(t)
+	e, _ := recEnv(t, func(c *server.Config) { c.EgressBackoff = []time.Duration{300 * time.Millisecond} })
 	c := e.meeting(ada)
 	e.started(c)
 	e.clock.Add(5 * time.Second)
@@ -155,14 +158,15 @@ func TestAFailedEgressRestartsAsANewPartWithItsGapAndTheBadgeSaysSo(t *testing.T
 	wantMeetingEvent(t, guest, `"badge":"Recording · Transcribing · AI"`)
 
 	e.clock.Add(55 * time.Second) // t0 + 60 s
-	e.lk.KillEgress(g1.ID)
+	e.lk.KillEgress(g1.ID)        // its webhook is handled before this returns
+	e.clock.Add(2 * time.Second)  // t0 + 62 s, inside the 300 ms backoff
 	g2 := e.composite(2)
 	if g2.Filepath != "meetings/"+c.Subject+"/"+c.ID+"/recording-2.mp4" {
 		t.Fatalf("part 2's key = %q", g2.Filepath)
 	}
 	wantMeetingEvent(t, owner, `"badge":"Recording failed · Transcribing · AI"`)
 	wantMeetingEvent(t, guest, `"badge":"Recording failed · Transcribing · AI"`)
-	e.clock.Add(3500 * time.Millisecond)
+	e.clock.Add(1500 * time.Millisecond) // t0 + 63.5 s
 	e.lk.BeginComposite(g2.ID, e.clock.Now())
 	wantMeetingEvent(t, owner, `"badge":"Recording · Transcribing · AI"`)
 	wantMeetingEvent(t, guest, `"badge":"Recording · Transcribing · AI"`)
@@ -478,6 +482,20 @@ func TestTheSweeperDeletesTheObjectThenTheRowAndRetriesWhenTheStoreIsDown(t *tes
 	}
 	if strings.Contains(e.log.String(), key) || strings.Contains(e.log.String(), "recording-1.mp4") {
 		t.Errorf("the sweeper logged an object key:\n%s", e.log.String())
+	}
+}
+
+// With the store up, the purge deletes the object itself (not only its row).
+func TestTheSweeperDeletesTheObjectItself(t *testing.T) {
+	e, f := recEnv(t)
+	c := finishedRecording(t, e)
+	key := "meetings/" + c.Subject + "/" + c.ID + "/recording-1.mp4"
+	e.clock.Add(30 * 24 * time.Hour)
+	if d, l := e.server.SweepRecordings(context.Background()); d != 1 || l != 0 {
+		t.Fatalf("deleted %d, left %d", d, l)
+	}
+	if f.Has(key) {
+		t.Fatalf("the object is still stored after its sweep: %v", f.Keys())
 	}
 }
 

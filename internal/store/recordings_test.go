@@ -115,8 +115,9 @@ func TestRetentionIsThirtyByDefaultAndOnlyThirtyOr365(t *testing.T) {
 
 // The parts and gaps of one meeting through a failure and a restart, every
 // value literal: asked at meeting time 9 000; the egress's file began at
-// 12 400; it died at 70 000; the second part was asked at once and its file
-// began at 74 250.
+// 12 400; its file ended at 70 000; the second part was asked at 71 000 (the
+// retry's backoff later) and its file began at 74 250. The failure's gap
+// starts where the FILE ended, not at the retry.
 func TestPartsAndGapsThroughAFailureAndARestart(t *testing.T) {
 	s, _ := open(t)
 	r := owner(t, s, subA, t0)
@@ -146,7 +147,7 @@ func TestPartsAndGapsThroughAFailureAndARestart(t *testing.T) {
 	if st, _ := s.RecordingStatus(ctx, id); st != store.RecStatusFailed {
 		t.Fatalf("status after the failure = %q, want failed", st)
 	}
-	p2, err := s.BeginRecording(ctx, id, 70_000, t0)
+	p2, err := s.BeginRecording(ctx, id, 71_000, t0)
 	if err != nil || p2.Part != 2 {
 		t.Fatalf("part 2 = %+v %v", p2, err)
 	}

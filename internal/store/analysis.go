@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -523,4 +524,62 @@ func (s *Store) CurrentRun(ctx context.Context, meetingID string) (Run, error) {
 		return Run{}, ErrNoRun
 	}
 	return run, err
+}
+
+// AIMeetings is every open meeting with its AI switch on (the live
+// worker's), with when its time starts.
+func (s *Store) AIMeetings(ctx context.Context, now time.Time) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM meetings WHERE state = 'open' AND ai = 1 AND created_at > ? ORDER BY created_at`, ms(now.Add(-LinkLifetime)))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// FinalSegments is a meeting's transcript lines (no gap markers), in id
+// order: what a model may read and cite.
+func (s *Store) FinalSegments(ctx context.Context, meetingID string) ([]Segment, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+segCols+` FROM segments s WHERE s.meeting_id = ? AND s.kind = 'text' ORDER BY s.id`, meetingID)
+	if err != nil {
+		return nil, err
+	}
+	return scanSegments(rows)
+}
+
+// MeetingAI is whether a meeting's AI switch is on and it is open.
+func (s *Store) MeetingAI(ctx context.Context, meetingID string) (ai, open bool, err error) {
+	err = s.db.QueryRowContext(ctx, `SELECT ai = 1, state = 'open' FROM meetings WHERE id = ?`, meetingID).Scan(&ai, &open)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, false, ErrNotFound
+	}
+	return ai, open, err
+}
+
+// Speakers is every name a meeting's lines were said under, and every
+// guest's knock name, without " (guest)".
+func (s *Store) Speakers(ctx context.Context, meetingID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT speaker FROM segments WHERE meeting_id = ?
+		UNION SELECT display_name FROM participants WHERE meeting_id = ?`, meetingID, meetingID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		out = append(out, strings.TrimSuffix(n, " (guest)"))
+	}
+	return out, rows.Err()
 }

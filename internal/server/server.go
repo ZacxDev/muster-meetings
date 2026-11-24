@@ -46,6 +46,7 @@ import (
 	"github.com/ZacxDev/muster-meetings/internal/ingest"
 	"github.com/ZacxDev/muster-meetings/internal/livekit"
 	"github.com/ZacxDev/muster-meetings/internal/lobby"
+	"github.com/ZacxDev/muster-meetings/internal/mail"
 	"github.com/ZacxDev/muster-meetings/internal/muster"
 	"github.com/ZacxDev/muster-meetings/internal/owners"
 	"github.com/ZacxDev/muster-meetings/internal/s3"
@@ -157,6 +158,19 @@ type Config struct {
 	// RetentionEvery is the recording sweeper's period; default
 	// DefaultRetentionEvery (1 h).
 	RetentionEvery time.Duration
+
+	// AI is the action items, the frame analysis and the summary
+	// (OPENROUTER_API_KEY, MEETINGS_ITEMS_*, MEETINGS_VISION_*;
+	// analysis.go), or nil. 🔴 nil is meetings exactly as before them: no
+	// worker, no route, no event, no AI call (TestNoModelAndNoMailChangeNothing).
+	AI *AIConfig
+	// Mail is the notes' mail server (MEETINGS_SMTP_*; internal/mail), or
+	// nil: no draft, no route, no send, and the card keeps no address
+	// (notes.go). It needs AI.
+	Mail *mail.Sender
+	// MailBackoff is the wait before each retry of a deferred send; default
+	// DefaultMailBackoff.
+	MailBackoff []time.Duration
 }
 
 // Server is the plugin's public handler.
@@ -188,6 +202,10 @@ type Server struct {
 	// the HMAC key of its signed media URLs.
 	rec      *recorder
 	mediaKey []byte
+	// ai is the analysis' in-memory side (analysis.go), nil without
+	// Config.AI; notes the mail side's (notes.go), nil without Config.Mail.
+	ai    *aiSide
+	notes *notesSide
 }
 
 // New builds the handler.
@@ -261,6 +279,16 @@ func New(cfg Config, st *store.Store, app *owners.App) *Server {
 	// without one each is the 404 every unknown path is.
 	if cfg.S3 != nil {
 		s.recordingRoutes()
+	}
+	// 🔴 The analysis' and the notes' routes exist only when configured
+	// (analysis.go, notes.go): without, each is the 404 every unknown path is.
+	if cfg.AI != nil {
+		s.ai = newAISide(cfg)
+		s.analysisRoutes()
+		if cfg.Mail != nil {
+			s.notes = newNotesSide()
+			s.notesRoutes()
+		}
 	}
 	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})

@@ -380,7 +380,7 @@ func (s *Server) compose(ctx context.Context, o store.OutMail, to string) ([]byt
 		return nil, err
 	}
 	msg := mail.Message{FromName: mail.FromName(o.OwnerName), FromAddr: s.cfg.Mail.From(), ReplyTo: o.OwnerEmail,
-		ToName: o.Name, ToAddr: to, MessageID: o.ID, Date: *o.ApprovedAt,
+		ToName: o.Name, ToAddr: to, MessageID: o.ID, Date: approvedAt(o),
 		Attachments: []mail.Attachment{
 			{Name: "meeting-" + m.ID + ".txt", ContentType: "text/plain; charset=utf-8", Data: []byte(TranscriptText(m, segs))},
 			{Name: "meeting-" + m.ID + ".vtt", ContentType: "text/vtt; charset=utf-8", Data: []byte(TranscriptVTT(segs))},
@@ -393,6 +393,15 @@ func (s *Server) compose(ctx context.Context, o store.OutMail, to string) ([]byt
 		b, err = mail.Build(msg)
 	}
 	return b, err
+}
+
+// approvedAt is when the owner pressed Send for o: the message's Date, so a
+// retry is the same message.
+func approvedAt(o store.OutMail) time.Time {
+	if o.ApprovedAt != nil {
+		return *o.ApprovedAt
+	}
+	return time.Time{}
 }
 
 func (s *Server) sendOne(ctx context.Context, o store.OutMail) {

@@ -432,7 +432,7 @@ func TestSendNeedsTheOwnersConfirmedAddress(t *testing.T) {
 	e.postDone(c, 1)
 	resp, raw := e.do("POST", "/api/meetings/"+c.ID+"/drafts/send", c.Sess, map[string]any{})
 	if resp.StatusCode != 409 || !strings.Contains(string(raw), server.NotesNeedAddress) {
-		t.Fatalf("send unconfirmed = %d %s", resp.StatusCode, raw)
+		t.Fatalf("send with no address = %d %s (an unconfirmed owner address was used)", resp.StatusCode, raw)
 	}
 	if resp, _ := e.do("PUT", "/api/settings/email", c.Sess, map[string]string{"email": adaAddr}); resp.StatusCode != 202 {
 		t.Fatal(resp.StatusCode)
@@ -500,10 +500,7 @@ func TestSendMailsEachRecipientTheirNotesExactly(t *testing.T) {
 			t.Errorf("shape to %s: %v", want.to, shape)
 		}
 		html := ps[1].body
-		yours := html[strings.Index(html, `id="yours"`):]
-		yours = yours[:strings.Index(yours, "</table>")]
-		others := html[strings.Index(html, `id="others"`):]
-		others = others[:strings.Index(others, "</div>")]
+		yours, others := cut(html, `id="yours"`, "</table>"), cut(html, `id="others"`, "</div>")
 		if !strings.Contains(yours, want.yours) || strings.Contains(yours, want.others) || !strings.Contains(yours, "border-left:4px solid #2f6fdf") {
 			t.Errorf("to %s the YOUR section is not their own items alone:\n%s", want.to, yours)
 		}
@@ -616,11 +613,13 @@ func TestReprocessMakesANewCurrentRunAndLeavesSentNotesAlone(t *testing.T) {
 	first := e.postDone(c, 1)
 	e.confirmOwner(c)
 	ds := e.drafts(c)
-	if resp, raw := e.do("POST", "/api/meetings/"+c.ID+"/drafts/send", c.Sess, map[string]any{"ids": []string{ds[1].ID}}); resp.StatusCode != 200 {
+	// The owner's notes are sent (the owner is a recipient of every run);
+	// Grace's are not.
+	if resp, raw := e.do("POST", "/api/meetings/"+c.ID+"/drafts/send", c.Sess, map[string]any{"ids": []string{ds[0].ID}}); resp.StatusCode != 200 {
 		t.Fatalf("send = %d %s", resp.StatusCode, raw)
 	}
-	eventually(t, 10*time.Second, "Grace's sent", func() bool { return e.drafts(c)[1].State == "sent" })
-	sentBefore := e.drafts(c)[1]
+	eventually(t, 10*time.Second, "the owner's sent", func() bool { return e.drafts(c)[0].State == "sent" })
+	sentBefore := e.drafts(c)[0]
 	e.or.Script(openroutertest.KindItems, func(d openroutertest.Doc) openroutertest.Reply {
 		return openroutertest.Reply{Content: openroutertest.JSON(map[string]any{"items": []any{map[string]any{"task": "Confirm the date", "owner": "Ada L.", "due": "", "segment_ids": []int64{d.Segments[0].ID}}}})}
 	})
@@ -636,11 +635,11 @@ func TestReprocessMakesANewCurrentRunAndLeavesSentNotesAlone(t *testing.T) {
 		t.Errorf("the reprocess did not use its model")
 	}
 	after := e.drafts(c)
-	if after[1].ID != sentBefore.ID || after[1].State != "sent" || after[1].Items[0].Text != sentBefore.Items[0].Text || after[1].RunID != sentBefore.RunID {
-		t.Errorf("a sent draft was changed by reprocess: %+v → %+v", sentBefore, after[1])
+	if after[0].ID != sentBefore.ID || after[0].State != "sent" || after[0].Items[0].Text != sentBefore.Items[0].Text || after[0].RunID != sentBefore.RunID {
+		t.Errorf("a sent draft was changed by reprocess: %+v → %+v", sentBefore, after[0])
 	}
-	if after[0].RunID != *second.Current || after[0].Items[0].Text != "Confirm the date" {
-		t.Errorf("the owner's unsent draft was not redrafted: %+v", after[0])
+	if len(after) != 2 || after[1].RunID != *second.Current || after[1].Items[0].Text != "Confirm the date" || after[1].State != "draft" {
+		t.Errorf("Grace's unsent draft was not redrafted: %+v", after)
 	}
 	old := e.analysis(c, "?run="+i64s(*first.Current))
 	if old.Output == nil || len(old.Output.Items) != 2 {
@@ -650,7 +649,7 @@ func TestReprocessMakesANewCurrentRunAndLeavesSentNotesAlone(t *testing.T) {
 	if resp.StatusCode != 200 || !strings.Contains(string(raw), `"drafts":{"made":1,"already_sent":1}`) {
 		t.Fatalf("revert = %d %s", resp.StatusCode, raw)
 	}
-	if a := e.analysis(c, ""); *a.Current != *first.Current || e.drafts(c)[0].Items[0].Text != "Book the caterer" {
+	if a := e.analysis(c, ""); *a.Current != *first.Current || e.drafts(c)[1].Items[0].Text != "Book the caterer" {
 		t.Errorf("after revert: current %d", *a.Current)
 	}
 	// A prefs object that would let a provider keep the transcript is refused.
@@ -658,6 +657,19 @@ func TestReprocessMakesANewCurrentRunAndLeavesSentNotesAlone(t *testing.T) {
 	if resp.StatusCode != 400 {
 		t.Errorf("reprocess with data_collection allow = %d %s", resp.StatusCode, raw)
 	}
+}
+
+// cut is s from start to the first end after it, "" when start is not in s.
+func cut(s, start, end string) string {
+	i := strings.Index(s, start)
+	if i < 0 {
+		return ""
+	}
+	s = s[i:]
+	if j := strings.Index(s, end); j >= 0 {
+		return s[:j]
+	}
+	return s
 }
 
 func i64s(v int64) string { b, _ := json.Marshal(v); return string(b) }

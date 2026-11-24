@@ -13,16 +13,21 @@ import (
 // same meeting only.
 //
 //	A: LA1 [1 2] Ada, LA2 [5] Bo, LA3 [7] Cy      B: LB1 [1] Dee
-//	A emitted: e1 [2] "ada"  → LA1, assignee right (case ignored)
-//	           e2 [1] "Bo"   → LA1 again (a duplicate), assignee wrong
-//	           e3 [9] "Ada"  → nothing
-//	           e4 [5 7] "Cy" → LA2 and LA3, right (Cy is LA3's)
-//	B emitted: e5 [5] "Dee"  → nothing (5 is a label only in A)
+//	A emitted: e1 [2] "ada"  can match LA1
+//	           e2 [1] "Bo"   can match LA1
+//	           e3 [9] "Ada"  can match nothing
+//	           e4 [5 7] "Cy" can match LA2 or LA3
+//	B emitted: e5 [5] "Dee"  can match nothing (5 is a label only in A)
 //
-//	labels 4, matched LA1 LA2 LA3 = 3        recall    3/4 = 0.75
-//	emitted 5, matching e1 e2 e4 = 3         precision 3/5 = 0.60
-//	labels with >1 match: LA1 = 1            dup rate  1/4 = 0.25
-//	matching with the right assignee e1 e4   assignee  2/3
+//	One to one, a maximum matching is 2 pairs. e1 and e2 tie for LA1 (each
+//	shares one own segment): the earlier item, e1. e4 ties LA2 and LA3: the
+//	earlier label, LA2. e2 is a duplicate of LA1; e3 and e5 false positives.
+//
+//	labels 4, paired LA1 LA2 = 2             recall    2/4 = 0.50
+//	emitted 5, paired e1 e4 = 2              precision 2/5 = 0.40
+//	labels a duplicate is charged to: LA1    dup rate  1/4 = 0.25
+//	pairs with the right assignee: e1–LA1 ("ada", case ignored); e4 is Cy,
+//	LA2 is Bo                                assignee  1/2
 //	calls 100 300 2000 (schema) | 400 (retry) 5000 ms
 //	  nearest rank: p50 = 3rd of 5 = 400 ms, p95 = 5th = 5 s
 //	schema 1/5 = 0.20; cost 0.001+0.002+0.003+0.004 = 0.010 (the retry
@@ -61,21 +66,21 @@ func near(a, b float64) bool { return a-b < 1e-9 && b-a < 1e-9 }
 
 func TestScoreAgainstAHandComputedFixture(t *testing.T) {
 	m := Score(scoringFixture())
-	if m.Labels != 4 || m.Emitted != 5 || m.MatchedLabels != 3 || m.MatchingEmitted != 3 || m.DupLabels != 1 || m.AssigneeRight != 2 {
-		t.Errorf("counts = labels %d emitted %d matched %d matching %d dup %d assignee %d; want 4 5 3 3 1 2",
-			m.Labels, m.Emitted, m.MatchedLabels, m.MatchingEmitted, m.DupLabels, m.AssigneeRight)
+	if m.Labels != 4 || m.Emitted != 5 || m.MatchedLabels != 2 || m.MatchingEmitted != 2 || m.DupLabels != 1 || m.DupItems != 1 || m.AssigneeRight != 1 {
+		t.Errorf("counts = labels %d emitted %d matched %d matching %d dup %d (items %d) assignee %d; want 4 5 2 2 1 (1) 1",
+			m.Labels, m.Emitted, m.MatchedLabels, m.MatchingEmitted, m.DupLabels, m.DupItems, m.AssigneeRight)
 	}
-	if !near(m.Recall, 0.75) {
-		t.Errorf("recall = %v, want 0.75", m.Recall)
+	if !near(m.Recall, 0.50) {
+		t.Errorf("recall = %v, want 0.50", m.Recall)
 	}
-	if !near(m.Precision, 0.60) {
-		t.Errorf("precision = %v, want 0.60 (an item matching in another meeting does not count)", m.Precision)
+	if !near(m.Precision, 0.40) {
+		t.Errorf("precision = %v, want 0.40 (an item matching in another meeting does not count)", m.Precision)
 	}
 	if !near(m.DupRate, 0.25) {
 		t.Errorf("duplicate rate = %v, want 0.25", m.DupRate)
 	}
-	if !near(m.Assignee, 2.0/3.0) {
-		t.Errorf("assignee accuracy = %v, want 2/3", m.Assignee)
+	if !near(m.Assignee, 0.5) {
+		t.Errorf("assignee accuracy = %v, want 1/2", m.Assignee)
 	}
 	if m.Calls != 5 || m.SchemaFailures != 1 || m.RetryFailures != 1 || !near(m.SchemaRate, 0.20) {
 		t.Errorf("calls %d schema %d retry %d rate %v, want 5 1 1 0.20", m.Calls, m.SchemaFailures, m.RetryFailures, m.SchemaRate)
@@ -214,9 +219,9 @@ func TestTablesNameTheModelTheProviderAndTheChoice(t *testing.T) {
 		"## Profile `live`: the in-call panel", "## Profile `postcall`: one pass over the whole meeting after End",
 		"### `deepseek/deepseek-v4.1-flash-1017` (chat_json), live, 1 runs", "### `deepseek/deepseek-v4.1-flash-1017` (chat_json), postcall, 1 runs",
 		`{"data_collection":"deny"}`, "P1 (4), P2 (1)", "| metric | worst of both (the gate) | stt | clean | bar | pass |",
-		"| recall | 0.75 | 0.75 | 1.00 | ≥ 0.80 | **no** |",
-		// precision: clean 1.00, stt 0.60; the worst is the STT's.
-		"| precision | 0.60 | 0.60 | 1.00 | ≥ 0.80 | **no** |",
+		"| recall | 0.50 | 0.50 | 1.00 | ≥ 0.80 | **no** |",
+		// precision: clean 1.00, stt 0.40; the worst is the STT's.
+		"| precision | 0.40 | 0.40 | 1.00 | ≥ 0.80 | **no** |",
 		// the same 5 s p95 against each profile's bar
 		"| latency p95 | 5s | 5s | 100ms | ≤ 10s | yes |", "| latency p95 | 100ms | 100ms | 100ms | ≤ 60s | yes |",
 		"| calls, fewest in a run | 1 | 5 | 1 | — | — |",
@@ -259,19 +264,19 @@ func TestAModelMustPassBothCorpora(t *testing.T) {
 	sttOnly := NewScored("b/stt-only", items.AdapterChatJSON, profileLive, nil, []Metrics{bad}, []Metrics{good})
 	both := NewScored("c/both", items.AdapterChatJSON, profileLive, nil, []Metrics{good}, []Metrics{good})
 	if cleanOnly.Pass || !cleanOnly.Clean.Pass || cleanOnly.STT.Pass {
-		t.Errorf("perfect on clean, 0.75 on stt: pass %v (clean %v, stt %v), want a failure", cleanOnly.Pass, cleanOnly.Clean.Pass, cleanOnly.STT.Pass)
+		t.Errorf("perfect on clean, 0.50 on stt: pass %v (clean %v, stt %v), want a failure", cleanOnly.Pass, cleanOnly.Clean.Pass, cleanOnly.STT.Pass)
 	}
 	if sttOnly.Pass || sttOnly.Clean.Pass || !sttOnly.STT.Pass {
-		t.Errorf("0.75 on clean, perfect on stt: pass %v (clean %v, stt %v), want a failure", sttOnly.Pass, sttOnly.Clean.Pass, sttOnly.STT.Pass)
+		t.Errorf("0.50 on clean, perfect on stt: pass %v (clean %v, stt %v), want a failure", sttOnly.Pass, sttOnly.Clean.Pass, sttOnly.STT.Pass)
 	}
 	if !both.Pass {
 		t.Errorf("passing on both: pass false, gates %+v", both.Combined.Gates)
 	}
-	// The worst of both, per metric, by hand: recall 0.75 (stt) and
-	// precision 0.60 (stt) against 1.00 and 1.00 (clean); cost $0.010 per hour
+	// The worst of both, per metric, by hand: recall 0.50 (stt) and
+	// precision 0.40 (stt) against 1.00 and 1.00 (clean); cost $0.010 per hour
 	// (stt) against $0.0002 (clean).
-	if w := cleanOnly.Combined.Worst; w.Recall != 0.75 || w.Precision != 0.60 || !near(w.CostPerHour, 0.010) {
-		t.Errorf("worst of both = recall %v precision %v cost %v, want 0.75 0.60 0.010", w.Recall, w.Precision, w.CostPerHour)
+	if w := cleanOnly.Combined.Worst; w.Recall != 0.50 || w.Precision != 0.40 || !near(w.CostPerHour, 0.010) {
+		t.Errorf("worst of both = recall %v precision %v cost %v, want 0.50 0.40 0.010", w.Recall, w.Precision, w.CostPerHour)
 	}
 	if got := Choose([]Scored{cleanOnly, sttOnly}, profileLive); got != "off" {
 		t.Errorf("each passing one corpus only: Choose = %s, want off", got)

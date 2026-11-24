@@ -53,8 +53,11 @@ type Metrics struct {
 	Emitted         int `json:"emitted"`
 	MatchedLabels   int `json:"matched_labels"`
 	MatchingEmitted int `json:"matching_emitted"`
-	DupLabels       int `json:"dup_labels"`
-	AssigneeRight   int `json:"assignee_right"`
+	// DupLabels is the labels at least one duplicate is charged to;
+	// DupItems the duplicates (match.go).
+	DupLabels     int `json:"dup_labels"`
+	DupItems      int `json:"dup_items"`
+	AssigneeRight int `json:"assignee_right"`
 
 	Recall    float64 `json:"recall"`
 	Precision float64 `json:"precision"`
@@ -82,62 +85,6 @@ type Metrics struct {
 	RewrittenUnicode int `json:"rewritten_unicode"`
 }
 
-// matches reports whether emitted item e matches label l: e cites one of
-// l's OWN segments (own). Both are of the same meeting (Score never compares
-// across meetings), and no wording is compared: no model judges a model.
-func matches(e items.Item, own []int64) bool {
-	for _, a := range e.Segments {
-		for _, b := range own {
-			if a == b {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// ownSegments is, per label, the segments that tell it apart: the ones no
-// other label of the meeting cites. A segment two labels cite (a recap
-// restating several items: "so Bo has the deck, Cy the room") names
-// neither, so an item citing its own statement and the recap matches its
-// own label only, and not every label the recap restates. (The live
-// replay's windows rarely put a recap and a first statement in one call;
-// the post-call pass always does, and without this an oracle citing every
-// label segment scores a duplicate on each label a recap shares.) A label
-// whose every segment is shared keeps them all.
-func ownSegments(labels []Label) [][]int64 {
-	n := map[int64]int{}
-	for _, l := range labels {
-		for _, id := range uniqIDs(l.Segments) {
-			n[id]++
-		}
-	}
-	out := make([][]int64, len(labels))
-	for i, l := range labels {
-		for _, id := range l.Segments {
-			if n[id] == 1 {
-				out[i] = append(out[i], id)
-			}
-		}
-		if len(out[i]) == 0 {
-			out[i] = l.Segments
-		}
-	}
-	return out
-}
-
-func uniqIDs(ids []int64) []int64 {
-	seen := map[int64]bool{}
-	var out []int64
-	for _, id := range ids {
-		if !seen[id] {
-			seen[id] = true
-			out = append(out, id)
-		}
-	}
-	return out
-}
-
 // normName is an assignee for comparison: case, space and a " (guest)"
 // suffix ignored.
 func normName(s string) string {
@@ -153,34 +100,25 @@ func Score(runs []MeetingRun) Metrics {
 	for _, r := range runs {
 		ms += r.DurationMS
 		labels := r.Meeting.Labels
-		own := ownSegments(labels)
 		m.Labels += len(labels)
 		m.Emitted += len(r.Emitted)
-		hits := make([]int, len(labels))
-		for _, e := range r.Emitted {
-			matched := false
-			right := false
-			for i, l := range labels {
-				if matches(e, own[i]) {
-					matched = true
-					hits[i]++
-					if normName(e.Assignee) == normName(l.Assignee) {
-						right = true
-					}
-				}
-			}
-			if matched {
+		mt := match(r.Emitted, labels)
+		dup := make([]bool, len(labels))
+		for i, e := range r.Emitted {
+			if j := mt.label[i]; j >= 0 {
+				m.MatchedLabels++
 				m.MatchingEmitted++
-				if right {
+				if normName(e.Assignee) == normName(labels[j].Assignee) {
 					m.AssigneeRight++
 				}
 			}
-		}
-		for _, h := range hits {
-			if h >= 1 {
-				m.MatchedLabels++
+			if j := mt.dupOf[i]; j >= 0 {
+				m.DupItems++
+				dup[j] = true
 			}
-			if h > 1 {
+		}
+		for _, d := range dup {
+			if d {
 				m.DupLabels++
 			}
 		}

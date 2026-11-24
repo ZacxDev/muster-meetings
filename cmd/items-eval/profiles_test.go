@@ -18,30 +18,67 @@ import (
 	"github.com/ZacxDev/muster-meetings/internal/items"
 )
 
-// A recap segment two labels cite tells neither apart: an item citing its
-// own statement and the recap matches its own label only. By hand:
-//
-//	R: RA [1 9] Ada, RB [4 9] Bo (9 is the recap)   own: RA {1}, RB {4}
-//	   e1 [1 9] → RA; e2 [4 9] → RB; e3 [9] → nothing
-//	S: SA [5 6], SB [5 6] (every segment shared: each keeps all)
-//	   e4 [6] → SA and SB
-//
-//	labels 4, matched 4 → recall 1; emitted 4, matching e1 e2 e4 → 0.75;
-//	no label matched twice → duplicates 0; assignee right on e1, e2 and e4
-//	(no assignee on either side) → 3.
-//
-// Matched on any shared segment instead, e1, e2 and e3 each match RA and RB:
-// duplicates 2/4, precision 1.
-func TestARecapSegmentMatchesNoLabelItRestates(t *testing.T) {
-	r := &Meeting{ID: "R", Labels: []Label{{ID: "RA", Assignee: "Ada", Segments: []int64{1, 9}}, {ID: "RB", Assignee: "Bo", Segments: []int64{4, 9}}}}
-	s := &Meeting{ID: "S", Labels: []Label{{ID: "SA", Segments: []int64{5, 6}}, {ID: "SB", Segments: []int64{5, 6}}}}
-	m := Score([]MeetingRun{
-		{Meeting: r, Emitted: []items.Item{{Assignee: "Ada", Segments: []int64{1, 9}}, {Assignee: "Bo", Segments: []int64{4, 9}}, {Segments: []int64{9}}}},
-		{Meeting: s, Emitted: []items.Item{{Segments: []int64{6}}}},
-	})
-	if m.MatchedLabels != 4 || m.MatchingEmitted != 3 || m.DupLabels != 0 || m.AssigneeRight != 3 {
-		t.Errorf("matched %d, matching %d, duplicated %d, assignee right %d; want 4 3 0 3: a recap segment matched a label it only restates",
-			m.MatchedLabels, m.MatchingEmitted, m.DupLabels, m.AssigneeRight)
+// item is an emitted item citing ids.
+func item(ids ...int64) items.Item { return items.Item{Segments: ids} }
+
+// The one-to-one matching, by hand. Labels A [1 9] and B [4 9]: 9 is a
+// recap both cite, so it is neither's own; A's own is 1, B's 4.
+func TestTheMatchingIsOneToOneAndMaximum(t *testing.T) {
+	recap := []Label{{ID: "A", Assignee: "Ada", Segments: []int64{1, 9}}, {ID: "B", Assignee: "Bo", Segments: []int64{4, 9}}}
+	cases := []struct {
+		name         string
+		labels       []Label
+		emitted      []items.Item
+		label, dupOf string
+		recall, prec float64
+		dupRate      float64
+	}{
+		// [9] can match A or B (one shared, not own, each): the earlier label;
+		// credit for exactly one.
+		{"a recap-only item", recap, []items.Item{item(9)}, "[0]", "[-1]", 0.5, 1, 0},
+		// e1 takes A by its own segment 1; of the two items citing only the
+		// recap, the earlier takes B and the later is a duplicate (of A, the
+		// earlier of the two it could match): one match, one duplicate.
+		{"two items citing one recap", recap, []items.Item{item(1, 9), item(9), item(9)}, "[0 1 -1]", "[-1 -1 0]", 1, 2.0 / 3, 0.5},
+		// e1 [1 2] can match A [1] or B [2] (one own segment each: a tie, so a
+		// greedy pass in item order gives it A); e2 [1] can match A only. The
+		// maximum pairs e1 with B and e2 with A.
+		{"an item that could match two labels", []Label{{ID: "A", Segments: []int64{1}}, {ID: "B", Segments: []int64{2}}},
+			[]items.Item{item(1, 2), item(1)}, "[1 0]", "[-1 -1]", 1, 1, 0},
+		// e1 shares the recap with B (not own) and its own 1 with A; e2 shares
+		// B's own 4: A–e1 and B–e2, though e1–B, e2–(none) would also be one pair.
+		{"own segments preferred", recap, []items.Item{item(1, 9), item(4)}, "[0 1]", "[-1 -1]", 1, 1, 0},
+		// A [1], B [9 8], C [9 8 5]: e1 [1 9 8] shares A's own 1, and two
+		// segments with B and with C, neither's own: the own segment wins.
+		{"an own segment outranks more shared ones", []Label{{ID: "A", Segments: []int64{1}}, {ID: "B", Segments: []int64{9, 8}}, {ID: "C", Segments: []int64{9, 8, 5}}},
+			[]items.Item{item(1, 9, 8)}, "[0]", "[-1]", 1.0 / 3, 1, 0},
+		// two items each citing only B's own segment: one pair (the earlier),
+		// one duplicate of B; A unmatched.
+		{"a plain duplicate", recap, []items.Item{item(4), item(4)}, "[1 -1]", "[-1 1]", 0.5, 0.5, 0.5},
+		// and with the recap too, the second can take A through it: two pairs.
+		{"a second item reaching A through the recap", recap, []items.Item{item(4), item(4, 9)}, "[1 0]", "[-1 -1]", 1, 1, 0},
+	}
+	for _, c := range cases {
+		mt := match(c.emitted, c.labels)
+		if fmt.Sprint(mt.label) != c.label || fmt.Sprint(mt.dupOf) != c.dupOf {
+			t.Errorf("%s: pairs %v, duplicates of %v; want %s and %s", c.name, mt.label, mt.dupOf, c.label, c.dupOf)
+		}
+		m := Score([]MeetingRun{{Meeting: &Meeting{ID: "X", Labels: c.labels}, Emitted: c.emitted}})
+		if !near(m.Recall, c.recall) || !near(m.Precision, c.prec) || !near(m.DupRate, c.dupRate) {
+			t.Errorf("%s: recall %v precision %v duplicates %v; want %v %v %v", c.name, m.Recall, m.Precision, m.DupRate, c.recall, c.prec, c.dupRate)
+		}
+	}
+}
+
+// Ties are broken by order, the same every time: in the scoring fixture e1
+// and e2 tie for LA1 (the earlier item wins) and e4 ties LA2 and LA3 (the
+// earlier label wins).
+func TestTheMatchingBreaksTiesTheSameWayEveryTime(t *testing.T) {
+	r := scoringFixture()[0]
+	for n := range 200 {
+		if mt := match(r.Emitted, r.Meeting.Labels); fmt.Sprint(mt.label) != "[0 -1 -1 1]" || fmt.Sprint(mt.dupOf) != "[-1 0 -1 -1]" {
+			t.Fatalf("match %d: pairs %v, duplicates of %v; want [0 -1 -1 1] and [-1 0 -1 -1]", n, mt.label, mt.dupOf)
+		}
 	}
 }
 

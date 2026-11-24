@@ -168,6 +168,7 @@ const (
 	itLoop   = "internal/items/loop.go"
 	itPost   = "internal/items/postcall.go"
 	ieScore  = "cmd/items-eval/score.go"
+	ieMatch  = "cmd/items-eval/match.go"
 	ieCtl    = "cmd/items-eval/controls.go"
 	ieMain   = "cmd/items-eval/main.go"
 	ieCorpus = "cmd/items-eval/corpus.go"
@@ -281,10 +282,10 @@ var mutants = []mutant{
 		pkg: "./cmd/items-eval", test: "TestTheLintCatchesEachProblem", want: "no non-ASCII meeting"},
 
 	// ---- action items: the evaluation harness (cmd/items-eval) ----
-	{name: "items-eval score: one match counted as a duplicate", file: ieScore, from: "if h > 1 {", to: "if h >= 1 {",
-		pkg: "./cmd/items-eval", test: "TestScoreAgainstAHandComputedFixture", want: "duplicate rate = 0.75"},
+	{name: "items-eval score: a paired item counted as a duplicate", file: ieMatch, from: "if mt.label[i] < 0 && len(adj[i]) > 0 {", to: "if len(adj[i]) > 0 {",
+		pkg: "./cmd/items-eval", test: "TestScoreAgainstAHandComputedFixture", want: "dup 2 (items 3)"},
 	{name: "items-eval score: the assignee compared with its case", file: ieScore, from: "s = strings.ToLower(strings.TrimSpace(s))", to: "s = strings.TrimSpace(s)",
-		pkg: "./cmd/items-eval", test: "TestScoreAgainstAHandComputedFixture", want: "assignee accuracy = 0.333"},
+		pkg: "./cmd/items-eval", test: "TestScoreAgainstAHandComputedFixture", want: "assignee accuracy = 0, want 1/2"},
 	{name: "items-eval score: a missing cost read as free", file: ieScore, from: "} else {\n\t\t\t\t\tm.CostKnown = false\n", to: "} else {\n",
 		pkg: "./cmd/items-eval", test: "TestACostOpenRouterDidNotReportFailsTheGate", want: "want it failed as unknown"},
 	{name: "items-eval worst: the best run's recall scored", file: ieScore, from: "w.Recall = math.Min(w.Recall, r.Recall)", to: "w.Recall = math.Max(w.Recall, r.Recall)",
@@ -351,8 +352,18 @@ var mutants = []mutant{
 		pkg: "./cmd/items-eval", test: "TestGatesAtTheirBars", want: "an unknown profile has no latency bar"},
 	{name: "items-eval choose: another profile's verdict read", file: ieScore, from: "if s.Profile != profile || !s.Pass {", to: "if !s.Pass {",
 		pkg: "./cmd/items-eval", test: "TestEachProfileChoosesOnItsOwnVerdicts", want: "live = deepseek/deepseek-v4.1-flash-1017, want off"},
-	{name: "items-eval score: a recap segment matches every label it restates", file: ieScore, from: "if n[id] == 1 {", to: "if n[id] >= 1 {",
-		pkg: "./cmd/items-eval", test: "TestARecapSegmentMatchesNoLabelItRestates", want: "matching 4, duplicated 2"},
+	{name: "items-eval match: a recap counted as every label's own segment", file: ieMatch, from: "if n[id] == 1 {", to: "if n[id] >= 1 {",
+		pkg: "./cmd/items-eval", test: "TestTheMatchingIsOneToOneAndMaximum", want: "an own segment outranks more shared ones: pairs [1]"},
+	{name: "items-eval match: the own-segment preference dropped", file: ieMatch, from: "\t\t\t\to = 1\n", to: "\t\t\t\to = 0\n",
+		pkg: "./cmd/items-eval", test: "TestTheMatchingIsOneToOneAndMaximum", want: "an own segment outranks more shared ones: pairs [1]"},
+	{name: "items-eval match: greedy instead of maximum", file: ieMatch, from: "\tpairs := assign(w)\n",
+		to:  "\tpairs := make([]int, nI)\n\ttaken := map[int]bool{}\n\tfor i := range pairs {\n\t\tpairs[i] = -1\n\t\tfor _, j := range adj[i] {\n\t\t\tif !taken[j] && (pairs[i] < 0 || w[i][j] > w[i][pairs[i]]) {\n\t\t\t\tpairs[i] = j\n\t\t\t}\n\t\t}\n\t\tif pairs[i] >= 0 {\n\t\t\ttaken[pairs[i]] = true\n\t\t}\n\t}\n",
+		pkg: "./cmd/items-eval", test: "TestTheMatchingIsOneToOneAndMaximum", want: "an item that could match two labels: pairs [0 -1]"},
+	{name: "items-eval match: an item credited to every label it could match", file: ieScore, from: "\t\t\t\tm.MatchedLabels++\n", to: "\t\t\t\tm.MatchedLabels += len(mt.adj[i])\n",
+		pkg: "./cmd/items-eval", test: "TestScoreAgainstAHandComputedFixture", want: "matched 3 matching 2"},
+	{name: "items-eval match: ties broken by the clock", file: ieMatch, from: "tie := func(i, j int) int64 { return int64(nI-i) * int64(nL-j) }", to: "tie := func(i, j int) int64 { return time.Now().UnixNano() % 7 }",
+		more: []edit{{ieMatch, `import "github.com/ZacxDev/muster-meetings/internal/items"`, "import (\n\t\"time\"\n\n\t\"github.com/ZacxDev/muster-meetings/internal/items\"\n)"}},
+		pkg:  "./cmd/items-eval", test: "TestTheMatchingBreaksTiesTheSameWayEveryTime", want: "want [0 -1 -1 1] and [-1 0 -1 -1]"},
 	{name: "items-eval flag: an unknown profile accepted", file: ieMain, from: "if _, ok := barP95(p); !ok {", to: "if false {",
 		pkg: "./cmd/items-eval", test: "TestProfilesFlag", want: `parseProfiles("live,batch") = [live batch]`},
 	{name: "items-eval run: postcall replayed without the post-call config", file: ieMain, from: "cfg = items.PostCallConfig(cfg)", to: "_ = items.PostCallConfig",
@@ -386,13 +397,13 @@ var mutants = []mutant{
 	{name: "stt run: the STT lint not run", file: ieMain, from: "if p := append(Lint(ms), LintSTT(ms, sms)...); len(p) > 0 {", to: "if p := Lint(ms); len(p) > 0 {",
 		pkg: "./cmd/items-eval", test: "TestARunWithoutTheSTTCorpusScoresNoModel", want: "a missing variant: exit 0"},
 	{name: "gate: the clean corpus left out of the worst-of-both", file: ieScore, from: "w := Worst([]Metrics{clean.Worst, stt.Worst})", to: "w := Worst([]Metrics{stt.Worst})",
-		pkg: "./cmd/items-eval", test: "TestAModelMustPassBothCorpora", want: "0.75 on clean, perfect on stt: pass true"},
+		pkg: "./cmd/items-eval", test: "TestAModelMustPassBothCorpora", want: "0.50 on clean, perfect on stt: pass true"},
 	{name: "gate: the STT corpus left out of the worst-of-both", file: ieScore, from: "w := Worst([]Metrics{clean.Worst, stt.Worst})", to: "w := Worst([]Metrics{clean.Worst})",
-		pkg: "./cmd/items-eval", test: "TestAModelMustPassBothCorpora", want: "perfect on clean, 0.75 on stt: pass true"},
+		pkg: "./cmd/items-eval", test: "TestAModelMustPassBothCorpora", want: "perfect on clean, 0.50 on stt: pass true"},
 	{name: "gate: the pass read from the STT corpus only", file: ieScore, from: "s.Pass = s.Combined.Pass", to: "s.Pass = s.STT.Pass",
-		pkg: "./cmd/items-eval", test: "TestAModelMustPassBothCorpora", want: "0.75 on clean, perfect on stt: pass true"},
+		pkg: "./cmd/items-eval", test: "TestAModelMustPassBothCorpora", want: "0.50 on clean, perfect on stt: pass true"},
 	{name: "gate: the pass read from the clean corpus only", file: ieScore, from: "s.Pass = s.Combined.Pass", to: "s.Pass = s.Clean.Pass",
-		pkg: "./cmd/items-eval", test: "TestAModelMustPassBothCorpora", want: "perfect on clean, 0.75 on stt: pass true"},
+		pkg: "./cmd/items-eval", test: "TestAModelMustPassBothCorpora", want: "perfect on clean, 0.50 on stt: pass true"},
 	{name: "gate: the choice read from the STT corpus only", file: ieScore, from: "w, b := s.Combined.Worst, Metrics{}", to: "w, b := s.STT.Worst, Metrics{}",
 		more: []edit{{ieScore, "b = ss[best].Combined.Worst", "b = ss[best].STT.Worst"}},
 		pkg:  "./cmd/items-eval", test: "TestAModelMustPassBothCorpora", want: "A better on stt: Choose = a/x"},

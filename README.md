@@ -1052,8 +1052,21 @@ no fatal failure. `items.PostCall` reads a meeting as one call up to
 else in chunks overlapping by the live window's 90 s; every chunk goes
 through the live window's guards, deduped against what earlier chunks kept,
 with at most `items.PostCallCap` items a meeting (3 a minute, at least 10).
-An item matches a label when it cites one of that label's own segments: a
-segment several labels cite (a recap) tells none of them apart.
+**Scoring is one to one** (`cmd/items-eval/match.go`). An emitted item can
+match a label when they cite a segment in common; of those pairs the score
+takes a maximum matching (as many pairs as possible, each item and each
+label in at most one), preferring pairs that share a segment that is the
+label's own (no other label of the meeting cites it: a recap restating
+several items is no label's own), then more shared segments, then the
+earlier item with the earlier label. Recall is paired labels over labels;
+precision paired items over items; assignee accuracy is over the pairs. An
+item left unpaired although it could match a label (every such label went
+to another item) is a **duplicate**, not a false positive (both count
+against precision), charged to the label it would have preferred. The
+duplicate rate keeps the design's definition, labels emitted more than
+once over labels: a label counts when at least one duplicate is charged to
+it (such a label is always paired, since a maximum matching leaves no
+unpaired item next to an unpaired label).
 **It costs money and needs a key, so it is run by hand, never in CI:**
 
 ```sh

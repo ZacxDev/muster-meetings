@@ -1094,9 +1094,13 @@ var mutants = []mutant{
 		pkg: "./internal/server", test: "TestTheNoticeSaysTranscribedOnlyWithAnEngine", want: "want 409 with the current notice"},
 
 	// ---- 3a: a connected stream ends the start retries (CI, real LiveKit) ----
+	// Two checks hold it since regMu: the one before LiveKit is asked, and
+	// the one made with the new nonce; both go, or the second hides the first.
 	{name: "egress retry: the check before an attempt removed", file: trans, from: "\t\tif s.streamingCurrent(ctx, track) {\n\t\t\treturn\n\t\t}\n\t\troom := store.RoomName(t.MeetingID)", to: "\t\troom := store.RoomName(t.MeetingID)",
-		pkg: "./internal/server", test: "TestAStreamThatConnectsDuringAFailingStartEndsTheLoop", want: "phase 2:"},
-	{name: "egress retry (real LiveKit): the check before an attempt removed", file: trans, from: "\t\tif s.streamingCurrent(ctx, track) {\n\t\t\treturn\n\t\t}\n\t\troom := store.RoomName(t.MeetingID)", to: "\t\troom := store.RoomName(t.MeetingID)", realLiveKit: true,
+		more: []edit{{trans, "\t\t\ts.tr.regMu.Lock()\n\t\t\tif s.streamingCurrent(ctx, track) {\n\t\t\t\ts.tr.regMu.Unlock()\n\t\t\t\treturn\n\t\t\t}\n", "\t\t\ts.tr.regMu.Lock()\n"}},
+		pkg:  "./internal/server", test: "TestAStreamThatConnectsDuringAFailingStartEndsTheLoop", want: "phase 2:"},
+	{name: "egress retry (real LiveKit): the check before an attempt removed", file: trans, from: "\t\tif s.streamingCurrent(ctx, track) {\n\t\t\treturn\n\t\t}\n\t\troom := store.RoomName(t.MeetingID)", to: "\t\troom := store.RoomName(t.MeetingID)",
+		more: []edit{{trans, "\t\t\ts.tr.regMu.Lock()\n\t\t\tif s.streamingCurrent(ctx, track) {\n\t\t\t\ts.tr.regMu.Unlock()\n\t\t\t\treturn\n\t\t\t}\n", "\t\t\ts.tr.regMu.Lock()\n"}}, realLiveKit: true,
 		pkg: "./internal/server", test: "TestTheTranscriptAgainstARealLiveKitServer", want: "an attempt after the stream connected superseded it"},
 	{name: "egress retry: the check after a failed attempt removed", file: trans, from: "s.tr.gapMu.Lock()\n\t\tif s.streamingCurrent(ctx, track) {\n\t\t\ts.tr.gapMu.Unlock()\n\t\t\treturn\n\t\t}\n", to: "s.tr.gapMu.Lock()\n",
 		pkg: "./internal/server", test: "TestAStreamThatConnectsDuringAFailingStartEndsTheLoop", want: "phase 1:"},

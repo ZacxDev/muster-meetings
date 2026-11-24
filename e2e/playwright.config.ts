@@ -10,7 +10,10 @@ import { defineConfig, devices } from '@playwright/test';
 // gesture (its level meter).
 const use = {
   ...devices['Desktop Chrome'],
-  launchOptions: { args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', '--autoplay-policy=no-user-gesture-required'] },
+  // PLAYWRIGHT_CHROMIUM points at another Chromium binary (a host where the
+  // bundled one cannot run, e.g. NixOS); unset (CI) is Playwright's own.
+  launchOptions: { args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', '--autoplay-policy=no-user-gesture-required'],
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM || undefined },
 };
 
 export default defineConfig({

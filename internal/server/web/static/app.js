@@ -159,26 +159,157 @@
     show('archive-view');
     $('archive-lines').textContent = '';
     $('archive-empty').hidden = true;
+    media.reset();
     var meta = [when(m.created_at), m.state === 'open' ? 'Open' : 'Ended'];
     var d = duration(m);
     if (d) meta.push(d);
     $('archive-title').textContent = m.title || 'Transcript';
     $('archive-meta').textContent = meta.join(' · ');
     archiveSay('Loading…');
-    api('GET', '/api/meetings/' + encodeURIComponent(m.id) + '/transcript').then(function (b) {
+    var id = encodeURIComponent(m.id);
+    // The time-aligned bundle when the plugin records (each line with its
+    // place in the recording); the transcript alone when it does not (the
+    // bundle's route is then the 404 every unknown path is).
+    api('GET', '/api/meetings/' + id + '/timeline').catch(function (e) {
+      if (e.status !== 404) throw e;
+      return api('GET', '/api/meetings/' + id + '/transcript');
+    }).then(function (b) {
       if (archived !== m) return;
       archiveSay('');
       var l = $('archive-lines');
-      b.segments.forEach(function (g) { l.appendChild(MeetingsCall.lineEl(g)); });
+      b.segments.forEach(function (g) {
+        var li = MeetingsCall.lineEl(g);
+        if (g.recording) media.seekable(li, g.recording);
+        l.appendChild(li);
+      });
       $('archive-empty').hidden = b.segments.length > 0;
+      if (b.parts && b.parts.some(function (p) { return p.duration_ms > 0; })) media.load(m);
     }).catch(function (e) { if (token && archived === m) archiveSay('Could not load the transcript: ' + e.message); });
     $('archive-back').focus();
   }
 
   function closeArchive() {
     archived = null;
+    media.reset();
     show('list-view');
   }
+
+  // ---- the recording in the archive ----
+  //
+  // The video plays a signed /media URL per part (a <video> cannot carry the
+  // bearer; each URL lives 15 minutes, and a URL that has expired is asked
+  // for again). A line with a place in the recording ({part, offset_ms},
+  // computed by the server from the egress's own start) plays from there
+  // when clicked: the visible proof that the two are aligned.
+  var media = (function () {
+    var video = $('archive-video'), box = $('archive-media');
+    var urls = {}, part = 0, meetingID = null, pending = null, retried = false;
+    function urlsFor(id) {
+      return api('POST', '/api/meetings/' + encodeURIComponent(id) + '/recording-url').then(function (b) {
+        urls = {};
+        b.parts.forEach(function (p) { urls[p.part] = p.url; });
+        return b.parts;
+      });
+    }
+    function play(p, offsetMS) {
+      var at = offsetMS / 1000;
+      if (p !== part || !video.getAttribute('src')) {
+        part = p;
+        pending = at;
+        video.src = urls[p];
+        $('archive-part').hidden = Object.keys(urls).length < 2;
+        $('archive-part').textContent = 'Part ' + p;
+        return;
+      }
+      if (video.readyState >= 1) video.currentTime = at; else pending = at;
+    }
+    video.addEventListener('loadedmetadata', function () {
+      if (pending != null) { video.currentTime = pending; pending = null; }
+    });
+    video.addEventListener('error', function () {
+      // An expired URL: ask once for fresh ones, and carry on where it was.
+      if (retried || !meetingID) return;
+      retried = true;
+      var at = video.currentTime || pending || 0;
+      urlsFor(meetingID).then(function () { var p = part; part = 0; play(p, at * 1000); }).catch(function () {});
+    });
+    video.addEventListener('playing', function () { retried = false; });
+    return {
+      reset: function () {
+        meetingID = null; urls = {}; part = 0; pending = null; retried = false;
+        video.removeAttribute('src');
+        try { video.load(); } catch (e) { /* not fatal */ }
+        box.hidden = true;
+        $('share-out').hidden = true;
+      },
+      load: function (m) {
+        meetingID = m.id;
+        urlsFor(m.id).then(function (parts) {
+          if (archived !== m || !parts.length) return;
+          box.hidden = false;
+          play(parts[0].part, 0);
+          return api('GET', '/api/meetings/' + encodeURIComponent(m.id) + '/recording').then(function (r) {
+            if (archived !== m) return;
+            $('unshare-rec').hidden = !(r.share && r.share.live);
+          });
+        }).catch(function (e) { if (token && archived === m) archiveSay('Could not load the recording: ' + e.message); });
+      },
+      seekable: function (li, at) {
+        li.classList.add('seekable');
+        li.tabIndex = 0;
+        li.setAttribute('data-part', String(at.part));
+        li.setAttribute('data-offset-ms', String(at.offset_ms));
+        li.title = 'Play the recording from here';
+        var go = function () {
+          if (!urls[at.part]) return;
+          Array.prototype.forEach.call(document.querySelectorAll('#archive-lines li.playing'), function (x) { x.classList.remove('playing'); });
+          li.classList.add('playing');
+          play(at.part, at.offset_ms);
+        };
+        li.addEventListener('click', go);
+        li.addEventListener('keydown', function (ev) { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); go(); } });
+      }
+    };
+  })();
+
+  // The share link: minted (or minted anew, which turns the old one off)
+  // and shown once, since the server keeps only its hash.
+  $('share-rec').addEventListener('click', function () {
+    if (!archived) return;
+    var m = archived;
+    archiveSay('');
+    api('POST', '/api/meetings/' + encodeURIComponent(m.id) + '/share').then(function (b) {
+      if (archived !== m) return;
+      $('share-url').value = b.url;
+      $('share-until').textContent = new Date(b.expires_at).toLocaleDateString(undefined, { dateStyle: 'medium' });
+      $('share-out').hidden = false;
+      $('unshare-rec').hidden = false;
+      $('share-url').select();
+    }).catch(function (e) { if (token) archiveSay('Could not share the recording: ' + e.message); });
+  });
+  $('share-copy').addEventListener('click', function () { copyText($('share-url').value, $('share-url')); });
+  $('unshare-rec').addEventListener('click', function () {
+    if (!archived) return;
+    var m = archived;
+    api('DELETE', '/api/meetings/' + encodeURIComponent(m.id) + '/share').then(function () {
+      if (archived !== m) return;
+      $('share-out').hidden = true;
+      $('unshare-rec').hidden = true;
+      UI.toast('The link no longer opens the recording.', { timeout: 3000 });
+    }).catch(function (e) { if (token) archiveSay('Could not turn the link off: ' + e.message); });
+  });
+
+  // The recording retention (only a plugin that records answers it).
+  api('GET', '/api/settings').then(function (b) {
+    var sel = $('retention-days');
+    sel.value = String(b.settings.recording_retention_days);
+    $('retention').hidden = false;
+    sel.addEventListener('change', function () {
+      api('PUT', '/api/settings', { recording_retention_days: parseInt(sel.value, 10) }).then(function () {
+        UI.toast('Recordings of meetings that end from now on are kept ' + sel.value + ' days.', { kind: 'success', timeout: 3000 });
+      }).catch(function (e) { if (token) say('Could not change how long recordings are kept: ' + e.message); });
+    });
+  }).catch(function () { /* no recording: the setting stays hidden */ });
 
   // download fetches the export with the bearer (a link cannot carry it) and
   // saves it from a blob: URL.

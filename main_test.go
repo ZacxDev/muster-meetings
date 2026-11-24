@@ -432,8 +432,8 @@ func TestRecordingConfigIsAllOrNothing(t *testing.T) {
 	}
 	m = base()
 	m["MEETINGS_S3_REGION"] = "us-east-1"
-	if _, err := LoadConfig(env(m)); !errors.Is(err, ErrS3Half) {
-		t.Errorf("a region alone: %v, want ErrS3Half", err)
+	if c, err := LoadConfig(env(m)); err != nil || c.S3 != nil {
+		t.Errorf("a region alone (the Kubernetes base's): %v, %v; want no bucket", c.S3, err)
 	}
 	m = base()
 	for k, v := range full {

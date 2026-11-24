@@ -146,8 +146,9 @@ type Config struct {
 var ErrS3Half = errors.New("the recording needs MEETINGS_S3_ENDPOINT, MEETINGS_S3_BUCKET, MEETINGS_S3_ACCESS_KEY and MEETINGS_S3_SECRET_KEY together " +
 	"(MEETINGS_S3_REGION is optional), or none of them for no recording")
 
-// loadS3 reads the recording's bucket: every variable unset is no
-// recording; some but not all is a refusal; all is a client. 🔴 No value is
+// loadS3 reads the recording's bucket: the endpoint, bucket and key pair all
+// unset is no recording (whatever the region says); some but not all is a
+// refusal; all is a client. 🔴 No value is
 // ever echoed: the keys are secrets.
 func loadS3(getenv func(string) string) (*s3.Client, error) {
 	cfg := s3.Config{Endpoint: strings.TrimSpace(getenv("MEETINGS_S3_ENDPOINT")), Bucket: strings.TrimSpace(getenv("MEETINGS_S3_BUCKET")),
@@ -160,7 +161,8 @@ func loadS3(getenv func(string) string) (*s3.Client, error) {
 		}
 	}
 	switch {
-	case set == 0 && cfg.Region == "":
+	case set == 0:
+		// A region alone (the Kubernetes base ships us-east-1) is no bucket.
 		return nil, nil
 	case set < 4:
 		return nil, ErrS3Half

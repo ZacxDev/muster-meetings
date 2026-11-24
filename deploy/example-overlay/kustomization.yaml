@@ -35,6 +35,15 @@ configMapGenerator:
       # Secret holds MEETINGS_CONTACTS_TOKEN, and the NetworkPolicy patch
       # below lets the plugin reach that port and nothing more.
       - contacts-url=http://muster-contacts:8081
+      # The recording (optional): the store (an S3-compatible store reached
+      # over a mesh; its address is the NetworkPolicy patches' ipBlock) and
+      # its bucket. With them,
+      # the Secret holds MEETINGS_S3_ACCESS_KEY and MEETINGS_S3_SECRET_KEY (a
+      # key scoped to this bucket alone), and the NetworkPolicy patches below
+      # let the plugin and Egress reach the store's port and nothing more.
+      - s3-endpoint=http://minio.example.test:9000
+      - s3-bucket=meetings
+      - s3-region=us-east-1
 
 patches:
   # The NodePorts the outside route targets.
@@ -78,6 +87,24 @@ patches:
                 matchLabels: {app.kubernetes.io/name: muster-contacts}
           ports:
             - {protocol: TCP, port: 8081}
+      # The recording (optional): the store's address and port, last.
+      - op: add
+        path: /spec/egress/-
+        value:
+          to:
+            - ipBlock: {cidr: 192.0.2.50/32}
+          ports:
+            - {protocol: TCP, port: 9000}
+  # The recording (optional): Egress uploads to the same store, and only to it.
+  - target: {kind: NetworkPolicy, name: egress}
+    patch: |-
+      - op: add
+        path: /spec/egress/-
+        value:
+          to:
+            - ipBlock: {cidr: 192.0.2.50/32}
+          ports:
+            - {protocol: TCP, port: 9000}
   # A Secret under another name (here, the TURN certificate's).
   - target: {kind: Deployment, name: livekit}
     patch: |-

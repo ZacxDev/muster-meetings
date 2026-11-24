@@ -17,6 +17,10 @@
       <button id="new-meeting" type="button" class="mu-btn mu-btn--primary" data-icon="plus">New meeting</button>
     </header>
     <p id="status" class="status" role="status" aria-live="polite"></p>
+    <!-- The owner's recording retention (only a plugin that records). -->
+    <p id="retention" class="retention muted" hidden><label for="retention-days">Recordings are kept</label>
+      <select id="retention-days" class="mu-select"><option value="30">30 days</option><option value="365">365 days</option></select>
+      <span>after a meeting ends.</span></p>
     <section aria-label="Past meetings">
       <div id="empty" class="empty" hidden><span data-icon="people"></span>No meetings yet.</div>
       <ul id="meetings" class="meetings"></ul>
@@ -37,8 +41,27 @@
       <button id="dl-vtt" type="button" class="mu-btn mu-btn--secondary mu-btn--sm" data-icon="captions">WebVTT</button>
     </div>
     <p id="archive-status" class="status" role="status" aria-live="polite"></p>
-    <p id="archive-empty" class="empty" hidden>Nothing was transcribed in this meeting.</p>
-    <ol id="archive-lines" class="transcript"></ol>
+    <!-- The recording beside its transcript (only a plugin that records has
+         one): a line said while the meeting was recorded plays the video from
+         that moment. -->
+    <div id="archive-body" class="archive-body">
+      <section id="archive-media" class="archive-media" hidden aria-label="Recording">
+        <video id="archive-video" controls preload="metadata" playsinline></video>
+        <p id="archive-part" class="muted" hidden></p>
+        <div class="downloads">
+          <button id="share-rec" type="button" class="mu-btn mu-btn--secondary mu-btn--sm" data-icon="link">Share recording</button>
+          <button id="unshare-rec" type="button" class="mu-btn mu-btn--ghost mu-btn--sm" hidden>Stop sharing</button>
+        </div>
+        <div id="share-out" class="share-out" hidden>
+          <label class="mu-label" for="share-url">Anyone with this link can watch the recording until <span id="share-until"></span>.</label>
+          <div class="share-row"><input id="share-url" class="mu-input" readonly><button id="share-copy" type="button" class="mu-btn mu-btn--secondary mu-btn--sm">Copy</button></div>
+        </div>
+      </section>
+      <div class="archive-text">
+        <p id="archive-empty" class="empty" hidden>Nothing was transcribed in this meeting.</p>
+        <ol id="archive-lines" class="transcript"></ol>
+      </div>
+    </div>
   </section>
 
   <!-- Pre-join: the camera preview, the microphone's level, the devices and

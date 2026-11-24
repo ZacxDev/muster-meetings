@@ -68,6 +68,15 @@ jobs:
           tar -xzf /tmp/kubeconform.tgz -C /tmp/k8s kubeconform
           echo "/tmp/k8s" >> "$GITHUB_PATH"
           echo "MEETINGS_REQUIRE_KUBECTL=1" >> "$GITHUB_ENV"
+      # ffmpeg for the frame sampling tests (internal/frames, the timeline's
+      # frame route) and their mutants: MEETINGS_REQUIRE_FFMPEG=1 makes them
+      # fail, not skip, without it.
+      - name: ffmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends ffmpeg
+          ffmpeg -hide_banner -version | head -1
+          echo "MEETINGS_REQUIRE_FFMPEG=1" >> "$GITHUB_ENV"
       - name: render and validate deploy/kubernetes and the example overlay
         run: |
           for d in deploy/kubernetes deploy/example-overlay; do
@@ -118,7 +127,9 @@ jobs:
       # the transcript in the owner's and a guest's panels (the fake LiveKit
       # as Egress, the fake STT engine), and live captions at 390x844 and
       # 1280x800 (the nemotron engine against the fake Nemotron server), and
-      # a late closing mark amending a shown line in place (late-marks).
+      # a late closing mark amending a shown line in place (late-marks), and
+      # the recording (recording.spec.ts: the badge for the owner and a guest
+      # at both sizes, the archive's seek on a line click, the share link).
       # The UI pass (ui-*.spec.ts): the pre-join, the tile indicators, the
       # speaking ring, the layouts and screen share, the connection quality,
       # the shortcuts, reduced motion, accessible names, axe, and muster's UI
@@ -130,7 +141,7 @@ jobs:
         run: |
           set -o pipefail
           npx playwright test --project=chromium 2>&1 | tee /tmp/e2e.log
-          grep -qE '^\s+52 passed \(' /tmp/e2e.log
+          grep -qE '^\s+56 passed \(' /tmp/e2e.log
       # The UI mutants: each must turn its named Playwright test red (and the
       # no-op control must not).
       - name: UI mutation sweep (each UI mutant's named Playwright test must go red)

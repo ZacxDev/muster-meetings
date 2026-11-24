@@ -69,3 +69,12 @@ configMapGenerator:
       # the Secret AND the NetworkPolicy patch that lets the plugin reach it
       # (README "Contacts (optional)"; deploy/example-overlay shows both).
       - contacts-url=
+      # The recording (optional): the store's API as the plugin and Egress
+      # reach it (http(s)://host:port, no path) and the bucket. Both empty: no
+      # recording, meetings exactly as before. Set them together with
+      # MEETINGS_S3_ACCESS_KEY and MEETINGS_S3_SECRET_KEY in the Secret AND
+      # the NetworkPolicy patches that let the plugin and Egress reach the
+      # store (README "Recording (optional)"; deploy/example-overlay does it).
+      - s3-endpoint=
+      - s3-bucket=
+      - s3-region=us-east-1

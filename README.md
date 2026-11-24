@@ -18,10 +18,18 @@ your meetings, newest first, with **Open** and **Copy link** on an open one.
 **The live transcript (3a):** each microphone in the call is transcribed,
 and the lines appear under each speaker's name in a panel that you and every
 admitted guest see alike; after the meeting, **Transcript** on its row opens
-the archive, with **Download text** and **Download WebVTT**. Action items
-and recordings come later: the two switches (**Record**, **AI action
-items**) and the notice are already here, because the notice says what will
-happen.
+the archive, with **Download text** and **Download WebVTT**. **The
+recording (phase 5, optional: only with a bucket configured,
+[Recording (optional)](#recording-optional)):** with **Record** on, the
+call is recorded from the first admitted guest to the end (LiveKit's room
+composite, MP4, to your S3-compatible store); everyone in the call sees the
+badge, and "Recording failed" while the recorder is down. The archive
+plays the video beside the transcript, and a click on a line plays the
+video from that moment. **Share recording** makes a link anyone can open
+to watch it, with no muster sign-in, until the recording is deleted (30
+days after the meeting by default, or 365). Action items come later: the
+**AI action items** switch and its notice are already here, because the
+notice says what will happen.
 
 For you, the owner, that is the whole feature: open **Meetings**, press
 **New meeting**, copy the link, send it, admit whoever knocks.
@@ -177,6 +185,11 @@ Read from the environment only; `.env.example` lists them.
 | `MEETINGS_INGEST_LISTEN` | no | the ingest listener; default `:8082`. Egress's alone: never route it |
 | `MEETINGS_CONTACTS_URL` | no (with `_TOKEN`) | the **contacts** plugin's internal API, `http(s)://host[:port]`, e.g. `http://muster-contacts:8081` ([Contacts (optional)](#contacts-optional)). Unset: no guest card, exactly as before contacts |
 | `MEETINGS_CONTACTS_TOKEN` | with `MEETINGS_CONTACTS_URL` | its bearer: a **copy** of the contacts plugin's `CONTACTS_API_TOKEN`, 32+ characters, never `MUSTER_PLUGIN_TOKEN`. Never logged. 🔴 Both or neither: one alone refuses to start |
+| `MEETINGS_S3_ENDPOINT` | no (with the three below) | the recordings store's API, `http(s)://host[:port]` with no path, e.g. `http://minio.example.test:9000` ([Recording (optional)](#recording-optional)). Unset: no recording, exactly as before |
+| `MEETINGS_S3_BUCKET` | with `MEETINGS_S3_ENDPOINT` | the bucket, e.g. `meetings` |
+| `MEETINGS_S3_ACCESS_KEY`, `MEETINGS_S3_SECRET_KEY` | with `MEETINGS_S3_ENDPOINT` | a key scoped to that bucket alone; Egress uploads with the same key. Never logged. 🔴 All four or none: some alone refuse to start |
+| `MEETINGS_S3_REGION` | no | the signing region; default `us-east-1` (MinIO's). Set alone it means nothing |
+| `MEETINGS_FFMPEG` | no | the ffmpeg that samples frames from a recording; default `ffmpeg` on `PATH` (the image carries a minimal one). Missing: the timeline still lists frame times, and the frame route answers `503` |
 
 The plugin refuses to start when muster answers the token `401`
 (uninstalled or rotated away; it ends every session and open meeting
@@ -449,6 +462,139 @@ build refuses a database at schema 5 ("newer than this build"); the added
 columns and table are unused when contacts is unset. To go back to an older
 image anyway, restore the volume from a backup taken before this release.
 
+### Recording (optional)
+
+With a bucket configured, a meeting whose **Record** switch is on (it is on
+for a new meeting; the owner can turn it off at any time, and on again only
+before a guest has knocked) is recorded from the moment its first guest is
+admitted until it ends: LiveKit's **room composite** egress (its grid
+layout, which shows a shared screen large) writes one H.264/AAC MP4 per
+**part** to `meetings/<owner subject>/<meeting id>/recording-<n>.mp4`.
+About **1.4 GB per recorded hour** (720p30 at ~3 Mb/s, spike S3), and Egress
+needs about 1.7 CPUs per recording at once (the sizing rule in
+`egress.yaml`). Without a bucket nothing on this page exists: no egress, no
+route, no sweeper (`internal/server/norecording_test.go` pins every answer to
+the pre-recording commit's).
+
+- **The badge.** Everyone in the call sees "Recording · …" while Record is
+  on, and **"Recording failed · …"** while the recording should run and does
+  not: its start was refused (no Egress capacity), or its egress died and the
+  next has not begun. The plugin retries on the track egress's backoff (1, 2,
+  4 … 30 s); each new egress is a new part.
+- **Gaps are recorded, as the transcript's are.** The stretch from the
+  admit to the first file's first frame (`starting`, a few seconds of
+  Chrome starting up) and from a part's end to the next part's first frame
+  (`failed`) are stored as recording gaps; the share page names them.
+- **Time alignment.** A part's start is stored in **meeting time** (the
+  transcript's time base: ms from when the owner first joined) as **the
+  egress itself reported it**: Egress's `FileInfo.started_at`, set when its
+  pipeline reached PLAYING (the file's first frame), never when its webhook
+  arrived. A segment at meeting time `T` is in the part `p` with
+  `p.start ≤ T < p.start + p.duration`, at offset `T − p.start`; nothing per
+  segment is stored (`internal/timeline`). Screen shares are recorded from
+  LiveKit's `track_published` / `track_unpublished` webhooks, so their times
+  are the webhooks' arrival (LiveKit sends no other time for them).
+- **Playback.** The archive asks `POST /api/meetings/{id}/recording-url` for
+  a signed `/media/<meeting>/<part>?exp=&sig=` per part (HMAC over the path
+  and the expiry, under a key derived from `MEETINGS_LINK_KEY`; 15 minutes,
+  asked again when it lapses) and plays it in a `<video>`; the plugin
+  streams the object from the store with `Range`, so the store is never
+  exposed to a browser.
+- **The share link** (`POST /api/meetings/{id}/share`, after the meeting
+  ended): `https://meet-<x>.<domain>/r/<token>`, 256 random bits stored only
+  as SHA-256, a page with the video and no script, valid until the
+  recording's purge time. A new link turns the old one off;
+  `DELETE /api/meetings/{id}/share` turns it off. An unknown, revoked or
+  expired link, or a part that is not there, answers one and the same `404`,
+  byte for byte. The token never reaches a log (`/r/{token}`). **Why stream,
+  not a presigned URL:** the store is reached over the mesh and is not public,
+  a SigV4 presigned URL lives at most 7 days (the link lives 30 or 365) and
+  cannot be revoked before it expires, and it would name the store's host.
+- **Retention.** Each owner chooses 30 (default) or 365 days on the Meetings
+  page; a meeting is given its `purge_recording_at` when it ends (by any
+  path), so a later change applies from the next meeting. An hourly sweeper
+  deletes each part's **object, then its row**; with the store down it
+  deletes neither and tries again next hour, and an object already gone is
+  not an error. It logs counts, never a key or a title. 🔴 **The backstop is
+  a lifecycle rule on the bucket**, so a dead sweeper cannot keep recordings
+  forever: expire `meetings/` after **366 days** (the longest choice plus a
+  day). There is no "forever" choice.
+- **For the analysis** (`GET /api/meetings/{id}/timeline`, owner only): the
+  meeting, its parts and gaps, its screen shares, every segment with its
+  `recording: {part, offset_ms}` (or `null`) and `screen_share`, and a frame
+  ref per text segment said while a screen was shared and recorded (at the
+  middle of the overlap). `GET /api/meetings/{id}/frame?at=<meeting ms>`
+  answers that moment as a JPEG (at most 1280 wide), with `X-Meeting-Ms`,
+  `X-Recording-Part` and `X-Recording-Offset-Ms`. It runs ffmpeg against the
+  store through a loopback range proxy (`internal/frames`), never copying the
+  file to disk. No model is called by this release.
+
+**Setting it up** (the operator; nothing here is applied for you):
+
+1. **The bucket**, e.g. `meetings`, private, with the lifecycle rule. With
+   MinIO's client:
+
+   ```sh
+   mc mb <alias>/meetings
+   mc ilm rule add --expire-days 366 --prefix meetings/ <alias>/meetings
+   ```
+
+2. **One key scoped to that bucket alone**, for the plugin and Egress. The
+   policy (MinIO `mc admin policy create <alias> meetings-recordings policy.json`,
+   then a user or service account attached to it):
+
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [
+       {"Effect": "Allow", "Action": ["s3:GetBucketLocation", "s3:ListBucket", "s3:ListBucketMultipartUploads"],
+        "Resource": ["arn:aws:s3:::meetings"]},
+       {"Effect": "Allow", "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"],
+        "Resource": ["arn:aws:s3:::meetings/meetings/*"]}
+     ]
+   }
+   ```
+
+   (Egress needs `PutObject` and the multipart actions; the plugin
+   `GetObject`, `DeleteObject`; split them into two keys if you prefer, with
+   the same bucket.)
+3. **The Secret:** add `MEETINGS_S3_ACCESS_KEY` and `MEETINGS_S3_SECRET_KEY`
+   to `muster-meetings` (both the plugin and Egress read them there).
+4. **The params:** `s3-endpoint` (the store's API as the pods reach it) and
+   `s3-bucket`; `s3-region` if it is not `us-east-1`. Egress's
+   `storage.s3` block (`egress.yaml`) is filled from the same params and
+   keys, so the two cannot name different buckets.
+5. **The network:** append one egress rule to BOTH the `muster-meetings` and
+   the `egress` NetworkPolicies, to the store's address and port (the
+   example overlay does it with an `ipBlock`). The base reaches no store.
+6. Compose: set the five `MEETINGS_S3_*` variables in muster's `.env`; the
+   plugin and Egress both read them.
+
+**Upgrading, and rolling back.** This release adds migration **6**: the
+owner's recording retention (default 30 on every existing owner), each
+meeting's `purge_recording_at` (meetings already ended get 30 days from
+their end), and the `recordings`, `recording_gaps`, `recording_shares` and
+`screen_shares` tables. Nothing an older build reads changes, and without a
+bucket they stay empty. To turn the recording off, unset the variables (or
+empty `s3-endpoint`/`s3-bucket` and remove the keys): no new recording from
+then on (the existing objects stay until the lifecycle rule expires them).
+🔴 **Do not roll back by running an older image**: migrations are one-way,
+and an older build refuses a database at schema 6 ("newer than this build").
+To go back anyway, restore the volume from a backup taken before this
+release.
+
+**The image** carries a minimal static ffmpeg (7.1.5, the release tarball
+pinned by SHA-256: protocols file/pipe/tcp/http, the mov demuxer, the H.264
+and VP9 decoders, scale, the MJPEG encoder): **+6.3 MB on amd64, +4.7 MB on
+arm64**, measured on this release's build. Its build stage is cross-compiled,
+so the arm64 image needs no emulation.
+
+**Not in this release:** `MEETINGS_MAX_RECORDINGS` (the design's cap on
+recordings at once: Egress's own capacity check refuses a composite it
+cannot take, and the plugin retries); **Delete now**; **Apply to existing**
+(a retention change applies from the next meeting); recording while the
+owner is alone in the call (it starts at the first admit, as designed).
+
 ### Capacity and limits
 
 - **About 100 concurrent participants per LiveKit pod.** Each relayed
@@ -531,6 +677,14 @@ that does not exist.
 | `POST /j/{code}/leave` `{"ticket"}` | the guest's own Leave: `204`, dropped from the room, the ticket spent. With contacts configured and a card offered, `200 {"card": {"id", "name", "owner"}}` instead |
 | `POST /card` `{"id", "name", "email"}` | contacts only ([Contacts (optional)](#contacts-optional)): the card's Send. `200 {"message"}`, the same whatever contacts does; `400 {"error", "field"}` spends nothing; `404` for a spent, unknown or expired card; `429` past the limits. The `ended` event carries the card as `"card"` |
 | `POST /card/skip` `{"id"}` | contacts only: Skip. `204`; nothing is sent anywhere |
+| `GET` · `PUT /api/settings` `{"recording_retention_days": 30\|365}` | with a bucket only: your recording retention |
+| `GET /api/meetings/{id}/recording` | with a bucket only: `{"parts": [{"part", "state", "start_ms", "duration_ms", "bytes"}], "gaps": [{"from_ms", "to_ms", "why"}], "purge_at", "share": {"live", "expires_at"}}` |
+| `POST /api/meetings/{id}/recording-url` | with a bucket only: `{"parts": [{"part", "start_ms", "duration_ms", "url"}], "expires_at"}`, a signed `/media/…` URL per playable part, 15 minutes |
+| `GET /media/{id}/{part}?exp=&sig=` | the part, streamed from the store with `Range`; `403` for a wrong or expired signature |
+| `POST` · `DELETE /api/meetings/{id}/share` | with a bucket only: `201 {"url", "expires_at"}` (a new link; the old one is turned off), or turn it off; `409` before the meeting has a finished recording |
+| `GET /r/{token}` · `/r/{token}/{part}` | the share link's page and its video (with `Range`); one `404` for every link that opens nothing |
+| `GET /api/meetings/{id}/timeline` | with a bucket only: the time-aligned bundle ([Recording (optional)](#recording-optional)) |
+| `GET /api/meetings/{id}/frame?at=<meeting ms>` | with a bucket only: one JPEG of the recording at that moment; `404` outside it, `503` without ffmpeg |
 | `POST /livekit/webhook` | internal listener only: LiveKit's signed webhook |
 | `WS /stt/ingest/{track}/{token}` | the ingest listener only: one track egress's audio (above) |
 | `GET /healthz` | internal listener only |
@@ -820,7 +974,11 @@ nonce, the speaker's name) and the transcript itself (finals and gap
 markers, with the speaker's name and the meeting time; partials are never
 stored), with contacts configured each guest card's state and its
 id's hash, and until it is delivered (72 h at most) each card's submission,
-guest name and email included, in `contacts_outbox`, and an audit trail
+guest name and email included, in `contacts_outbox`; with a bucket
+configured each owner's recording retention, each meeting's purge time, its
+recording parts (object key, size, length, state, and the file's start in
+meeting time), its recording gaps, its share links (hashed) and when a
+screen was shared (and by whom, by name); and an audit trail
 of what happened, which never holds a code, a token, a display name,
 transcript text or a guest's name. Every owner-facing query goes through one
 repository layer that filters by the session's subject.
@@ -847,7 +1005,10 @@ None. The plugin talks only to the muster at `MUSTER_URL`, to your
 LiveKit, and (with the transcript on) to your own STT service at
 `MEETINGS_STT_URL`, which gets each utterance's audio, and (with the
 `nemotron` engine) your own Nemotron server at `MEETINGS_STREAM_STT_URL`,
-which gets each microphone's audio as it is spoken, and (with contacts
+which gets each microphone's audio as it is spoken, and (with a bucket
+configured) your own S3-compatible store at `MEETINGS_S3_ENDPOINT`, which
+Egress writes each recording to and the plugin reads and deletes it from,
+and (with contacts
 configured) your own contacts plugin at `MEETINGS_CONTACTS_URL`, which gets
 the name and email a guest chose to send on the card, the meeting's id,
 title and times, and that guest's knock name and times. Audio and video go
@@ -947,6 +1108,39 @@ order with one failure holding nothing back, no PII in its log), and
 condition alone false, and all true), the spending, the uniform answer, the
 limits, contacts black-holed, and the no-URL goldens.
 
+**The recording** (phase 5): `recording.spec.ts` runs the harness with
+`-s3=fake` (the fake S3 store, `internal/s3test`, which checks every
+request's SigV4; the fake LiveKit as the room composite Egress, which
+"uploads" a 20 s VP9 MP4 from `internal/frames/testdata`). At 390×844 and
+1280×800 the owner and a guest see "Recording · Transcribing · AI", then
+"Recording failed · …" when the egress is killed and its restarts are
+refused, then "Recording …" again once a restart is taken, the badge on
+screen each time. At 1280×800 the archive plays the video beside the
+transcript (the video's column left of the lines), the browser reads its
+length (20 s), and a click on each line (and Enter on one) sets the video's
+`currentTime` to that line's offset; and a share link opens in a context
+with no muster, plays the video from byte ranges, and answers `404` "This
+recording is not available" once **Stop sharing** is pressed. In Go: the
+offset math with literal values at the meeting's start and mid-meeting after
+a restart (`internal/timeline`); a part's start is the egress's reported
+start, not the webhook's arrival (reported 6.2 s, arriving 9 s); a failure
+restarts as part 2 with its gap and the badge for owner and guest, and each
+segment's offset into its part (`TestAFailedEgressRestartsAsANewPart…`);
+a refused start; Record off and End stop the egress; the reconcile ends a
+part whose webhook was lost; the share door's one 404 (unknown, malformed,
+missing part, revoked, expired; page and media); its Range answers; the
+signed media URL (expired, tampered, another meeting's path: `403`); the
+sweeper (object then row; the store down leaves both; a repeat is
+harmless); retention 30/365 and the purge time every end gives; migration 6
+on a schema-5 database; the SigV4 signer against AWS's own published
+example; frame sampling at four meeting times on the H.264 and the VP9
+fixtures, read through byte ranges (`internal/frames`, ffmpeg needed:
+`MEETINGS_REQUIRE_FFMPEG=1` in CI fails rather than skips); and the
+no-bucket golden. The fixtures were made with ffmpeg 7.1 (`nullsrc` →
+`geq` colouring each second red, green, blue, black; 64×64, 5 fps, 20 s;
+`libx264` and `libvpx-vp9`, `+bitexact`); the H.264 one is also the image
+build's smoke test.
+
 **Against a real LiveKit:** `internal/server/livekit_integration_test.go`
 starts `livekit-server` and joins with LiveKit's CLI (`lk room join`): the
 plugin's rooms, tokens and webhook verification against the real server; two
@@ -1034,7 +1228,10 @@ phase 2d's click path, with TURN, after 2c deploys it.
 | `internal/lobby` | the guest name, the notice's words, the change hub, the knock limit and the knock notifier |
 | `internal/mustertest` | a fake muster for tests (`httptest`), server-installed apps included |
 | `internal/owners` | the one server token, the boot check and reconcile, and the `/self` and `owners/check` poll |
-| `internal/store` | SQLite: schema, sessions, the owner-scoped repository, the lobby and its state machine, random codes |
+| `internal/store` | SQLite: schema, sessions, the owner-scoped repository, the lobby and its state machine, random codes, the recording's parts, gaps, share links and retention |
+| `internal/s3`, `internal/s3test` | the recordings bucket's client (SigV4: read with `Range`, size, delete) and a fake S3-compatible store that checks every signature |
+| `internal/timeline` | meeting time ↔ recording part and offset |
+| `internal/frames` | frame sampling with ffmpeg through a loopback range proxy to the store; its fixtures in `testdata/` |
 | `internal/server` | the HTTP routes, headers, the webhook and reconcile loop, and the pages (`web/`; LiveKit's browser client vendored in `web/static/vendor/`, by `scripts/vendor-livekit-client.sh`) |
 | `Dockerfile`, `.github/workflows/image.yml` | the image and its GHCR publish |
 | `deploy/kubernetes`, `deploy/example-overlay` | the kustomize base (the plugin, LiveKit, Services, NetworkPolicies) and an example tenant overlay |

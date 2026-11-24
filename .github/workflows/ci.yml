@@ -141,7 +141,7 @@ jobs:
         run: |
           set -o pipefail
           npx playwright test --project=chromium 2>&1 | tee /tmp/e2e.log
-          grep -qE '^\s+58 passed \(' /tmp/e2e.log
+          grep -qE '^\s+62 passed \(' /tmp/e2e.log
       # The UI mutants: each must turn its named Playwright test red (and the
       # no-op control must not).
       - name: UI mutation sweep (each UI mutant's named Playwright test must go red)

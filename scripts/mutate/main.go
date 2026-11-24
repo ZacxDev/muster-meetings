@@ -188,6 +188,17 @@ const (
 	icsMain = "cmd/items-corpus-stt/main.go"
 	icsTr   = "cmd/items-corpus-stt/transcribe.go"
 	scVoice = "internal/sttcorpus/voices.go"
+	// the post-call notes (analysis, drafts, the outbox)
+	pcAn    = "internal/server/analysis.go"
+	pcNotes = "internal/server/notes.go"
+	pcCard  = "internal/server/card.go"
+	pcTr    = "internal/server/transcribe.go"
+	pcMail  = "internal/store/mail.go"
+	pcRuns  = "internal/store/analysis.go"
+	mlNotes = "internal/mail/notes.go"
+	mlSMTP  = "internal/mail/smtp.go"
+	itVis   = "internal/items/vision.go"
+	itSum   = "internal/items/summary.go"
 )
 
 var mutants = []mutant{
@@ -1556,6 +1567,41 @@ var mutants = []mutant{
 		pkg: "./internal/server", test: "TestAPartIsNotGoneWhileTheRoomListsAnUnnamedComposite", want: "a part resolved as gone while its egress may still be starting"},
 	{name: "reconcile: one failed list ends the pass", file: recGo, from: "\t\t\ts.cfg.Log.Printf(\"reconcile: meeting %s part %d: LiveKit: %s\", p.MeetingID, p.Part, lkKind(err))\n\t\t\tcontinue", to: "\t\t\ts.cfg.Log.Printf(\"reconcile: meeting %s part %d: LiveKit: %s\", p.MeetingID, p.Part, lkKind(err))\n\t\t\treturn",
 		pkg: "./internal/server", test: "TestOneFailedListDoesNotEndThePass", want: "one failed list ended the pass"},
+	// ---- 🔴 the post-call notes: the analysis, the drafts, the outbox ----
+	{name: "notes: a draft sent without approval", file: pcMail, from: "FROM mail_drafts d WHERE d.state = 'queued' AND d.next_at <= ? ORDER BY d.next_at, d.id LIMIT 1`", to: "FROM mail_drafts d WHERE d.state IN ('queued', 'draft') AND coalesce(d.next_at, 0) <= ? ORDER BY d.next_at, d.id LIMIT 1`",
+		pkg: "./internal/server", test: "TestEndRunsThePostCallPassAndDraftsTheOwnerAndTheCardGuest", want: "messages sent with no Send"},
+	{name: "notes: another person's item in the YOUR section", file: mlNotes, from: "\tif a == r {\n\t\treturn true\n\t}", to: "\tif a != \"\" {\n\t\treturn true\n\t}",
+		pkg: "./internal/server", test: "TestSendMailsEachRecipientTheirNotesExactly", want: "the YOUR section is not their own items alone"},
+	{name: "notes: a sent draft redrafted by reprocess", file: pcMail, from: "\t\tif sent[r.key] {\n\t\t\tcontinue\n\t\t}\n", to: "",
+		more: []edit{{pcMail, "AND recipient = ? AND state IN ('draft', 'removed', 'failed')`", "AND recipient = ? AND state IN ('draft', 'removed', 'failed', 'sent')`"}},
+		pkg: "./internal/server", test: "TestReprocessMakesANewCurrentRunAndLeavesSentNotesAlone", want: "a sent draft was changed by reprocess"},
+	{name: "notes: an unconfirmed owner address used", file: pcMail, from: "\tif !email.Valid || email.String == \"\" {\n\t\treturn 0, ErrNoOwnerEmail", to: "\tif false {\n\t\treturn 0, ErrNoOwnerEmail",
+		pkg: "./internal/server", test: "TestSendNeedsTheOwnersConfirmedAddress", want: "an unconfirmed owner address was used"},
+	{name: "notes: a removed recipient sent", file: pcMail, from: "AND m.subject = ? AND d.state = 'draft' AND (d.recipient = 'owner' OR d.email IS NOT NULL)`", to: "AND m.subject = ? AND d.state IN ('draft', 'removed') AND (d.recipient = 'owner' OR d.email IS NOT NULL)`",
+		pkg: "./internal/server", test: "TestEditedDraftsAreWhatIsSent", want: "send = "},
+	{name: "notes: transcript text reaching the log", file: pcAn, from: "run.MeetingID, run.ID, len(out.Items), len(out.Notes),", to: "run.MeetingID, run.ID, out.Items, len(out.Notes),",
+		pkg: "./internal/server", test: "TestTheLogCarriesNoTranscriptItemNameOrAddress", want: "the log carries"},
+	{name: "notes: the confirmation link works past its expiry", file: pcMail, from: "subtle.ConstantTimeCompare([]byte(stored), []byte(h)) != 1 || exp <= ms(now) {\n\t\treturn \"\", ErrNotFound", to: "subtle.ConstantTimeCompare([]byte(stored), []byte(h)) != 1 || exp < 0 {\n\t\treturn \"\", ErrNotFound",
+		pkg: "./internal/server", test: "TestTheConfirmationDoorAnswersOneNotFound", want: "want the first's 404"},
+	{name: "notes: mail to a server without STARTTLS", file: mlSMTP, from: "if ok, _ := cl.Extension(\"STARTTLS\"); !ok {", to: "if ok, _ := cl.Extension(\"STARTTLS\"); !ok && false {",
+		pkg: "./internal/mail", test: "TestSendRequiresStartTLS", want: "the mail server does not offer STARTTLS"},
+	{name: "agent token: another meeting read", file: pcAn, from: "if err != nil || meetingID != r.PathValue(\"id\") || !s.app.Live() {", to: "if err != nil || !s.app.Live() {",
+		pkg: "./internal/server", test: "TestAnAgentTokenReadsOneMeetingsTimeline", want: "want 404"},
+	{name: "no AI: the card says notes with no mail server", file: pcCard, from: "Notes: s.notes != nil}", to: "Notes: true}",
+		pkg: "./internal/server", test: "TestNoModelAndNoMailChangeNothing", want: "the surface changed from the pre-change commit's"},
+	{name: "no AI: the notice's AI clause rewritten with no model", file: pcTr, from: "\tif s.ai != nil {\n\t\tframes := s.ai.visionModel != \"\" && record && s.Recording()\n\t\tn = n.WithAIClause(frames)\n\t}", to: "\tn = n.WithAIClause(false)",
+		pkg: "./internal/server", test: "TestNoModelAndNoMailChangeNothing", want: "the surface changed from the pre-change commit's"},
+	{name: "live: the AI switch ignored", file: pcRuns, from: "WHERE state = 'open' AND ai = 1 AND created_at > ?", to: "WHERE state = 'open' AND created_at > ?",
+		pkg: "./internal/server", test: "TestLiveItemsReachTheOwnerAndAnAdmittedGuest", want: "a meeting switched off"},
+	{name: "live: paused never shown", file: pcAn, from: "Paused: st.Stopped || st.Failures >= items.PausedAfter}", to: "Paused: st.Stopped}",
+		pkg: "./internal/server", test: "TestLiveItemsPauseAfterThreeFailures", want: "no \"items\" event"},
+	{name: "frames: an item citing no frame kept", file: itVis, from: "\t\tif len(it.Frames) == 0 {\n\t\t\tdropped = append(dropped, Dropped{it, DropNoFrame})", to: "\t\tif false {\n\t\t\tdropped = append(dropped, Dropped{it, DropNoFrame})",
+		pkg: "./internal/items", test: "TestGuardVision", want: "items kept ="},
+	{name: "frames: a note citing a frame not sent kept", file: itVis, from: "\t\tcase !w.hasFrame(n.FrameMS):", to: "\t\tcase false:",
+		pkg: "./internal/items", test: "TestGuardVision", want: "notes kept ="},
+	{name: "summary: an uncited point kept", file: itSum, from: "if p.Text == \"\" || len(p.Segments) == 0 || len(out) >= SummaryMaxPoints {", to: "if p.Text == \"\" || len(out) >= SummaryMaxPoints {",
+		pkg: "./internal/items", test: "TestGuardSummary", want: "summary ="},
+
 	// ---- 🔴 contacts, phase 1b, in a browser (go run ./scripts/mutate -e2e) ----
 	{name: "contacts ui: the consent sentence reworded", file: guestJS, from: "', who will see that you were in this meeting. Nothing else is shared.'", to: "', who may see that you were in this meeting. Nothing else is shared.'",
 		e2e: cardE2E, test: "End: the guest's card .*\\(mobile\\)", want: "Your name and email go to Ada L., who will see"},

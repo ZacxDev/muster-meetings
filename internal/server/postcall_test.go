@@ -413,7 +413,13 @@ func TestEndRunsThePostCallPassAndDraftsTheOwnerAndTheCardGuest(t *testing.T) {
 	if len(ds) != 2 || got[0] != "owner|Ada L.||draft" || !strings.HasSuffix(got[1], "|"+grace+"|"+graceAddr+"|draft") {
 		t.Errorf("drafts = %v: want the owner and Grace (Linus skipped the card)", got)
 	}
-	if n := len(e.smtp.Messages()); n != 0 {
+	// 🔴 Nothing is sent without Send, even with the owner's address
+	// confirmed and the outbox run.
+	e.confirmOwner(c)
+	before := len(e.smtp.Messages())
+	e.server.MailPass(context.Background())
+	time.Sleep(50 * time.Millisecond)
+	if n := len(e.smtp.Messages()) - before; n != 0 {
 		t.Errorf("%d messages sent with no Send", n)
 	}
 }

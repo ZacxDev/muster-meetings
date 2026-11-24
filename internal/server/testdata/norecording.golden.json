@@ -1,0 +1,382 @@
+{
+  "DELETE /api/meetings/{meeting}/share (no session)": {
+    "status": 404,
+    "headers": {
+      "Cache-Control": "no-store",
+      "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      "Content-Type": "application/json",
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self)",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY"
+    },
+    "body": "{\"error\":\"not found\"}\n"
+  },
+  "DELETE /api/meetings/{meeting}/share (owner)": {
+    "status": 404,
+    "headers": {
+      "Cache-Control": "no-store",
+      "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      "Content-Type": "application/json",
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self)",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY"
+    },
+    "body": "{\"error\":\"not found\"}\n"
+  },
+  "GET /api/meetings/{meeting}/frame?at=1000 (no session)": {
+    "status": 404,
+    "headers": {
+      "Cache-Control": "no-store",
+      "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      "Content-Type": "application/json",
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self)",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY"
+    },
+    "body": "{\"error\":\"not found\"}\n"
+  },
+  "GET /api/meetings/{meeting}/frame?at=1000 (owner)": {
+    "status": 404,
+    "headers": {
+      "Cache-Control": "no-store",
+      "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      "Content-Type": "application/json",
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self)",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY"
+    },
+    "body": "{\"error\":\"not found\"}\n"
+  },
+  "GET /api/meetings/{meeting}/recording (no session)": {
+    "status": 404,
+    "headers": {
+      "Cache-Control": "no-store",
+      "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      "Content-Type": "application/json",
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self)",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY"
+    },
+    "body": "{\"error\":\"not found\"}\n"
+  },
+  "GET /api/meetings/{meeting}/recording (owner)": {
+    "status": 404,
+    "headers": {
+      "Cache-Control": "no-store",
+      "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      "Content-Type": "application/json",
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self)",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY"
+    },
+    "body": "{\"error\":\"not found\"}\n"
+  },
+  "GET /api/meetings/{meeting}/timeline (no session)": {
+    "status": 404,
+    "headers": {
+      "Cache-Control": "no-store",
+      "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      "Content-Type": "application/json",
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self)",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY"
+    },
+    "body": "{\"error\":\"not found\"}\n"
+  },
+  "GET /api/meetings/{meeting}/timeline (owner)": {
+    "status": 404,
+    "headers": {
+      "Cache-Control": "no-store",
+      "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      "Content-Type": "application/json",
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self)",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY"
+    },
+    "body": "{\"error\":\"not found\"}\n"
+  },
+  "GET /api/settings (no session)": {
+    "status": 404,
+    "headers": {
+      "Cache-Control": "no-store",
+      "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      "Content-Type": "application/json",
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self)",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY"
+    },
+    "body": "{\"error\":\"not found\"}\n"
+  },
+  "GET /api/settings (owner)": {
+    "status": 404,
+    "headers": {
+      "Cache-Control": "no-store",
+      "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      "Content-Type": "application/json",
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self)",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY"
+    },
+    "body": "{\"error\":\"not found\"}\n"
+  },
+  "GET /media/{meeting}/1?exp=9999999999\u0026sig=x (no session)": {
+    "status": 404,
+    "headers": {
+      "Cache-Control": "no-store",
+      "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      "Content-Type": "application/json",
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self)",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY"
+    },
+    "body": "{\"error\":\"not found\"}\n"
+  },
+  "GET /media/{meeting}/1?exp=9999999999\u0026sig=x (owner)": {
+    "status": 404,
+    "headers": {
+      "Cache-Control": "no-store",
+      "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      "Content-Type": "application/json",
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self)",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY"
+    },
+    "body": "{\"error\":\"not found\"}\n"
+  },
+  "GET /r/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA (no session)": {
+    "status": 404,
+    "headers": {
+      "Cache-Control": "no-store",
+      "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      "Content-Type": "application/json",
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self)",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY"
+    },
+    "body": "{\"error\":\"not found\"}\n"
+  },
+  "GET /r/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA (owner)": {
+    "status": 404,
+    "headers": {
+      "Cache-Control": "no-store",
+      "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      "Content-Type": "application/json",
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self)",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY"
+    },
+    "body": "{\"error\":\"not found\"}\n"
+  },
+  "GET /r/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/1 (no session)": {
+    "status": 404,
+    "headers": {
+      "Cache-Control": "no-store",
+      "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      "Content-Type": "application/json",
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self)",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY"
+    },
+    "body": "{\"error\":\"not found\"}\n"
+  },
+  "GET /r/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/1 (owner)": {
+    "status": 404,
+    "headers": {
+      "Cache-Control": "no-store",
+      "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      "Content-Type": "application/json",
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self)",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY"
+    },
+    "body": "{\"error\":\"not found\"}\n"
+  },
+  "POST /api/meetings/{meeting}/recording-url (no session)": {
+    "status": 404,
+    "headers": {
+      "Cache-Control": "no-store",
+      "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      "Content-Type": "application/json",
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self)",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY"
+    },
+    "body": "{\"error\":\"not found\"}\n"
+  },
+  "POST /api/meetings/{meeting}/recording-url (owner)": {
+    "status": 404,
+    "headers": {
+      "Cache-Control": "no-store",
+      "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      "Content-Type": "application/json",
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self)",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY"
+    },
+    "body": "{\"error\":\"not found\"}\n"
+  },
+  "POST /api/meetings/{meeting}/share (no session)": {
+    "status": 404,
+    "headers": {
+      "Cache-Control": "no-store",
+      "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      "Content-Type": "application/json",
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self)",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY"
+    },
+    "body": "{\"error\":\"not found\"}\n"
+  },
+  "POST /api/meetings/{meeting}/share (owner)": {
+    "status": 404,
+    "headers": {
+      "Cache-Control": "no-store",
+      "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      "Content-Type": "application/json",
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self)",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY"
+    },
+    "body": "{\"error\":\"not found\"}\n"
+  },
+  "PUT /api/settings (no session)": {
+    "status": 404,
+    "headers": {
+      "Cache-Control": "no-store",
+      "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      "Content-Type": "application/json",
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self)",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY"
+    },
+    "body": "{\"error\":\"not found\"}\n"
+  },
+  "PUT /api/settings (owner)": {
+    "status": 404,
+    "headers": {
+      "Cache-Control": "no-store",
+      "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      "Content-Type": "application/json",
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self)",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY"
+    },
+    "body": "{\"error\":\"not found\"}\n"
+  },
+  "admit": {
+    "status": 200,
+    "headers": {
+      "Cache-Control": "no-store",
+      "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      "Content-Type": "application/json",
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self)",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY"
+    },
+    "body": "{\"ok\":true}\n"
+  },
+  "ai off": {
+    "status": 200,
+    "headers": {
+      "Cache-Control": "no-store",
+      "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      "Content-Type": "application/json",
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self)",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY"
+    },
+    "body": "{\"notice\":{\"record\":true,\"ai\":false,\"transcribed\":true,\"text\":[\"This meeting is recorded and transcribed.\"],\"badge\":\"Recording · Transcribing\"}}\n"
+  },
+  "ai on": {
+    "status": 200,
+    "headers": {
+      "Cache-Control": "no-store",
+      "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      "Content-Type": "application/json",
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self)",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY"
+    },
+    "body": "{\"notice\":{\"record\":true,\"ai\":true,\"transcribed\":true,\"text\":[\"This meeting is recorded and transcribed.\",\"The transcript text (not the audio) is sent to an AI service (OpenRouter) to find action items.\"],\"badge\":\"Recording · Transcribing · AI\"}}\n"
+  },
+  "end": {
+    "status": 200,
+    "headers": {
+      "Cache-Control": "no-store",
+      "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      "Content-Type": "application/json",
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self)",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY"
+    },
+    "body": "{\"meeting\":{\"id\":\"{meeting}\",\"title\":\"\",\"state\":\"ended\",\"record\":false,\"ai\":true,\"created_at\":\"2031-03-14T15:09:26Z\",\"started_at\":\"2031-03-14T15:09:26Z\",\"ended_at\":\"2031-03-14T15:09:26Z\",\"link_expires_at\":\"2031-03-15T15:09:26Z\"}}\n"
+  },
+  "guest_meeting_event": "{\"notice\":{\"record\":true,\"ai\":true,\"transcribed\":true,\"text\":[\"This meeting is recorded and transcribed.\",\"The transcript text (not the audio) is sent to an AI service (OpenRouter) to find action items.\"],\"badge\":\"Recording · Transcribing · AI\"}}",
+  "owner_notice": "{\"record\":true,\"ai\":true,\"transcribed\":true,\"text\":[\"This meeting is recorded and transcribed.\",\"The transcript text (not the audio) is sent to an AI service (OpenRouter) to find action items.\"],\"badge\":\"Recording · Transcribing · AI\"}",
+  "record off": {
+    "status": 200,
+    "headers": {
+      "Cache-Control": "no-store",
+      "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      "Content-Type": "application/json",
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self)",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY"
+    },
+    "body": "{\"notice\":{\"record\":false,\"ai\":true,\"transcribed\":true,\"text\":[\"This meeting is transcribed.\",\"The transcript text (not the audio) is sent to an AI service (OpenRouter) to find action items.\"],\"badge\":\"Transcribing · AI\"}}\n"
+  }
+}

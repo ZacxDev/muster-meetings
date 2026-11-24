@@ -324,7 +324,7 @@ func (s *Server) handleGuestEvents(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		snap := map[string]any{"notice": s.noticeFor(cur.Notice.Record, cur.Notice.AI)}
+		snap := map[string]any{"notice": s.noticeOf(r.Context(), cur.MeetingID, cur.Notice.Record, cur.Notice.AI)}
 		if b, _ := json.Marshal(snap); string(b) != last {
 			last = string(b)
 			if err := sse(w, f, "meeting", snap); err != nil {

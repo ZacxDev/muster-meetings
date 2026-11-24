@@ -107,6 +107,18 @@ type Fake struct {
 	refuse   int
 	egresses []*Egress
 	nextID   int
+
+	// Room composites (the recording). CompositeAuto makes each accepted
+	// composite report its file's start at once (egress_updated, ACTIVE,
+	// fileResults[0].startedAt = the fake's now), as Egress does when its
+	// pipeline reaches PLAYING; without it a test reports it with
+	// BeginComposite, at a time of its choosing. Upload, when set, is called
+	// when a composite that began ends, with its object key: what Egress's
+	// upload would write (it answers the bytes written, the file's size).
+	CompositeAuto bool
+	Upload        func(key string) int64
+	// refuseComposite is how many of the next composite starts are refused.
+	refuseComposite int
 }
 
 // Egress is one track egress the fake accepted.
@@ -119,8 +131,13 @@ type Egress struct {
 	// Removed says the egress's participant was removed from the room (a
 	// RemoveParticipant of it), which ended the egress.
 	Removed bool
-	active  bool
-	stop    chan string // the status it ends with
+	// Composite marks a room composite (the recording): Filepath is its
+	// object key, StartedAt its file's reported start (zero until it began).
+	Composite bool
+	Filepath  string
+	StartedAt time.Time
+	active    bool
+	stop      chan string // the status it ends with
 }
 
 // RTC is one connection attempt a client made with a token.
@@ -561,10 +578,81 @@ func (f *Fake) endEgress(e *Egress, status string) {
 		default:
 		}
 	}
-	if url != "" {
-		f.PostEvent(url, map[string]any{"event": "egress_ended", "room": map[string]any{"sid": "RM_fake", "name": room},
-			"egressInfo": map[string]any{"egressId": e.ID, "roomName": room, "status": status}})
+	info := map[string]any{"egressId": e.ID, "roomName": room, "status": status}
+	if e.Composite && !e.StartedAt.IsZero() {
+		end := f.Now()
+		var size int64
+		if f.Upload != nil {
+			size = f.Upload(e.Filepath)
+		}
+		// protojson: camelCase names, every int64 a string.
+		info["fileResults"] = []map[string]any{{"filename": e.Filepath, "startedAt": fmt.Sprint(e.StartedAt.UnixNano()),
+			"endedAt": fmt.Sprint(end.UnixNano()), "duration": fmt.Sprint(end.Sub(e.StartedAt).Nanoseconds()), "size": fmt.Sprint(size)}}
 	}
+	if url != "" {
+		f.PostEvent(url, map[string]any{"event": "egress_ended", "room": map[string]any{"sid": "RM_fake", "name": room}, "egressInfo": info})
+	}
+}
+
+// RefuseComposite makes the next n room composite starts fail as LiveKit
+// does when no Egress has the capacity.
+func (f *Fake) RefuseComposite(n int) { f.mu.Lock(); f.refuseComposite = n; f.mu.Unlock() }
+
+// Composites is every room composite the fake accepted, oldest first.
+func (f *Fake) Composites() []Egress {
+	var out []Egress
+	for _, e := range f.Egresses() {
+		if e.Composite {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// BeginComposite reports that composite id's file began at startedAt
+// (egress_updated, EGRESS_ACTIVE, as Egress sends it when its pipeline
+// reaches PLAYING). The webhook is posted NOW, whatever startedAt says: a
+// test can make the report arrive late.
+func (f *Fake) BeginComposite(id string, startedAt time.Time) (int, error) {
+	f.mu.Lock()
+	var e *Egress
+	for _, x := range f.egresses {
+		if x.ID == id && x.Composite && x.active {
+			e = x
+		}
+	}
+	if e == nil {
+		f.mu.Unlock()
+		return 0, fmt.Errorf("livekittest: no active composite %s", id)
+	}
+	e.StartedAt = startedAt
+	url, room, key := f.WebhookURL, e.Room, e.Filepath
+	f.mu.Unlock()
+	if url == "" {
+		return 0, nil
+	}
+	return f.PostEvent(url, map[string]any{"event": "egress_updated", "room": map[string]any{"sid": "RM_fake", "name": room},
+		"egressInfo": map[string]any{"egressId": id, "roomName": room, "status": "EGRESS_ACTIVE",
+			"fileResults": []map[string]any{{"filename": key, "startedAt": fmt.Sprint(startedAt.UnixNano())}}}})
+}
+
+// egressJSON is an egress as Twirp's JSON answers it (snake_case, int64s as
+// strings, every field present).
+func (f *Fake) egressJSON(e *Egress) map[string]any {
+	status := "EGRESS_STARTING"
+	if !e.StartedAt.IsZero() {
+		status = "EGRESS_ACTIVE"
+	}
+	if !e.active {
+		status = "EGRESS_COMPLETE"
+	}
+	files := []map[string]any{}
+	if e.Composite && !e.StartedAt.IsZero() {
+		files = append(files, map[string]any{"filename": e.Filepath, "started_at": fmt.Sprint(e.StartedAt.UnixNano()),
+			"ended_at": "0", "duration": "0", "size": "0", "location": ""})
+	}
+	return map[string]any{"egress_id": e.ID, "room_name": e.Room, "status": status, "started_at": fmt.Sprint(f.Now().UnixNano()),
+		"ended_at": "0", "error": "", "file_results": files}
 }
 
 // PostEvent signs ev as LiveKit does and posts it to url.
@@ -587,6 +675,12 @@ func (f *Fake) egressTwirp(w http.ResponseWriter, r *http.Request) {
 		TrackID      string `json:"track_id"`
 		WebsocketURL string `json:"websocket_url"`
 		EgressID     string `json:"egress_id"`
+		Layout       string `json:"layout"`
+		FileOutputs  []struct {
+			FileType string          `json:"file_type"`
+			Filepath string          `json:"filepath"`
+			S3       json.RawMessage `json:"s3"`
+		} `json:"file_outputs"`
 	}
 	if json.Unmarshal(raw, &in) != nil {
 		twirpErr(w, 400, "malformed", "the body is not JSON")
@@ -667,6 +761,61 @@ func (f *Fake) egressTwirp(w http.ResponseWriter, r *http.Request) {
 			go f.runEgress(e, audio(in.RoomName, identity, in.TrackID), pace)
 		}
 		writeOK(map[string]any{"egress_id": e.ID, "room_name": e.Room, "status": "EGRESS_STARTING"})
+	case "StartRoomCompositeEgress":
+		if f.Down {
+			f.mu.Unlock()
+			twirpErr(w, 503, "unavailable", "the fake is down")
+			return
+		}
+		if c.Video.Room != in.RoomName || in.RoomName == "" {
+			f.mu.Unlock()
+			twirpErr(w, 403, "permission_denied", "permissions denied")
+			return
+		}
+		// As the plugin must send it: one MP4 file output, a key and NO storage
+		// block (Egress uploads with its own configured S3).
+		if len(in.FileOutputs) != 1 || in.FileOutputs[0].FileType != "MP4" || in.FileOutputs[0].Filepath == "" || len(in.FileOutputs[0].S3) > 0 {
+			f.mu.Unlock()
+			twirpErr(w, 400, "invalid_argument", "one MP4 file output with a filepath and no storage, please")
+			return
+		}
+		if f.refuseComposite > 0 {
+			f.refuseComposite--
+			f.mu.Unlock()
+			twirpErr(w, 503, "unavailable", "no response from servers")
+			return
+		}
+		if f.rooms[in.RoomName] == nil {
+			f.mu.Unlock()
+			twirpErr(w, 404, "not_found", "requested room does not exist")
+			return
+		}
+		f.nextID++
+		e := &Egress{ID: fmt.Sprintf("EG_comp%04d", f.nextID), Room: in.RoomName, Composite: true, Filepath: in.FileOutputs[0].Filepath,
+			active: true, stop: make(chan string, 1)}
+		f.egresses = append(f.egresses, e)
+		f.rooms[in.RoomName].Participants[e.ID] = Joined{Identity: e.ID, Kind: livekit.KindEgress}
+		auto := f.CompositeAuto
+		out := f.egressJSON(e)
+		f.mu.Unlock()
+		writeOK(out)
+		go func() {
+			if url := f.WebhookURL; url != "" {
+				f.ParticipantJoined(url, e.Room, e.ID, livekit.KindEgress)
+			}
+			if auto {
+				f.BeginComposite(e.ID, f.Now())
+			}
+		}()
+	case "ListEgress":
+		var items []map[string]any
+		for _, x := range f.egresses {
+			if in.EgressID == "" || x.ID == in.EgressID {
+				items = append(items, f.egressJSON(x))
+			}
+		}
+		f.mu.Unlock()
+		writeOK(map[string]any{"items": items})
 	case "StopEgress":
 		var e *Egress
 		for _, x := range f.egresses {

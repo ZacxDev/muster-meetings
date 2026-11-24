@@ -20,6 +20,9 @@ func (s *Server) Run(ctx context.Context) {
 	s.Reconcile(ctx)
 	// And every transcribed track lost its egress's stream.
 	s.resumeTranscription(ctx)
+	// A recording waiting to retry lost its loop; the sweeper starts.
+	s.resumeRecording(ctx)
+	s.runRetention(ctx)
 	t := time.NewTicker(s.cfg.ReconcileEvery)
 	defer t.Stop()
 	for {
@@ -75,13 +78,22 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		if ev.Participant == nil || ev.Track == nil || room == "" {
 			break
 		}
+		s.onScreenShare(ctx, room, ev.Participant.Identity, *ev.Track)
 		s.onTrackPublished(ctx, room, ev.Participant.Identity, *ev.Track)
 	case "track_unpublished":
 		if ev.Track != nil {
+			s.onScreenShareEnded(ctx, *ev.Track)
 			s.onTrackUnpublished(ctx, *ev.Track)
 		}
-	case "egress_ended":
+	case "egress_updated":
+		// A room composite's file began (ACTIVE, with its file's start):
+		// recording.go. A track egress's update changes nothing.
 		if ev.EgressInfo != nil {
+			s.onRecordingEgress(ctx, *ev.EgressInfo)
+		}
+	case "egress_ended":
+		// A recording part's, else a track egress's.
+		if ev.EgressInfo != nil && !s.onRecordingEgress(ctx, *ev.EgressInfo) {
 			s.onEgressEnded(ctx, *ev.EgressInfo)
 		}
 	case "room_finished":
@@ -198,4 +210,5 @@ func (s *Server) Reconcile(ctx context.Context) {
 			s.deleteIfEnded(ctx, rm.Name)
 		}
 	}
+	s.reconcileRecordings(ctx)
 }

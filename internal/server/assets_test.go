@@ -82,12 +82,13 @@ func servedPages(t *testing.T, e *env) map[string]struct {
 		body []byte
 		cc   string
 	}{}
+	at := e
 	add := func(name, tmpl, path string, status int, framed bool, want string) {
 		var hdr []string
 		if framed {
 			hdr = inFrame
 		}
-		resp, body := e.do("GET", path, "", nil, hdr...)
+		resp, body := at.do("GET", path, "", nil, hdr...)
 		if resp.StatusCode != status || !strings.Contains(string(body), want) {
 			t.Fatalf("%s (%s) = %d, want %d holding %q: %s", name, path, resp.StatusCode, status, want, body)
 		}
@@ -103,6 +104,12 @@ func servedPages(t *testing.T, e *env) map[string]struct {
 	c := e.meeting(bea)
 	add("the guest's join page", "guest.html", "/j/"+c.Code, 200, false, `id="knock-form"`)
 	add("the guest's refusal", "guest.html", "/j/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 404, false, `id="message"`)
+	// The share link's page and its refusal: only a plugin that records
+	// serves them.
+	at, _ = recEnv(t)
+	share := at.share(finishedRecording(t, at))
+	add("a share link's page", "share.html", share, 200, false, `class="share-video"`)
+	add("a share link's refusal", "share.html", "/r/"+strings.Repeat("A", 43), 404, false, `id="message"`)
 	return out
 }
 
@@ -137,6 +144,9 @@ func TestEveryAssetAPageReferencesCarriesItsVersion(t *testing.T) {
 			if !strings.HasPrefix(u, "/") || strings.HasPrefix(u, "//") {
 				continue // not a file on this origin (none is, today)
 			}
+			if strings.HasPrefix(name, "a share link") && strings.HasPrefix(u, "/r/") {
+				continue // the recording itself (the share link's media route), not a file
+			}
 			n++
 			v := versionedURL.FindStringSubmatch(u)
 			if v == nil {
@@ -157,8 +167,8 @@ func TestEveryAssetAPageReferencesCarriesItsVersion(t *testing.T) {
 		// Each page links kit.css and app.css; the two working pages load
 		// six scripts as well (TestTheAppPageCarriesNoInlineScript).
 		min := 2
-		if !strings.Contains(name, "refusal") {
-			min = 8
+		if !strings.Contains(name, "refusal") && !strings.HasPrefix(name, "a share link") {
+			min = 8 // a share link's page has no script at all
 		}
 		if n < min {
 			t.Errorf("%s: %d references to files on this origin, want at least %d (the scan sees nothing?)", name, n, min)

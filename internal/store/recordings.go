@@ -231,13 +231,26 @@ func (s *Store) RecordingByEgress(ctx context.Context, egressID string, now time
 	if egressID == "" {
 		return RecordingRef{}, ErrNotFound
 	}
+	return s.recordingRef(ctx, `r.egress_id = ?`, egressID, now)
+}
+
+// RecordingByKey is the part whose object key is key (an egress's file
+// result names it); ErrNotFound for none.
+func (s *Store) RecordingByKey(ctx context.Context, key string, now time.Time) (RecordingRef, error) {
+	if key == "" {
+		return RecordingRef{}, ErrNotFound
+	}
+	return s.recordingRef(ctx, `r.object_key = ?`, key, now)
+}
+
+func (s *Store) recordingRef(ctx context.Context, where, arg string, now time.Time) (RecordingRef, error) {
 	var ref RecordingRef
 	var start sql.NullInt64
 	var dur, size sql.NullInt64
 	var startedAt int64
 	var rec int
 	err := s.db.QueryRowContext(ctx, `SELECT `+recCols+`, m.subject, `+live+`, m.record, coalesce(m.started_at, m.created_at)
-		FROM recordings r JOIN meetings m ON m.id = r.meeting_id WHERE r.egress_id = ?`, cutoff(now), egressID).
+		FROM recordings r JOIN meetings m ON m.id = r.meeting_id WHERE `+where, cutoff(now), arg).
 		Scan(&ref.ID, &ref.MeetingID, &ref.Part, &ref.EgressID, &ref.ObjectKey, &ref.State, &ref.RequestedAt, &start, &dur, &size, &ref.Error,
 			&ref.Subject, &ref.MeetingLive, &rec, &startedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -364,15 +377,17 @@ func (s *Store) RunningRecordings(ctx context.Context) ([]Recording, error) {
 }
 
 // RecordingStatus is what the badge says about the recording of a meeting
-// with Record on: "" (recording, or about to), or RecStatusFailed while a
-// recording gap opened by a failure is open (design: "Recording failed"
-// badge for everyone).
+// with Record on: "" (recording, or about to start), or RecStatusFailed
+// while a gap is open after a failure: an egress died, or a start was
+// refused (design: "Recording failed" badge for everyone). A first start
+// still on its way is not a failure.
 const RecStatusFailed = "failed"
 
 // RecordingStatus is the meeting's recording status for the badge.
 func (s *Store) RecordingStatus(ctx context.Context, meetingID string) (string, error) {
 	var n int
-	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM recording_gaps WHERE meeting_id = ? AND to_ms IS NULL AND why = 'failed'`, meetingID).Scan(&n)
+	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM recording_gaps g WHERE g.meeting_id = ? AND g.to_ms IS NULL
+		AND (g.why = 'failed' OR EXISTS (SELECT 1 FROM recordings r WHERE r.meeting_id = g.meeting_id AND r.state = 'failed'))`, meetingID).Scan(&n)
 	if n > 0 {
 		return RecStatusFailed, err
 	}
@@ -796,4 +811,26 @@ func (s *Store) PlayablePart(ctx context.Context, meetingID string, part int) (R
 		return Recording{}, ErrNotFound
 	}
 	return r, nil
+}
+
+// ToResume is every live meeting with Record on whose recording should be
+// running and is not: a gap is open and no part is starting or active (the
+// plugin restarted while it waited to retry).
+func (s *Store) ToResume(ctx context.Context, now time.Time) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT m.id FROM meetings m WHERE `+live+` AND m.record = 1
+		AND EXISTS (SELECT 1 FROM recording_gaps g WHERE g.meeting_id = m.id AND g.to_ms IS NULL)
+		AND NOT EXISTS (SELECT 1 FROM recordings r WHERE r.meeting_id = m.id AND r.state IN ('starting', 'active')) ORDER BY m.id`, cutoff(now))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
 }

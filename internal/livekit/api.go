@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -224,6 +225,14 @@ type TrackInfo struct {
 // track_published webhook for a microphone track").
 const SourceMicrophone = "MICROPHONE"
 
+// SourceScreenShare is a shared screen's video track.
+const SourceScreenShare = "SCREEN_SHARE"
+
+// ScreenShare says t is a shared screen's video (not its audio).
+func (t TrackInfo) ScreenShare() bool {
+	return t.Source == SourceScreenShare && t.Type != "" && t.Type != "AUDIO"
+}
+
 // Microphone says t is a microphone's audio.
 func (t TrackInfo) Microphone() bool {
 	return t.Source == SourceMicrophone && (t.Type == "" || t.Type == "AUDIO")
@@ -277,22 +286,89 @@ type EgressInfo struct {
 	RoomName string
 	Status   string // EGRESS_STARTING, EGRESS_ACTIVE, EGRESS_ENDING, EGRESS_COMPLETE, EGRESS_FAILED, EGRESS_ABORTED, EGRESS_LIMIT_REACHED
 	Error    string
+	// Files is a room composite's file results (FileInfo): empty for a
+	// track egress, and until the egress's pipeline has started.
+	Files []FileInfo
+}
+
+// FileInfo is the part of LiveKit's FileInfo the plugin reads: one file an
+// egress wrote. Times are Unix NANOseconds and Duration nanoseconds, as
+// Egress reports them (egress v1.15.0: FileInfo.started_at is set when its
+// pipeline reaches PLAYING, the file's first frame; duration is its end
+// minus that). protojson writes every int64 as a JSON string; a number is
+// read too.
+type FileInfo struct {
+	Filename  string
+	StartedAt int64
+	EndedAt   int64
+	Duration  int64
+	Size      int64
+}
+
+// int64s reads a protojson int64: a string of digits, or a number.
+type int64s int64
+
+func (n *int64s) UnmarshalJSON(b []byte) error {
+	var v any
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	switch x := v.(type) {
+	case string:
+		if x == "" {
+			*n = 0
+			return nil
+		}
+		i, err := strconv.ParseInt(x, 10, 64)
+		if err != nil {
+			return fmt.Errorf("livekit: %q is not an int64", x)
+		}
+		*n = int64s(i)
+	case float64:
+		*n = int64s(x)
+	case nil:
+		*n = 0
+	default:
+		return fmt.Errorf("livekit: an int64 that is neither a string nor a number")
+	}
+	return nil
+}
+
+// UnmarshalJSON reads either spelling.
+func (f *FileInfo) UnmarshalJSON(b []byte) error {
+	var v struct {
+		Filename string `json:"filename"`
+		SA       int64s `json:"started_at"`
+		SB       int64s `json:"startedAt"`
+		EA       int64s `json:"ended_at"`
+		EB       int64s `json:"endedAt"`
+		D        int64s `json:"duration"`
+		Size     int64s `json:"size"`
+	}
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	*f = FileInfo{Filename: v.Filename, StartedAt: int64(v.SA + v.SB), EndedAt: int64(v.EA + v.EB), Duration: int64(v.D), Size: int64(v.Size)}
+	return nil
 }
 
 // UnmarshalJSON reads either spelling.
 func (e *EgressInfo) UnmarshalJSON(b []byte) error {
 	var v struct {
-		A  string `json:"egress_id"`
-		B  string `json:"egressId"`
-		RA string `json:"room_name"`
-		RB string `json:"roomName"`
-		S  any    `json:"status"`
-		E  string `json:"error"`
+		A  string     `json:"egress_id"`
+		B  string     `json:"egressId"`
+		RA string     `json:"room_name"`
+		RB string     `json:"roomName"`
+		S  any        `json:"status"`
+		E  string     `json:"error"`
+		FA []FileInfo `json:"file_results"`
+		FB []FileInfo `json:"fileResults"`
 	}
 	if err := json.Unmarshal(b, &v); err != nil {
 		return err
 	}
 	e.EgressID, e.RoomName, e.Error = v.A+v.B, v.RA+v.RB, v.E
+	e.Files = append(v.FA, v.FB...)
 	switch s := v.S.(type) {
 	case string:
 		e.Status = s
@@ -331,4 +407,49 @@ func (c *Client) StopEgress(ctx context.Context, egressID string) error {
 		return nil
 	}
 	return err
+}
+
+// Ended says the status is an egress's last: it will write nothing more.
+func (e EgressInfo) Ended() bool {
+	switch e.Status {
+	case "EGRESS_COMPLETE", "EGRESS_FAILED", "EGRESS_ABORTED", "EGRESS_LIMIT_REACHED":
+		return true
+	}
+	return false
+}
+
+// RecordingLayout is the room composite's layout: LiveKit's grid, which its
+// template switches to the speaker layout (the shared screen large) while a
+// screen is shared (egress's template-default, Room.tsx).
+const RecordingLayout = "grid"
+
+// StartRoomCompositeEgress asks LiveKit to record room (Egress's headless
+// Chrome renders the layout) to ONE MP4 file at filepath in the bucket.
+// 🔴 The request names no storage and carries no credential: Egress uploads
+// with the S3 block of its OWN configuration (storage.s3; deploy/kubernetes
+// egress.yaml), so the bucket key never passes through LiveKit or its Redis.
+// filepath is used as the object key as it is (no {time} or {room_name}
+// template in it).
+func (c *Client) StartRoomCompositeEgress(ctx context.Context, room, filepath string) (EgressInfo, error) {
+	var out EgressInfo
+	err := c.callService(ctx, "livekit.Egress", "StartRoomCompositeEgress", VideoGrant{RoomRecord: true, Room: room},
+		map[string]any{"room_name": room, "layout": RecordingLayout,
+			"file_outputs": []map[string]any{{"file_type": "MP4", "filepath": filepath}}}, &out)
+	if err == nil && out.EgressID == "" {
+		err = fmt.Errorf("livekit StartRoomCompositeEgress: an answer with no egress id")
+	}
+	return out, err
+}
+
+// ListEgress is what LiveKit knows of one egress: none when it knows nothing
+// of it.
+func (c *Client) ListEgress(ctx context.Context, egressID string) ([]EgressInfo, error) {
+	var out struct {
+		Items []EgressInfo `json:"items"`
+	}
+	err := c.callService(ctx, "livekit.Egress", "ListEgress", VideoGrant{RoomRecord: true}, map[string]any{"egress_id": egressID}, &out)
+	if NotFound(err) {
+		return nil, nil
+	}
+	return out.Items, err
 }

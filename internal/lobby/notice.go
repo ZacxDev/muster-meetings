@@ -17,6 +17,10 @@ const (
 	BadgeRecording    = "Recording"
 	BadgeTranscribing = "Transcribing"
 	BadgeAI           = "AI"
+	// BadgeRecordingFailed replaces BadgeRecording while the meeting should
+	// be recorded and no egress is (design: "Failure modes": "Egress fails to
+	// start or dies: 'Recording failed' badge for everyone").
+	BadgeRecordingFailed = "Recording failed"
 )
 
 // Without an engine (MEETINGS_STT_ENGINE off) nothing is transcribed, so
@@ -36,6 +40,28 @@ type Notice struct {
 	Transcribed bool     `json:"transcribed"`
 	Text        []string `json:"text"`
 	Badge       string   `json:"badge"`
+	// RecordingFailed is set while Record is on and the recording is not
+	// running (it failed to start, or died and has not restarted). Only a
+	// plugin that records says so (omitted otherwise, so the notice of a
+	// plugin without a bucket is exactly as before).
+	RecordingFailed bool `json:"recording_failed,omitempty"`
+}
+
+// WithRecordingFailed is n with the badge saying the recording failed. A
+// notice with Record off is unchanged: nothing was meant to be recorded.
+func (n Notice) WithRecordingFailed() Notice {
+	if !n.Record {
+		return n
+	}
+	parts := strings.Split(n.Badge, " · ")
+	for i, p := range parts {
+		if p == BadgeRecording {
+			parts[i] = BadgeRecordingFailed
+		}
+	}
+	n.Badge = strings.Join(parts, " · ")
+	n.RecordingFailed = true
+	return n
 }
 
 // NoticeFor writes the notice for the two switches on a plugin that

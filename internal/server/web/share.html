@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex">
+<title>Meeting recording</title>
+<link rel="stylesheet" href="{{kit "kit.css"}}">
+<link rel="stylesheet" href="{{asset "app.css"}}">
+</head>
+<body class="mu-root">
+{{- if .Missing}}
+<main class="page notice">
+  <h1>Meeting recording</h1>
+  <p id="message">This recording is not available. The link may have expired or been turned off.</p>
+</main>
+{{- else}}
+<!-- A share link's page: the recording, and nothing else (no script, no
+     muster sign-in). Each part is played from this link's own media route,
+     which streams the file from the store with Range (seeking); the store is
+     never exposed. -->
+<main id="shared" class="page share">
+  <h1 id="share-title">{{if .Title}}{{.Title}}{{else}}Meeting recording{{end}}</h1>
+  <p class="muted">Recorded {{.When}} · available until {{.Until}}</p>
+  {{- range .Parts}}
+  <section class="share-part" aria-label="{{.Label}}">
+    {{- if $.Many}}<h2>{{.Label}}</h2>{{end}}
+    <video class="share-video" controls preload="metadata" playsinline src="{{.Src}}"></video>
+  </section>
+  {{- end}}
+  {{- range .Gaps}}
+  <p class="muted share-gap">{{.}}</p>
+  {{- end}}
+</main>
+{{- end}}
+</body>
+</html>

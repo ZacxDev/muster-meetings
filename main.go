@@ -50,6 +50,18 @@
 //
 //	MEETINGS_CONTACTS_URL     the contacts plugin's internal API, http(s)://host[:port]
 //	MEETINGS_CONTACTS_TOKEN   its bearer: a COPY of the contacts plugin's CONTACTS_API_TOKEN (32+ characters)
+//
+// The recording, phase 5, OPTIONAL: all four of endpoint, bucket and the
+// key pair, or none; with none the plugin records nothing and behaves
+// exactly as without them. Egress uploads with the same bucket and key in
+// its own configuration (deploy/kubernetes/egress.yaml).
+//
+//	MEETINGS_S3_ENDPOINT      the store's API, http(s)://host[:port] (e.g. the homelab MinIO over the mesh)
+//	MEETINGS_S3_BUCKET        the recordings bucket
+//	MEETINGS_S3_REGION        its signing region (default us-east-1, MinIO's)
+//	MEETINGS_S3_ACCESS_KEY    a key scoped to that bucket alone
+//	MEETINGS_S3_SECRET_KEY    its secret
+//	MEETINGS_FFMPEG           the ffmpeg frame sampling runs (default: ffmpeg on PATH; the image carries one)
 package main
 
 import (
@@ -70,10 +82,12 @@ import (
 	"time"
 
 	"github.com/ZacxDev/muster-meetings/internal/contacts"
+	"github.com/ZacxDev/muster-meetings/internal/frames"
 	"github.com/ZacxDev/muster-meetings/internal/ingest"
 	"github.com/ZacxDev/muster-meetings/internal/livekit"
 	"github.com/ZacxDev/muster-meetings/internal/muster"
 	"github.com/ZacxDev/muster-meetings/internal/owners"
+	"github.com/ZacxDev/muster-meetings/internal/s3"
 	"github.com/ZacxDev/muster-meetings/internal/server"
 	"github.com/ZacxDev/muster-meetings/internal/store"
 	"github.com/ZacxDev/muster-meetings/internal/stt"
@@ -120,6 +134,42 @@ type Config struct {
 	// Contacts is the contacts plugin's API client, or nil when
 	// MEETINGS_CONTACTS_URL and _TOKEN are both unset.
 	Contacts *contacts.Client
+
+	// S3 is the recordings bucket's client, or nil when every MEETINGS_S3_*
+	// variable is unset (no recording). FFmpeg is MEETINGS_FFMPEG.
+	S3     *s3.Client
+	FFmpeg string
+}
+
+// ErrS3Half is a recording configuration with some of its variables and not
+// the rest.
+var ErrS3Half = errors.New("the recording needs MEETINGS_S3_ENDPOINT, MEETINGS_S3_BUCKET, MEETINGS_S3_ACCESS_KEY and MEETINGS_S3_SECRET_KEY together " +
+	"(MEETINGS_S3_REGION is optional), or none of them for no recording")
+
+// loadS3 reads the recording's bucket: every variable unset is no
+// recording; some but not all is a refusal; all is a client. 🔴 No value is
+// ever echoed: the keys are secrets.
+func loadS3(getenv func(string) string) (*s3.Client, error) {
+	cfg := s3.Config{Endpoint: strings.TrimSpace(getenv("MEETINGS_S3_ENDPOINT")), Bucket: strings.TrimSpace(getenv("MEETINGS_S3_BUCKET")),
+		Region: strings.TrimSpace(getenv("MEETINGS_S3_REGION")), AccessKey: strings.TrimSpace(getenv("MEETINGS_S3_ACCESS_KEY")),
+		SecretKey: strings.TrimSpace(getenv("MEETINGS_S3_SECRET_KEY"))}
+	set := 0
+	for _, v := range []string{cfg.Endpoint, cfg.Bucket, cfg.AccessKey, cfg.SecretKey} {
+		if v != "" {
+			set++
+		}
+	}
+	switch {
+	case set == 0 && cfg.Region == "":
+		return nil, nil
+	case set < 4:
+		return nil, ErrS3Half
+	}
+	c, err := s3.New(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("MEETINGS_S3_*: %w", err)
+	}
+	return c, nil
 }
 
 // The engines MEETINGS_STT_ENGINE names.
@@ -223,6 +273,10 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	if c.Contacts, err = contacts.Configure(getenv("MEETINGS_CONTACTS_URL"), getenv("MEETINGS_CONTACTS_TOKEN"), c.Token); err != nil {
 		return Config{}, err
 	}
+	if c.S3, err = loadS3(getenv); err != nil {
+		return Config{}, err
+	}
+	c.FFmpeg = strings.TrimSpace(getenv("MEETINGS_FFMPEG"))
 	return c, nil
 }
 
@@ -467,7 +521,15 @@ func (cfg Config) serverConfig(logger *log.Logger, lk *livekit.Client) server.Co
 	return server.Config{PublicURL: cfg.PublicURL, MusterOrigin: cfg.MusterOrigin, KitUpstream: cfg.URL, Log: logger,
 		LiveKit: lk, LiveKitURL: cfg.LiveKitURL, ICE: cfg.ICE, TrustedProxies: cfg.TrustedProxies,
 		ClientIPHeader: cfg.ClientIPHeader, IngestURL: cfg.IngestURL, IngestKey: cfg.IngestKey,
-		Contacts: cfg.Contacts}
+		Contacts: cfg.Contacts, S3: cfg.S3, Frames: cfg.frames()}
+}
+
+// frames is the frame sampler: off without a bucket (nothing to sample).
+func (cfg Config) frames() frames.Sampler {
+	if cfg.S3 == nil {
+		return frames.Sampler{}
+	}
+	return frames.Find(cfg.FFmpeg)
 }
 
 // sweep ends meetings past the 24 h cap and drops expired sessions, every
@@ -513,6 +575,14 @@ func startupLine(cfg Config, name string, pluginID int64, tasks bool) string {
 	// Nothing is added without contacts: the line is today's, byte for byte.
 	if cfg.Contacts != nil {
 		line += fmt.Sprintf("; contacts: %s (the guest card is offered)", muster.Redact(cfg.Contacts.Host()))
+	}
+	// Nothing is added without a bucket either.
+	if cfg.S3 != nil {
+		fr := "frame sampling off (no ffmpeg)"
+		if cfg.frames().Available() {
+			fr = "frames by " + cfg.frames().FFmpeg
+		}
+		line += fmt.Sprintf("; recording: bucket %q at %s, %s", cfg.S3.Bucket(), muster.Redact(cfg.S3.Endpoint()), fr)
 	}
 	return line
 }

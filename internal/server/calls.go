@@ -129,6 +129,13 @@ func (s *Server) handleSwitch(which store.Switch) ownerHandler {
 			s.meetingErr(w, err)
 			return
 		}
+		if which == store.SwitchRecord && !*in.On {
+			// Off any time: the recording stops at once.
+			if start, err := s.store.MeetingStart(r.Context(), id); err == nil {
+				at := s.sinceStart(start)
+				s.stopRecording(r.Context(), id, &at)
+			}
+		}
 		s.hub.Changed(id)
 		writeJSON(w, http.StatusOK, map[string]any{"notice": s.noticeFor(n.Record, n.AI)})
 	}
@@ -167,6 +174,12 @@ func (s *Server) handleMove(ev store.Event) ownerHandler {
 			return
 		}
 		out := map[string]any{"ok": true}
+		if ev == store.EvAdmit {
+			// The recording starts with the first admitted guest (design:
+			// "Started when the first guest is admitted with Record on");
+			// a part already running makes this nothing.
+			s.startRecording(id)
+		}
 		if ev == store.EvRemove {
 			err := s.cfg.LiveKit.RemoveParticipant(r.Context(), mv.Room, mv.Identity)
 			if err != nil {
@@ -196,6 +209,7 @@ func (s *Server) handleEnd(w http.ResponseWriter, r *http.Request, repo *store.O
 	s.hub.Changed(id)
 	s.knocker.Kick(id)
 	s.stopTranscription(r.Context(), id)
+	s.stopRecording(r.Context(), id, nil)
 	if err := s.cfg.LiveKit.DeleteRoom(r.Context(), room); err != nil {
 		s.cfg.Log.Printf("end: LiveKit: %v (the reconcile loop retries)", err)
 	}
@@ -322,7 +336,7 @@ func (s *Server) handleOwnerEvents(w http.ResponseWriter, r *http.Request, repo 
 			m.State = "ended"
 			lob = []store.Participant{}
 		}
-		snap := ownerSnapshot{Meeting: m, Notice: s.noticeFor(m.Record, m.AI), Locked: len(lob) > 0, Lobby: lob}
+		snap := ownerSnapshot{Meeting: m, Notice: s.noticeOf(r.Context(), id, m.Record, m.AI), Locked: len(lob) > 0, Lobby: lob}
 		if !snap.Locked && liveNow {
 			snap.Locked, err = repo.Knocked(r.Context(), id)
 			if err != nil {

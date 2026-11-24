@@ -119,7 +119,6 @@ for (const size of sizes) {
       await app.locator('.meeting').first().locator('.transcript-row').click();
       await expect(app.locator('#analysis')).toBeVisible();
       await expect(app.locator('#archive-items .item .item__text')).toHaveText(['Send the deck by Friday'], { timeout: 30_000 });
-      await expect(app.locator('#summary-points li').first()).toContainText('Ada L. said:');
       const cards = app.locator('#draft-list .draft');
       await expect(cards).toHaveCount(2);
       await expect(cards.nth(0).locator('.draft__who')).toHaveText('Ada L. (you)');

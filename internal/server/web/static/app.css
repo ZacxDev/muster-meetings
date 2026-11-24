@@ -240,7 +240,6 @@ h2 { font-size: 1rem; font-weight: 600; margin: 0; }
 .section-title { display: flex; align-items: center; gap: .375rem; margin-bottom: .375rem; }
 .section-title .mu-icon { width: 1.125rem; height: 1.125rem; color: rgb(var(--mu-accent)); }
 .analysis .items { padding: 0; overflow: visible; }
-.summary { margin: 0; padding-left: 1.25rem; display: flex; flex-direction: column; gap: .25rem; color: rgb(var(--mu-text2)); }
 .frame-notes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .25rem; }
 .frame-notes li { color: rgb(var(--mu-text2)); overflow-wrap: anywhere; }
 .frame-notes .when { color: rgb(var(--mu-muted)); font-size: .75rem; margin-right: .5rem; font-variant-numeric: tabular-nums; }

@@ -26,6 +26,7 @@ func (s *Server) Run(ctx context.Context) {
 	// The analysis' workers and the notes' outbox (only when configured).
 	s.runAI(ctx)
 	s.runMail(ctx)
+	s.runMailRetention(ctx)
 	t := time.NewTicker(s.cfg.ReconcileEvery)
 	defer t.Stop()
 	for {

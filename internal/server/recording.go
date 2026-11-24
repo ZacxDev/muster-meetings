@@ -1061,7 +1061,7 @@ type Bundle struct {
 	Segments        []bundleSegment     `json:"segments"`
 	Frames          []frameRef          `json:"frames"`
 	FramesAvailable bool                `json:"frames_available"`
-	// Analysis is the current run's items, frame notes and summary (only
+	// Analysis is the current run's items and frame notes (only
 	// with the analysis configured, and once a run exists).
 	Analysis *bundleAnalysis `json:"analysis,omitempty"`
 }

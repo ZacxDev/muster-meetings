@@ -16,7 +16,7 @@ import (
 	"github.com/ZacxDev/muster-meetings/internal/store"
 )
 
-// The analysis (design: "Action items", "Summary"; decisions 4 and the
+// The analysis (design: "Action items"; decisions 4 and the
 // reprocess rule): OPTIONAL, only with Config.AI.
 //
 //   - Live (4b): every MEETINGS_ITEMS_EVERY, each open meeting with its AI
@@ -27,8 +27,8 @@ import (
 //   - Post-call: when a meeting with its AI switch on has ended, a post run
 //     is queued (in the database: it survives a restart); the worker runs
 //     items.PostCall over the whole transcript, then the frames of shared
-//     screens with the transcript said around them (items.Vision), then the
-//     summary. The finished run becomes the meeting's current run, and with
+//     screens with the transcript said around them (items.Vision). The
+//     finished run becomes the meeting's current run, and with
 //     mail on its drafts are made (notes.go).
 //   - Reprocess: the owner (POST …/reprocess) or an admin (the `reprocess`
 //     command) queues another post run, under other models if they like;
@@ -38,7 +38,7 @@ import (
 // decide what is kept, and no log line carries a word of it, an item, a
 // note or a name: ids, counts and error classes only.
 //
-//	GET  /api/meetings/{id}/analysis[?run=<id>]          the runs, and one run's items, notes and summary
+//	GET  /api/meetings/{id}/analysis[?run=<id>]          the runs, and one run's items and frame notes
 //	POST /api/meetings/{id}/reprocess                    {"items_model"?, "items_provider_prefs"?, "vision_model"?, "vision_provider_prefs"?} → 202 {"run"}
 //	POST /api/meetings/{id}/analysis/runs/{rid}/current  make a finished run current (revert)
 //	POST /api/meetings/{id}/agent-token                  a read-only token for this meeting's timeline, for a muster agent
@@ -47,8 +47,7 @@ import (
 
 // AIConfig is the analysis' configuration.
 type AIConfig struct {
-	// Items is the action items' model (live and post-call; the summary's
-	// too, when it is a chat_json model).
+	// Items is the action items' model (live and post-call).
 	Items items.Config
 	// Vision is the frame analysis' model; Model "" is none.
 	Vision items.Config
@@ -70,19 +69,16 @@ const (
 	// RunAttempts is how many times a post run that failed outright is
 	// tried.
 	RunAttempts = 3
-	// QueueLookback is how far back the worker looks for ended meetings
-	// with no post run yet.
-	QueueLookback = 24 * time.Hour
 )
 
 // The phrases a run's error says (never a model's words).
 const (
-	PhraseRefused   = "the AI service refused the request (check the model, its provider preferences and the key)"
-	PhraseNoAnswer  = "the AI service did not answer"
-	PhrasePartial   = "part of the meeting could not be read; the items found are kept"
-	PhraseNothing   = "nothing was said"
-	PhraseNoFrames  = "the frames could not be read"
-	PhraseNoSummary = "the summary could not be written"
+	PhraseRefused  = "the AI service refused the request (check the model, its provider preferences and the key)"
+	PhraseNoAnswer = "the AI service did not answer"
+	PhrasePartial  = "part of the meeting could not be read; the items found are kept"
+	PhraseNothing  = "nothing was said"
+	PhraseTooMany  = "tried too many times; Run again to try once more"
+	PhraseNoFrames = "the frames could not be read"
 )
 
 type liveRun struct {
@@ -368,7 +364,7 @@ func (s *Server) runPost(ctx context.Context) {
 // switch on and has none, then runs every due post run.
 func (s *Server) PostPass(ctx context.Context) {
 	now := s.cfg.Now()
-	if n, err := s.store.QueueEnded(ctx, s.cfg.AI.Items.Model, s.ai.prefs, s.ai.visionModel, s.ai.visionPrefs, now.Add(-QueueLookback), now); err != nil {
+	if n, err := s.store.QueueEnded(ctx, s.cfg.AI.Items.Model, s.ai.prefs, s.ai.visionModel, s.ai.visionPrefs, now); err != nil {
 		s.cfg.Log.Printf("postcall: queueing: %v", err)
 	} else if n > 0 {
 		s.cfg.Log.Printf("postcall: %d meetings queued", n)
@@ -434,8 +430,15 @@ func (s *Server) postRun(ctx context.Context, run store.Run) {
 	if waitRec <= 0 {
 		waitRec = DefaultRecordingWait
 	}
+	// 🔴 A bounded number of tries, whatever made them fail (a model, the
+	// store, a restart mid-run): never an endless re-spend on the model.
+	if run.Attempts > RunAttempts {
+		_ = s.store.FailRun(ctx, run.ID, PhraseTooMany, now)
+		s.cfg.Log.Printf("postcall: run %d: failed after %d tries", run.ID, run.Attempts-1)
+		return
+	}
 	if run.VisionModel != "" && s.cfg.S3 != nil && s.recordingPending(ctx, run) && now.Sub(run.CreatedAt) < waitRec {
-		_ = s.store.RetryRun(ctx, run.ID, now.Add(30*time.Second), "")
+		_ = s.store.WaitRun(ctx, run.ID, now.Add(30*time.Second))
 		return
 	}
 	raw, err := s.store.FinalSegments(ctx, run.MeetingID)
@@ -488,17 +491,6 @@ func (s *Server) postRun(ctx context.Context, run store.Run) {
 	}
 	out.Notes = notes
 	out.Items = append(out.Items, toStored(store.SrcFrames, framed)...)
-	if items.AdapterFor(run.ItemsModel) == items.AdapterChatJSON {
-		sum, serr := s.summarise(ctx, ic, segs)
-		if serr != nil {
-			out.Partial = true
-			if out.Phrase == "" {
-				out.Phrase = PhraseNoSummary
-			}
-		} else {
-			out.Summary = &sum
-		}
-	}
 	s.finish(ctx, run, out)
 }
 
@@ -509,8 +501,8 @@ func (s *Server) finish(ctx context.Context, run store.Run, out store.Outcome) {
 		_ = s.store.RetryRun(ctx, run.ID, s.cfg.Now().Add(time.Minute), "")
 		return
 	}
-	s.cfg.Log.Printf("postcall: meeting %s run %d done: %d items, %d frame notes, summary %t, partial %t; %d drafts made, %d recipients already sent",
-		run.MeetingID, run.ID, len(out.Items), len(out.Notes), out.Summary != nil, out.Partial, res.Made, res.AlreadySent)
+	s.cfg.Log.Printf("postcall: meeting %s run %d done: %d items, %d frame notes, partial %t; %d drafts made, %d recipients already sent",
+		run.MeetingID, run.ID, len(out.Items), len(out.Notes), out.Partial, res.Made, res.AlreadySent)
 }
 
 // call runs fn up to PostCallAttempts times: a retryable failure after the
@@ -643,31 +635,6 @@ func (s *Server) analyseFrames(ctx context.Context, run store.Run, segs []items.
 		return nil, nil, lastErr
 	}
 	return notes, framed, nil
-}
-
-func (s *Server) summarise(ctx context.Context, ic items.Config, segs []items.Segment) (store.Summary, error) {
-	ic.Timeout = items.PostCallTimeout
-	sm, err := items.NewSummarizer(ic, s.cfg.AI.HTTP)
-	if err != nil {
-		return store.Summary{}, err
-	}
-	var sum items.Summary
-	err = call(ctx, func() error {
-		var err error
-		sum, _, err = sm.Summarize(ctx, segs)
-		return err
-	})
-	if err != nil {
-		return store.Summary{}, err
-	}
-	conv := func(ps []items.Point) []store.Point {
-		out := []store.Point{}
-		for _, p := range ps {
-			out = append(out, store.Point{Text: p.Text, Segments: p.Segments})
-		}
-		return out
-	}
-	return store.Summary{Points: conv(sum.Points), Decisions: conv(sum.Decisions)}, nil
 }
 
 func mergeTimes(a, b []int64) []int64 {

@@ -198,7 +198,6 @@ const (
 	mlNotes = "internal/mail/notes.go"
 	mlSMTP  = "internal/mail/smtp.go"
 	itVis   = "internal/items/vision.go"
-	itSum   = "internal/items/summary.go"
 )
 
 var mutants = []mutant{
@@ -1583,7 +1582,7 @@ var mutants = []mutant{
 		pkg: "./internal/server", test: "TestSendNeedsTheOwnersConfirmedAddress", want: "an unconfirmed owner address was used"},
 	{name: "notes: a removed recipient sent", file: pcMail, from: "AND m.subject = ? AND d.state = 'draft' AND (d.recipient = 'owner' OR d.email IS NOT NULL)`", to: "AND m.subject = ? AND d.state IN ('draft', 'removed') AND (d.recipient = 'owner' OR d.email IS NOT NULL)`",
 		pkg: "./internal/server", test: "TestEditedDraftsAreWhatIsSent", want: "send = "},
-	{name: "notes: transcript text reaching the log", file: pcAn, from: "done: %d items, %d frame notes, summary %t, partial %t; %d drafts made, %d recipients already sent\",\n\t\trun.MeetingID, run.ID, len(out.Items),", to: "done: %v items, %d frame notes, summary %t, partial %t; %d drafts made, %d recipients already sent\",\n\t\trun.MeetingID, run.ID, out.Items,",
+	{name: "notes: transcript text reaching the log", file: pcAn, from: "done: %d items, %d frame notes, partial %t; %d drafts made, %d recipients already sent\",\n\t\trun.MeetingID, run.ID, len(out.Items),", to: "done: %v items, %d frame notes, partial %t; %d drafts made, %d recipients already sent\",\n\t\trun.MeetingID, run.ID, out.Items,",
 		pkg: "./internal/server", test: "TestTheLogCarriesNoTranscriptItemNameOrAddress", want: "the log carries"},
 	{name: "notes: the confirmation link works past its expiry", file: pcMail, from: "subtle.ConstantTimeCompare([]byte(stored), []byte(h)) != 1 || exp <= ms(now) {\n\t\treturn \"\", ErrNotFound", to: "subtle.ConstantTimeCompare([]byte(stored), []byte(h)) != 1 || exp < 0 {\n\t\treturn \"\", ErrNotFound",
 		pkg: "./internal/server", test: "TestTheConfirmationDoorAnswersOneNotFound", want: "want the first's 404"},
@@ -1591,9 +1590,7 @@ var mutants = []mutant{
 		pkg: "./internal/mail", test: "TestSendRequiresStartTLS", want: "the mail server does not offer STARTTLS"},
 	{name: "agent token: another meeting read", file: pcAn, from: "if err != nil || meetingID != r.PathValue(\"id\") || !s.app.Live() {", to: "if err != nil || (meetingID != r.PathValue(\"id\") && false) || !s.app.Live() {",
 		pkg: "./internal/server", test: "TestAnAgentTokenReadsOneMeetingsTimeline", want: "want 404"},
-	{name: "no AI: the card says notes with no mail server", file: pcCard, from: "Notes: s.notes != nil}", to: "Notes: true}",
-		pkg: "./internal/server", test: "TestNoModelAndNoMailChangeNothing", want: "the surface changed from the pre-change commit's"},
-	{name: "no AI: the notice's AI clause rewritten with no model", file: pcTr, from: "\tif s.ai != nil {\n\t\tframes := s.ai.visionModel != \"\" && record && s.Recording()\n\t\tn = n.WithAIClause(frames)\n\t}", to: "\tn = n.WithAIClause(false)",
+	{name: "no AI: the notice's AI clause rewritten with no model", file: pcTr, from: "\tif s.ai != nil {\n\t\tframes := s.ai.visionModel != \"\" && record && s.Recording()\n\t\tn = n.WithAIClause(frames)\n\t}", to: "\tn = n.WithAIClause(true)",
 		pkg: "./internal/server", test: "TestNoModelAndNoMailChangeNothing", want: "the surface changed from the pre-change commit's"},
 	{name: "live: the AI switch ignored", file: pcRuns, from: "WHERE state = 'open' AND ai = 1 AND created_at > ?", to: "WHERE state = 'open' AND created_at > ?",
 		pkg: "./internal/server", test: "TestLiveItemsReachTheOwnerAndAnAdmittedGuest", want: "a meeting switched off"},
@@ -1603,8 +1600,19 @@ var mutants = []mutant{
 		pkg: "./internal/items", test: "TestGuardVision", want: "dropped = "},
 	{name: "frames: a note citing a frame not sent kept", file: itVis, from: "\t\tcase !w.hasFrame(n.FrameMS):", to: "\t\tcase false:",
 		pkg: "./internal/items", test: "TestGuardVision", want: "notes kept ="},
-	{name: "summary: an uncited point kept", file: itSum, from: "if p.Text == \"\" || len(p.Segments) == 0 || len(out) >= SummaryMaxPoints {", to: "if p.Text == \"\" || len(out) >= SummaryMaxPoints {",
-		pkg: "./internal/items", test: "TestGuardSummary", want: "summary ="},
+
+	{name: "notes: a removed recipient put back by reprocess", file: pcMail, from: "\tif prevState == DraftRemoved {\n\t\tstate = DraftRemoved\n\t}", to: "\tif false {\n\t\tstate = DraftRemoved\n\t}",
+		pkg: "./internal/store", test: "TestReprocessCarriesRemovedAndEdits", want: "a removed recipient was put back by reprocess"},
+	// Two lines carry an edit: the same items (wholesale) and item by item.
+	{name: "notes: the owner's edits dropped by reprocess", file: pcMail, from: "\tif runItems == orig {\n", to: "\tif false {\n",
+		more: []edit{{pcMail, "\t\t\tapplied[n[i].Text] = true\n\t\t\tn[i] = e\n", "\t\t\tapplied[n[i].Text] = true\n\t\t\t_ = e\n"}},
+		pkg:  "./internal/store", test: "TestReprocessCarriesRemovedAndEdits", want: "Grace's edit was not carried to the same item"},
+	{name: "notes: an address the server cannot take queued forever", file: pcNotes, from: "\t\tcase !NotesAddress(to):\n", to: "\t\tcase false:\n",
+		pkg: "./internal/server", test: "TestAnAddressTheMailServerCannotTakeFailsItsDraft", want: "want failed with the reason the owner reads"},
+	{name: "notes: the card takes an address the server cannot", file: pcCard, from: "if field == \"\" && s.notesFor(r.Context(), card.MeetingID) && !NotesAddress(email) {", to: "if false && card.MeetingID != \"\" {",
+		pkg: "./internal/server", test: "TestAnAddressTheMailServerCannotTakeFailsItsDraft", want: "the card took"},
+	{name: "notes: addresses kept with no mail server", file: pcNotes, from: "\tif boot && s.notes == nil {\n", to: "\tif false && boot {\n",
+		pkg: "./internal/server", test: "TestKeptAddressesAreDroppedWithNoMailServer", want: "card addresses kept with no mail server"},
 
 	// Consent: the notice is what may go to the AI service.
 	{name: "consent: a meeting with AI off reprocessed", file: pcRuns, from: "FROM meetings WHERE id = ? AND state = 'ended' AND ai = 1`", to: "FROM meetings WHERE id = ? AND state = 'ended'`",

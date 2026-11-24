@@ -67,7 +67,7 @@
 // plugin makes no AI call and sends no email, exactly as without them.
 //
 //	OPENROUTER_API_KEY              OpenRouter's key (required unless MEETINGS_ITEMS_MODEL is off or unset)
-//	MEETINGS_ITEMS_MODEL            the action items' (and summary's) model, an OpenRouter slug; unset or off: no analysis
+//	MEETINGS_ITEMS_MODEL            the action items' model, an OpenRouter slug; unset or off: no analysis
 //	MEETINGS_ITEMS_ADAPTER          extract or chat_json (default: derived from the slug)
 //	MEETINGS_ITEMS_PROVIDER_PREFS   OpenRouter's provider object (data_collection "deny" always; a chat_json model needs a pin)
 //	MEETINGS_ITEMS_EVERY            the live window's period (default 10s)

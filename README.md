@@ -34,8 +34,7 @@ one at once. **The notes (optional: only with a model configured,
 action items** on, the call's lines go to an AI service as they are said,
 and the action items it finds appear in an **Action items** panel that you
 and every admitted guest see alike; after End, the whole transcript, the
-frames of a shared screen (with what was said over them) and a summary
-make the meeting's notes in its archive, and with a mail server configured
+frames of a shared screen (with what was said over them) make the meeting's notes in its archive, and with a mail server configured
 you review one email per person (yours, and each guest's who sent the
 card), edit them, and press **Send notes**. Nothing is ever sent by
 itself.
@@ -199,7 +198,7 @@ Read from the environment only; `.env.example` lists them.
 | `MEETINGS_S3_ACCESS_KEY`, `MEETINGS_S3_SECRET_KEY` | with `MEETINGS_S3_ENDPOINT` | a key scoped to that bucket alone; Egress uploads with the same key. Never logged. 🔴 All four or none: some alone refuse to start |
 | `MEETINGS_S3_REGION` | no | the signing region; default `us-east-1` (MinIO's). Set alone it means nothing |
 | `MEETINGS_FFMPEG` | no | the ffmpeg that samples frames from a recording; default `ffmpeg` on `PATH` (the image carries a minimal one). Missing: the timeline still lists frame times, and the frame route answers `503` |
-| `MEETINGS_ITEMS_MODEL` | no | the action items' (and the summary's) model, an OpenRouter slug, e.g. `deepseek/deepseek-v4.1-flash-1017` ([Post-call notes (optional)](#post-call-notes-optional)). Unset or `off`: no AI call, no notes, no email, exactly as before, whatever else is set |
+| `MEETINGS_ITEMS_MODEL` | no | the action items' model, an OpenRouter slug, e.g. `deepseek/deepseek-v4.1-flash-1017` ([Post-call notes (optional)](#post-call-notes-optional)). Unset or `off`: no AI call, no notes, no email, exactly as before, whatever else is set |
 | `OPENROUTER_API_KEY` | with a model | OpenRouter's key. Never logged |
 | `MEETINGS_ITEMS_ADAPTER` | no | `chat_json` or `extract`; default derived from the slug (`scaledown/extract…` is `extract`) |
 | `MEETINGS_ITEMS_PROVIDER_PREFS` | with a `chat_json` model | OpenRouter's `provider` object, e.g. `{"data_collection":"deny","order":["deepinfra/fp8"],"allow_fallbacks":false}`. 🔴 `data_collection` is always `deny` (another value refuses to start), and a chat model must pin its provider (`order` with `allow_fallbacks: false`, or `quantizations`) |
@@ -589,7 +588,7 @@ the pre-recording commit's).
   `X-Recording-Part` and `X-Recording-Offset-Ms`. It runs ffmpeg against the
   store through a loopback range proxy (`internal/frames`), never copying the
   file to disk. With a model configured the bundle also carries
-  `analysis`: the current run and its items, frame notes and summary
+  `analysis`: the current run and its items and frame notes
   ([Post-call notes (optional)](#post-call-notes-optional)). **Memory:** one ffmpeg
   at a time, each with one thread (`-threads 1 -filter_threads 1`): a 1080p
   H.264 frame peaked at **64.5 MiB** that way, against 198 MiB with ffmpeg's
@@ -700,13 +699,17 @@ restart), and the worker runs, in order:
    (same lines) sharpens it (the screen's wording, and its frame), never a
    second item. The post run waits up to 20 minutes for a recording still
    being written;
-3. the summary (chat models only): 3 to 6 points and the decisions, each
-   citing the lines it rests on (an uncited point is dropped), over the
-   transcript's last ~60,000 tokens.
 
-A failed pass is retried (three times, five minutes apart); a pass that
-loses part of the meeting keeps what it found and says "Part of this run
-failed". The finished run becomes the meeting's **current** run.
+A failed pass is tried at most three times, five minutes apart, then
+failed with its reason ("Run again" tries once more): never an endless
+re-spend on the model. A pass that loses part of the meeting keeps what it
+found and says "Part of this run failed". The finished run becomes the
+meeting's **current** run. Every ended meeting with AI action items on
+that has never had a pass gets one, however long ago it ended (so the
+first start after upgrading runs one for each past meeting with the switch
+on; a meeting from before the frame analysis gets no frames, since its
+notice never named them). With AI action items off, a meeting is never
+analysed, reprocessed, or promised notes.
 
 **Reprocessing.** Every run is kept with the models and the provider
 preferences that made it. In the archive, **Run again** queues a new run
@@ -722,12 +725,17 @@ muster-meetings reprocess -from 2026-11-01 -to 2026-11-24 \
   [-vision-model provider/model -vision-prefs '…' | -vision-model off]
 ```
 
-queues one post run per meeting that ended in the range (UTC days, `-to`
+queues one post run per meeting with AI action items on that ended in the
+range (UTC days, `-to`
 inclusive) in the plugin's database; the running plugin's worker runs them
-(within 30 s). 🔴 A reprocess never changes notes already sent: a person
+(within 30 s). One run waits per meeting: a new request replaces one not
+yet started. 🔴 A reprocess never changes notes already sent: a person
 whose email was sent (or is on its way, or may have arrived) keeps it as it
 was, and only the others get new drafts; the archive says how many were
-left alone.
+left alone. A new draft keeps what the owner did to the old one: a person
+taken out (**Don't send**) stays out, and edited items stay edited where
+the new run has the same item; when an edited item is gone, the draft
+takes the new items and says the edits were not carried.
 
 **The emails (owner approves first).** After a run, there is one draft per
 person: the owner, and every guest who sent the card (its address is kept
@@ -740,7 +748,7 @@ Send, and Send needs the owner's address confirmed: on the meetings list,
 stored only as SHA-256, live 24 hours; opening the link changes nothing,
 its button confirms). Each email: thanks, **your** action items in a styled
 block (the items assigned to the name you spoke under; a first name alone
-counts only when no one else has it), everyone else's muted, the summary,
+counts only when no one else has it), everyone else's muted,
 the recording as a link (the share page, its own link per email, working as
 long as the recording is kept; Stop sharing or Delete recording turns it
 off), and the transcript attached as `.txt` and `.vtt` (left off, and said
@@ -748,7 +756,8 @@ so, when the message would pass 7 MB). HTML with a plain-text twin, inline
 styles, no remote image. From `"<owner> via Meetings" <MEETINGS_MAIL_FROM>`,
 Reply-To the owner's confirmed address; Message-ID per draft, so a retry is
 the same message. The outbox retries a deferred send (1 min, 5 min, 15 min,
-1 h, 3 h) and shows each person's state: sent, failed (Try again), or "may
+1 h, 3 h) and shows each person's state: sent, failed (with its reason:
+the owner may fix a guest's address, then Send, or Try again), or "may
 have been sent" when the connection broke after the message was handed over
 (never retried by itself).
 
@@ -760,7 +769,7 @@ it), so the reachable path is a token the owner hands over:
 `timeline_url`. With `Authorization: Bearer mmr_…`,
 `GET /api/agent/meetings/{id}/timeline` is the time-aligned bundle (every
 line with its place in the recording, the screen shares, the frames' times)
-plus the current run's items, frame notes and summary, and
+plus the current run's items and frame notes, and
 `GET /api/agent/meetings/{id}/frame?at=<ms>` one frame. Any other meeting,
 or a token that is unknown or expired, is 404. A native agent path (an agent
 asking muster, muster asking the plugin) needs a muster core change and is
@@ -880,7 +889,7 @@ and only then (otherwise each is the 404 of an unknown path):
 
 | route | does |
 |---|---|
-| `GET /api/meetings/{id}/analysis[?run=<id>]` | the runs (models, provider preferences, state, which is current) and one run's items, frame notes and summary (default: the current run) |
+| `GET /api/meetings/{id}/analysis[?run=<id>]` | the runs (models, provider preferences, state, which is current) and one run's items and frame notes (default: the current run) |
 | `POST /api/meetings/{id}/reprocess` | `{"items_model"?, "items_provider_prefs"?, "vision_model"? (or "off"), "vision_provider_prefs"?}` → `202 {"run"}`; `409` while the meeting is open; another model needs its provider object |
 | `POST /api/meetings/{id}/analysis/runs/{rid}/current` | make a finished run current again → `{"current", "drafts": {"made", "already_sent"}}` |
 | `POST /api/meetings/{id}/agent-token` | `201 {"token": "mmr_…", "expires_at", "timeline_url"}`: read-only, this meeting, 7 days |
@@ -1192,13 +1201,16 @@ recording parts (object key, size, length, state, and the file's start in
 meeting time), its recording gaps, its share links (hashed) and when a
 screen was shared (and by whom, by name); with a model configured each
 analysis run (its models and provider preferences, its state) and what it
-made (action items with their cited line ids, frame notes, the summary),
+made (action items with their cited line ids, frame notes),
 and with a mail server configured the owner's notes address (confirmed, and
 one waiting for its link, whose token is stored only as SHA-256), each
 draft email (the recipient's name, the items as the owner left them, its
 state) and, 🔴 **each card guest's email address**: kept for that meeting's
-notes, and dropped when their notes are sent, and for every meeting
-30 days after it ended whether or not they were; and an audit trail
+notes (only when its AI action items were on and a mail server is
+configured; the card says so), and dropped when their notes are sent, for
+every meeting 30 days after it ended whether or not they were (an hourly
+pass, with or without a mail server), and all at once at a start with no
+mail server configured; and an audit trail
 of what happened, which never holds a code, a token, a display name,
 transcript text or a guest's name. Every owner-facing query goes through one
 repository layer that filters by the session's subject.
@@ -1538,9 +1550,9 @@ phase 4b.
 | `compose.meetings.yml` | the fragment for muster's Compose stack |
 | `deploy/deploy_test.go` | the rendered objects and both LiveKit configs, pinned |
 | `internal/items` | action items: the `extract` and `chat_json` adapters, their OpenRouter client, the guards after the model, the window selection and the worker's loop (`items.Loop`), the post-call pass (`items.PostCall`), `MEETINGS_ITEMS_PROVIDER_PREFS` |
-| `internal/items` (vision, summary) | the frame analysis' adapter and its guards (`items.Vision`, `items.GuardVision`), the summary's (`items.Summarizer`, `items.GuardSummary`) |
+| `internal/items` (vision) | the frame analysis' adapter and its guards (`items.Vision`, `items.GuardVision`) |
 | `internal/mail`, `internal/mailtest` | the notes email (its words, the YOUR/everyone-else split, the MIME message, STARTTLS-only submission) and a fake SMTP server with STARTTLS |
-| `internal/openroutertest` | a fake OpenRouter (items, vision, summary) for the server tests and the e2e harness |
+| `internal/openroutertest` | a fake OpenRouter (items, vision) for the server tests and the e2e harness |
 | `cmd/items-eval`, `testdata/items-eval` | the action-item evaluation (run by hand) and its labelled synthetic corpus, as written and through the real STT |
 | `cmd/items-corpus-stt`, `internal/sttcorpus` | makes the STT corpus (Piper, then the plugin's STT engine; run by hand), its word error rate and its writer |
 | `scripts/mutate` | the security-gate mutation sweep |

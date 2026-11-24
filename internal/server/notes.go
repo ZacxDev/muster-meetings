@@ -48,6 +48,19 @@ const (
 	AddressInvalid   = "Type one email address, like name@example.com."
 )
 
+// The reasons a draft fails before it reaches the mail server.
+const (
+	PhraseBadAddress = "The mail server cannot take this address. Edit it, or don't send."
+	PhraseNotMade    = "The message could not be made."
+)
+
+// NotesAddress is the one rule for an address the notes go to: the card,
+// an edited draft and the outbox all check it (mail.ValidAddress, which is
+// what the message is built with).
+func NotesAddress(a string) bool {
+	return len(a) <= 254 && strings.Contains(a, "@") && mail.ValidAddress(a)
+}
+
 // ConfirmPerHour is the most confirmation emails one owner may ask for in
 // an hour.
 const ConfirmPerHour = 5
@@ -123,10 +136,6 @@ func (s *Server) notesOf(ctx context.Context, repo *store.OwnerRepo, d store.Dra
 	if err != nil {
 		return mail.Notes{}, store.Meeting{}, nil, err
 	}
-	out, err := s.store.Output(ctx, d.RunID)
-	if err != nil {
-		return mail.Notes{}, store.Meeting{}, nil, err
-	}
 	start := m.CreatedAt
 	if m.StartedAt != nil {
 		start = *m.StartedAt
@@ -141,14 +150,6 @@ func (s *Server) notesOf(ctx context.Context, repo *store.OwnerRepo, d store.Dra
 	}
 	for _, it := range d.Items {
 		n.Items = append(n.Items, mail.NoteItem{Text: it.Text, Assignee: it.Assignee, Due: it.Due})
-	}
-	if out.Summary != nil {
-		for _, p := range out.Summary.Points {
-			n.Summary = append(n.Summary, p.Text)
-		}
-		for _, p := range out.Summary.Decisions {
-			n.Decisions = append(n.Decisions, p.Text)
-		}
 	}
 	if s.cfg.S3 != nil {
 		live, until, err := s.store.MailShareLive(ctx, d.ID, s.cfg.Now())
@@ -224,13 +225,22 @@ func (s *Server) handleEditDraft(w http.ResponseWriter, r *http.Request, repo *s
 	var in struct {
 		Items   *[]store.DraftItem `json:"items"`
 		Removed *bool              `json:"removed"`
+		Email   *string            `json:"email"`
 	}
 	if !readJSON(w, r, 64<<10, &in) {
 		return
 	}
-	if in.Items == nil && in.Removed == nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": `send {"items": [...]} and/or {"removed": true}`})
+	if in.Items == nil && in.Removed == nil && in.Email == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": `send {"items": [...]}, {"removed": true} and/or {"email": "…"}`})
 		return
+	}
+	if in.Email != nil {
+		a := strings.TrimSpace(*in.Email)
+		if !NotesAddress(a) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": AddressInvalid, "field": "email"})
+			return
+		}
+		in.Email = &a
 	}
 	if in.Items != nil {
 		if len(*in.Items) > store.MaxDraftItems {
@@ -254,7 +264,11 @@ func (s *Server) handleEditDraft(w http.ResponseWriter, r *http.Request, repo *s
 		}
 		in.Items = &clean
 	}
-	d, err := repo.EditDraft(r.Context(), r.PathValue("id"), r.PathValue("did"), in.Items, in.Removed, s.cfg.Now())
+	d, err := repo.EditDraft(r.Context(), r.PathValue("id"), r.PathValue("did"), in.Items, in.Removed, in.Email, s.cfg.Now())
+	if errors.Is(err, store.ErrNotGuest) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Your own address is the one confirmed in settings."})
+		return
+	}
 	if errors.Is(err, store.ErrDraftLocked) {
 		writeJSON(w, http.StatusConflict, map[string]any{"error": NotesLocked})
 		return
@@ -323,9 +337,6 @@ func (s *Server) runMail(ctx context.Context) {
 		} else if n > 0 {
 			s.cfg.Log.Printf("notes: %d drafts were being sent when the plugin stopped: marked unknown (the owner may retry)", n)
 		}
-		purge := time.NewTicker(time.Hour)
-		defer purge.Stop()
-		s.purgeMail(ctx)
 		for {
 			s.MailPass(ctx)
 			wait := 30 * time.Second
@@ -340,8 +351,6 @@ func (s *Server) runMail(ctx context.Context) {
 				t.Stop()
 				return
 			case <-s.notes.kick:
-			case <-purge.C:
-				s.purgeMail(ctx)
 			case <-t.C:
 			}
 			t.Stop()
@@ -349,7 +358,32 @@ func (s *Server) runMail(ctx context.Context) {
 	}()
 }
 
-func (s *Server) purgeMail(ctx context.Context) {
+// runMailRetention drops kept guest addresses, with or without a mail
+// server: every one at start when none is configured (nothing would send
+// to them), and every hour those MailKeepDays past their meeting.
+func (s *Server) runMailRetention(ctx context.Context) {
+	go func() {
+		s.MailRetention(ctx, true)
+		t := time.NewTicker(time.Hour)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				s.MailRetention(ctx, false)
+			}
+		}
+	}()
+}
+
+// MailRetention is one pass of it; boot is the pass at start.
+func (s *Server) MailRetention(ctx context.Context, boot bool) {
+	if boot && s.notes == nil {
+		if err := s.store.ClearMail(ctx); err != nil {
+			s.cfg.Log.Printf("notes: clearing kept addresses: %v", err)
+		}
+	}
 	if n, err := s.store.PurgeMail(ctx, s.cfg.Now()); err != nil {
 		s.cfg.Log.Printf("notes: purge: %v", err)
 	} else if n > 0 {
@@ -417,17 +451,28 @@ func (s *Server) sendOne(ctx context.Context, o store.OutMail) {
 		s.cfg.Log.Printf("notes: draft %s: failed: no address", o.ID)
 		return
 	}
-	msg, err := s.compose(ctx, o, to)
-	if err != nil {
-		s.cfg.Log.Printf("notes: draft %s: composing: %v", o.ID, err)
-		_ = s.store.MailRetry(ctx, o.ID, now.Add(time.Minute), "the message could not be made", now)
-		return
-	}
-	err = s.cfg.Mail.Send(ctx, to, msg)
 	backoff := s.cfg.MailBackoff
 	if len(backoff) == 0 {
 		backoff = DefaultMailBackoff
 	}
+	msg, err := s.compose(ctx, o, to)
+	if err != nil {
+		// 🔴 Never queued forever: an address the mail server cannot take
+		// fails the draft at once, with a reason the owner reads (they may
+		// edit the address, or not send); any other failure to make the
+		// message counts toward the same cap as a deferred send.
+		s.cfg.Log.Printf("notes: draft %s: composing: %v", o.ID, err)
+		switch {
+		case !NotesAddress(to):
+			_ = s.store.MailDone(ctx, o.ID, store.DraftFailed, PhraseBadAddress, now)
+		case o.Attempts > len(backoff):
+			_ = s.store.MailDone(ctx, o.ID, store.DraftFailed, PhraseNotMade, now)
+		default:
+			_ = s.store.MailRetry(ctx, o.ID, now.Add(backoff[o.Attempts-1]), PhraseNotMade, now)
+		}
+		return
+	}
+	err = s.cfg.Mail.Send(ctx, to, msg)
 	switch mail.ClassOf(err) {
 	case 0:
 		if err != nil { // not a mail.Error: treat as temporary
@@ -521,7 +566,7 @@ func (s *Server) handlePutEmail(w http.ResponseWriter, r *http.Request, repo *st
 		return
 	}
 	addr := strings.TrimSpace(in.Email)
-	if len(addr) > 254 || !mail.ValidAddress(addr) || !strings.Contains(addr, "@") {
+	if !NotesAddress(addr) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": AddressInvalid, "field": "email"})
 		return
 	}

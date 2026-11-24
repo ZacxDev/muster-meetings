@@ -97,18 +97,6 @@ type Note struct {
 	Segments []int64 `json:"segments"`
 }
 
-// Point is a summary point.
-type Point struct {
-	Text     string  `json:"text"`
-	Segments []int64 `json:"segments"`
-}
-
-// Summary is a run's summary.
-type Summary struct {
-	Points    []Point `json:"points"`
-	Decisions []Point `json:"decisions"`
-}
-
 func ints(v []int64) string {
 	if v == nil {
 		v = []int64{}
@@ -230,7 +218,17 @@ func (s *Store) Live(ctx context.Context, meetingID string) (LiveState, error) {
 // with them off its guests were told nothing goes to an AI service, and
 // ErrNotFound is the answer.
 func (s *Store) QueuePost(ctx context.Context, meetingID, itemsModel, itemsPrefs, visionModel, visionPrefs, by string, now time.Time) (int64, error) {
-	res, err := s.db.ExecContext(ctx, `INSERT INTO ai_runs (meeting_id, kind, items_model, items_prefs, vision_model, vision_prefs, state, next_at, requested_by, created_at)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	// One queued run a meeting: a new request replaces one not yet started
+	// (a run already running finishes).
+	if _, err := tx.ExecContext(ctx, `DELETE FROM ai_runs WHERE meeting_id = ? AND kind = 'post' AND state = 'queued'`, meetingID); err != nil {
+		return 0, err
+	}
+	res, err := tx.ExecContext(ctx, `INSERT INTO ai_runs (meeting_id, kind, items_model, items_prefs, vision_model, vision_prefs, state, next_at, requested_by, created_at)
 		SELECT id, 'post', ?, ?, ?, ?, 'queued', ?, ?, ? FROM meetings WHERE id = ? AND state = 'ended' AND ai = 1`,
 		itemsModel, itemsPrefs, visionModel, visionPrefs, ms(now), by, ms(now), meetingID)
 	if err != nil {
@@ -239,19 +237,25 @@ func (s *Store) QueuePost(ctx context.Context, meetingID, itemsModel, itemsPrefs
 	if n, _ := res.RowsAffected(); n == 0 {
 		return 0, ErrNotFound
 	}
-	return res.LastInsertId()
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	return id, tx.Commit()
 }
 
-// QueueEnded queues the post-call pass of every meeting that ended after
-// since with its AI switch on and has none yet: what End (and the sweep, a
-// revocation, a room LiveKit finished) leaves to do. It answers how many.
-func (s *Store) QueueEnded(ctx context.Context, itemsModel, itemsPrefs, visionModel, visionPrefs string, since, now time.Time) (int64, error) {
+// QueueEnded queues the post-call pass of every ended meeting with its AI
+// switch on that has never had one, however long ago it ended: what End
+// (and the sweep, a revocation, a room LiveKit finished, a plugin that was
+// down) leaves to do. A meeting whose pass failed is not queued again by
+// itself (Run again does). It answers how many.
+func (s *Store) QueueEnded(ctx context.Context, itemsModel, itemsPrefs, visionModel, visionPrefs string, now time.Time) (int64, error) {
 	res, err := s.db.ExecContext(ctx, `INSERT INTO ai_runs (meeting_id, kind, items_model, items_prefs, vision_model, vision_prefs, state, next_at, requested_by, created_at)
 		SELECT m.id, 'post', ?, ?, ?, ?, 'queued', ?, 'end', ? FROM meetings m
-		WHERE m.state = 'ended' AND m.ai = 1 AND m.ended_at > ?
+		WHERE m.state = 'ended' AND m.ai = 1
 		AND EXISTS (SELECT 1 FROM segments g WHERE g.meeting_id = m.id AND g.kind = 'text')
 		AND NOT EXISTS (SELECT 1 FROM ai_runs r WHERE r.meeting_id = m.id AND r.kind = 'post')`,
-		itemsModel, itemsPrefs, visionModel, visionPrefs, ms(now), ms(now), ms(since))
+		itemsModel, itemsPrefs, visionModel, visionPrefs, ms(now), ms(now))
 	if err != nil {
 		return 0, err
 	}
@@ -326,6 +330,13 @@ func (s *Store) RetryRun(ctx context.Context, id int64, next time.Time, phrase s
 	return err
 }
 
+// WaitRun puts a running run back in the queue for next without counting
+// the attempt (it waited for its recording, it did not try).
+func (s *Store) WaitRun(ctx context.Context, id int64, next time.Time) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE ai_runs SET state = 'queued', next_at = ?, attempts = max(attempts - 1, 0) WHERE id = ? AND state = 'running'`, ms(next), id)
+	return err
+}
+
 // FailRun ends a run that will not finish.
 func (s *Store) FailRun(ctx context.Context, id int64, phrase string, now time.Time) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE ai_runs SET state = 'failed', error = ?, finished_at = ? WHERE id = ? AND state = 'running'`, phrase, ms(now), id)
@@ -336,7 +347,6 @@ func (s *Store) FailRun(ctx context.Context, id int64, phrase string, now time.T
 type Outcome struct {
 	Items   []NewItem
 	Notes   []Note
-	Summary *Summary
 	Partial bool
 	Phrase  string
 }
@@ -365,13 +375,6 @@ func (s *Store) FinishRun(ctx context.Context, run Run, out Outcome, mail bool, 
 			return RedraftResult{}, err
 		}
 	}
-	if out.Summary != nil {
-		p, _ := json.Marshal(nonNilPoints(out.Summary.Points))
-		d, _ := json.Marshal(nonNilPoints(out.Summary.Decisions))
-		if _, err := tx.ExecContext(ctx, `INSERT INTO ai_summaries (run_id, points, decisions) VALUES (?, ?, ?)`, run.ID, string(p), string(d)); err != nil {
-			return RedraftResult{}, err
-		}
-	}
 	if _, err := tx.ExecContext(ctx, `UPDATE ai_runs SET state = 'done', partial = ?, error = ?, finished_at = ? WHERE id = ?`, out.Partial, out.Phrase, ms(now), run.ID); err != nil {
 		return RedraftResult{}, err
 	}
@@ -388,13 +391,6 @@ func (s *Store) FinishRun(ctx context.Context, run Run, out Outcome, mail bool, 
 func runDetail(id int64, items, notes int) string {
 	b, _ := json.Marshal(map[string]int64{"run": id, "items": int64(items), "notes": int64(notes)})
 	return string(b)
-}
-
-func nonNilPoints(p []Point) []Point {
-	if p == nil {
-		return []Point{}
-	}
-	return p
 }
 
 // makeCurrent makes runID the meeting's current run and, with mail on,
@@ -448,9 +444,8 @@ func (r *OwnerRepo) Run(ctx context.Context, meetingID string, runID int64) (Run
 
 // RunOutput is everything a run made.
 type RunOutput struct {
-	Items   []AIItem `json:"items"`
-	Notes   []Note   `json:"notes"`
-	Summary *Summary `json:"summary"`
+	Items []AIItem `json:"items"`
+	Notes []Note   `json:"notes"`
 }
 
 // Output is a run's output (the run already checked as the owner's).
@@ -475,16 +470,6 @@ func (s *Store) Output(ctx context.Context, runID int64) (RunOutput, error) {
 		out.Notes = append(out.Notes, n)
 	}
 	if err := rows.Err(); err != nil {
-		return RunOutput{}, err
-	}
-	var p, d string
-	err = s.db.QueryRowContext(ctx, `SELECT points, decisions FROM ai_summaries WHERE run_id = ?`, runID).Scan(&p, &d)
-	if err == nil {
-		sum := &Summary{}
-		_ = json.Unmarshal([]byte(p), &sum.Points)
-		_ = json.Unmarshal([]byte(d), &sum.Decisions)
-		out.Summary = sum
-	} else if !errors.Is(err, sql.ErrNoRows) {
 		return RunOutput{}, err
 	}
 	return out, nil

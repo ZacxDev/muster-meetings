@@ -64,15 +64,19 @@ type Draft struct {
 	ApprovedAt *time.Time  `json:"approved_at"`
 	SentAt     *time.Time  `json:"sent_at"`
 	Error      string      `json:"error"`
+	// ItemsChanged says a reprocess (or a revert) made this draft from a
+	// run whose items differ from the ones the owner had edited: the edits
+	// were not carried over.
+	ItemsChanged bool `json:"items_changed"`
 }
 
-const draftCols = `d.id, d.meeting_id, d.run_id, d.recipient, d.name, coalesce(d.email, ''), d.items, d.state, d.attempts, d.approved_at, d.sent_at, d.error`
+const draftCols = `d.id, d.meeting_id, d.run_id, d.recipient, d.name, coalesce(d.email, ''), d.items, d.state, d.attempts, d.approved_at, d.sent_at, d.error, d.changed`
 
 func scanDraft(sc interface{ Scan(...any) error }) (Draft, error) {
 	var d Draft
 	var items string
 	var appr, sent sql.NullInt64
-	err := sc.Scan(&d.ID, &d.MeetingID, &d.RunID, &d.Recipient, &d.Name, &d.Email, &items, &d.State, &d.Attempts, &appr, &sent, &d.Error)
+	err := sc.Scan(&d.ID, &d.MeetingID, &d.RunID, &d.Recipient, &d.Name, &d.Email, &items, &d.State, &d.Attempts, &appr, &sent, &d.Error, &d.ItemsChanged)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Draft{}, ErrNotFound
 	}
@@ -172,6 +176,10 @@ func redraft(ctx context.Context, tx *sql.Tx, meetingID string, runID int64, now
 		if sent[r.key] {
 			continue
 		}
+		state, its, changed, err := carry(ctx, tx, meetingID, r.key, items)
+		if err != nil {
+			return RedraftResult{}, err
+		}
 		if _, err := tx.ExecContext(ctx, `UPDATE mail_drafts SET state = 'superseded', updated_at = ? WHERE meeting_id = ? AND recipient = ? AND state IN ('draft', 'removed', 'failed')`,
 			ms(now), meetingID, r.key); err != nil {
 			return RedraftResult{}, err
@@ -180,13 +188,74 @@ func redraft(ctx context.Context, tx *sql.Tx, meetingID string, runID int64, now
 		if r.key != RecipientOwner {
 			email = r.email
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO mail_drafts (id, meeting_id, run_id, recipient, name, email, items, state, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)`, random(DraftIDBytes), meetingID, runID, r.key, r.name, email, items, ms(now), ms(now)); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO mail_drafts (id, meeting_id, run_id, recipient, name, email, items, state, changed, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, random(DraftIDBytes), meetingID, runID, r.key, r.name, email, its, state, changed, ms(now), ms(now)); err != nil {
 			return RedraftResult{}, err
 		}
 		res.Made++
 	}
 	return res, nil
+}
+
+// carry is what a recipient's new draft takes from their newest unsent one
+// (read BEFORE it is superseded): 🔴 "Don't send" stays (a guest the owner
+// took out is not put back), and the owner's edits stay when they still
+// apply. Edits apply item by item to the new run's items with the same text
+// as an item the owner edited; when an edited item is gone, or the owner
+// added or removed items and the run's items differ, the new run's items
+// are taken as they are and changed says so (the archive shows it).
+func carry(ctx context.Context, tx *sql.Tx, meetingID, rcpt, runItems string) (state, items string, changed bool, err error) {
+	var prevItems, prevState string
+	var prevRun int64
+	err = tx.QueryRowContext(ctx, `SELECT items, state, run_id FROM mail_drafts WHERE meeting_id = ? AND recipient = ? AND state IN ('draft', 'removed', 'failed')
+		ORDER BY rowid DESC LIMIT 1`, meetingID, rcpt).Scan(&prevItems, &prevState, &prevRun)
+	if errors.Is(err, sql.ErrNoRows) {
+		return DraftDraft, runItems, false, nil
+	}
+	if err != nil {
+		return "", "", false, err
+	}
+	state = DraftDraft
+	if prevState == DraftRemoved {
+		state = DraftRemoved
+	}
+	orig, err := runDraftItems(ctx, tx, prevRun)
+	if err != nil {
+		return "", "", false, err
+	}
+	if prevItems == orig {
+		return state, runItems, false, nil // no edit to carry
+	}
+	if runItems == orig {
+		return state, prevItems, false, nil // the same items: the edits stand as they are
+	}
+	var o, p, n []DraftItem
+	_ = json.Unmarshal([]byte(orig), &o)
+	_ = json.Unmarshal([]byte(prevItems), &p)
+	_ = json.Unmarshal([]byte(runItems), &n)
+	if len(o) != len(p) {
+		return state, runItems, true, nil
+	}
+	edited := map[string]DraftItem{}
+	for i := range o {
+		if o[i] != p[i] {
+			edited[o[i].Text] = p[i]
+		}
+	}
+	applied := map[string]bool{}
+	for i := range n {
+		if e, ok := edited[n[i].Text]; ok {
+			applied[n[i].Text] = true
+			n[i] = e
+		}
+	}
+	for t := range edited {
+		if !applied[t] {
+			changed = true
+		}
+	}
+	b, _ := json.Marshal(n)
+	return state, string(b), changed, nil
 }
 
 // DraftFor makes the draft of one guest whose card arrived after the
@@ -266,9 +335,14 @@ var ErrDraftLocked = errors.New("the notes were already sent, or are on their wa
 // MaxDraftItems bounds a draft's items.
 const MaxDraftItems = 100
 
-// EditDraft changes a draft's items and whether it is removed. Only a draft
-// (or a removed one) changes.
-func (r *OwnerRepo) EditDraft(ctx context.Context, meetingID, id string, items *[]DraftItem, removed *bool, now time.Time) (Draft, error) {
+// ErrNotGuest is an address edit on the owner's own draft (the owner's
+// address is the confirmed one).
+var ErrNotGuest = errors.New("only a guest's address is edited here")
+
+// EditDraft changes a draft's items, whether it is removed, and (a guest's)
+// its address. Only a draft, a removed one or a failed one changes; a failed
+// one edited is a draft again, for the owner to Send.
+func (r *OwnerRepo) EditDraft(ctx context.Context, meetingID, id string, items *[]DraftItem, removed *bool, email *string, now time.Time) (Draft, error) {
 	if !ValidDraftID(id) {
 		return Draft{}, ErrNotFound
 	}
@@ -285,12 +359,25 @@ func (r *OwnerRepo) EditDraft(ctx context.Context, meetingID, id string, items *
 	if err != nil {
 		return Draft{}, err
 	}
-	if d.State != DraftDraft && d.State != DraftRemoved {
+	if d.State != DraftDraft && d.State != DraftRemoved && d.State != DraftFailed {
 		return Draft{}, ErrDraftLocked
+	}
+	if email != nil && d.Recipient == RecipientOwner {
+		return Draft{}, ErrNotGuest
+	}
+	if d.State == DraftFailed {
+		if _, err := tx.ExecContext(ctx, `UPDATE mail_drafts SET state = 'draft', attempts = 0, error = '', updated_at = ? WHERE id = ?`, ms(now), id); err != nil {
+			return Draft{}, err
+		}
 	}
 	if items != nil {
 		b, _ := json.Marshal(*items)
-		if _, err := tx.ExecContext(ctx, `UPDATE mail_drafts SET items = ?, updated_at = ? WHERE id = ?`, string(b), ms(now), id); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE mail_drafts SET items = ?, changed = 0, updated_at = ? WHERE id = ?`, string(b), ms(now), id); err != nil {
+			return Draft{}, err
+		}
+	}
+	if email != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE mail_drafts SET email = ?, updated_at = ? WHERE id = ?`, *email, ms(now), id); err != nil {
 			return Draft{}, err
 		}
 	}

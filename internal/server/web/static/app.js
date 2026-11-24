@@ -374,7 +374,7 @@
       .then(function () { b.disabled = false; });
   });
 
-  // ---- the archive's notes: summary, action items, screen notes, runs,
+  // ---- the archive's notes: action items, screen notes, runs,
   // and the drafts of the email (only with a model configured) ----
   var notes = (function () {
     var meeting = null, runID = 0, poll = null, cur = null;
@@ -404,7 +404,7 @@
       else if (shown && shown.state === 'failed') state('This run failed: ' + shown.error);
       else if (shown && shown.partial) state('Part of this run failed: ' + shown.error);
       else state('');
-      var o = v.output || { items: [], notes: [], summary: null };
+      var o = v.output || { items: [], notes: [] };
       var list = $('archive-items');
       list.textContent = '';
       o.items.forEach(function (it) {
@@ -418,13 +418,6 @@
         list.appendChild(li);
       });
       $('archive-items-empty').hidden = o.items.length > 0 || !v.run;
-      var pts = $('summary-points');
-      pts.textContent = '';
-      if (o.summary) {
-        o.summary.points.forEach(function (p) { pts.appendChild(el('li', '', p.text)); });
-        o.summary.decisions.forEach(function (p) { var li = el('li', ''); li.appendChild(el('strong', '', 'Decided: ')); li.appendChild(document.createTextNode(p.text)); pts.appendChild(li); });
-      }
-      $('summary-box').hidden = pts.children.length === 0;
       var fn = $('frame-notes');
       fn.textContent = '';
       o.notes.forEach(function (n) { var li = el('li', ''); li.appendChild(el('span', 'when', MeetingsCall.clock(n.frame_ms))); li.appendChild(document.createTextNode(n.text)); fn.appendChild(li); });
@@ -529,7 +522,22 @@
         head.appendChild(chip);
       }
       c.appendChild(head);
-      var editable = d.state === 'draft';
+      // A failed draft is editable (its address, its items), and is a draft
+      // again once edited.
+      var editable = d.state === 'draft' || d.state === 'failed';
+      if (d.state === 'failed' && d.error) c.appendChild(el('p', 'mu-help draft__error', d.error));
+      if (d.items_changed) c.appendChild(el('p', 'mu-help draft__changed', 'The notes were made again and their items changed, so your edits were not carried over.'));
+      if (editable && d.recipient !== 'owner') {
+        var addr = el('input', 'mu-input draft__email');
+        addr.type = 'email';
+        addr.value = d.email || '';
+        addr.setAttribute('aria-label', 'Email address of ' + d.name);
+        addr.addEventListener('change', function () {
+          api('PATCH', path(m, '/' + encodeURIComponent(d.id)), { email: addr.value.trim() }).then(function () { load(m); })
+            .catch(function (e) { if (token) UI.toast(e.message, { kind: 'error' }); });
+        });
+        c.appendChild(addr);
+      }
       var rows = el('div', 'draft__rows');
       function save() {
         var items = Array.prototype.map.call(rows.querySelectorAll('.draft__row'), function (r) {

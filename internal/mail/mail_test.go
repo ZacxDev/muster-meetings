@@ -65,7 +65,7 @@ func fixtureNotes() mail.Notes {
 			{Text: "Book the caterer", Assignee: "Ada L."},
 			{Text: "Draft the agenda <b>now</b>", Assignee: "Grace K."},
 		},
-		Names: names, Summary: []string{"The venue is down to two."}, Decisions: []string{"Hold it in March."},
+		Names:    names,
 		VideoURL: "https://meet.example.test/r/TOKEN", VideoUntil: "until 24 Dec 2026", Attached: true}
 }
 
@@ -84,10 +84,6 @@ YOUR ACTION ITEMS
 EVERYONE ELSE'S ACTION ITEMS
   - Ada L.: Book the caterer
   - Grace K.: Draft the agenda <b>now</b>
-
-SUMMARY
-  - The venue is down to two.
-  - Decided: Hold it in March.
 
 Watch the recording (until 24 Dec 2026):
 https://meet.example.test/r/TOKEN

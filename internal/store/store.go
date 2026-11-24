@@ -43,7 +43,7 @@ var ErrNotFound = errors.New("not found")
 
 // migrations are applied in order; PRAGMA user_version counts those done.
 // Never edit one that has shipped: add the next. Later phases add
-// participants, segments, action items, recordings, summaries and the
+// participants, segments, action items, recordings and the
 // owner's settings as their own migrations.
 var migrations = []string{
 	// 1: the 2a core.
@@ -281,13 +281,13 @@ var migrations = []string{
 	) STRICT;
 	CREATE INDEX screen_shares_meeting ON screen_shares (meeting_id, start_ms);`,
 
-	// 7: the post-call pass (design: "Action items", "Summary"; decisions
+	// 7: the post-call pass (design: "Action items"; decisions
 	// 1–4 and 7). ai_runs is one row per analysis of a meeting: the live
 	// worker's (kind live, one per meeting) and every post-call pass (kind
 	// post: at End, and each reprocess), with the models and provider
 	// preferences that made it; exactly one run per meeting is CURRENT (the
 	// newest finished one, or the one the owner reverted to). ai_items,
-	// ai_notes and ai_summaries are what a run made, each citing transcript
+	// ai_items and ai_notes are what a run made, each citing transcript
 	// segment ids (and frame times). mail_drafts is one email per recipient
 	// per run; 🔴 a recipient has at most ONE row queued, sending, sent or
 	// of unknown outcome per meeting (mail_drafts_one_send), so nothing a
@@ -356,11 +356,6 @@ var migrations = []string{
 		segments TEXT    NOT NULL
 	) STRICT;
 	CREATE INDEX ai_notes_run ON ai_notes (run_id, frame_ms);
-	CREATE TABLE ai_summaries (
-		run_id    INTEGER PRIMARY KEY REFERENCES ai_runs (id),
-		points    TEXT    NOT NULL, -- JSON [{text, segments}]
-		decisions TEXT    NOT NULL
-	) STRICT;
 	CREATE TABLE mail_drafts (
 		id          TEXT    PRIMARY KEY,           -- random; the Message-ID's local part
 		meeting_id  TEXT    NOT NULL REFERENCES meetings (id),
@@ -375,6 +370,7 @@ var migrations = []string{
 		approved_at INTEGER,
 		sent_at     INTEGER,
 		error       TEXT    NOT NULL DEFAULT '',   -- a fixed phrase and a reply code
+		changed     INTEGER NOT NULL DEFAULT 0 CHECK (changed IN (0, 1)), -- a reprocess changed the items the owner had edited
 		created_at  INTEGER NOT NULL,
 		updated_at  INTEGER NOT NULL
 	) STRICT;

@@ -159,7 +159,7 @@ type Config struct {
 	// DefaultRetentionEvery (1 h).
 	RetentionEvery time.Duration
 
-	// AI is the action items, the frame analysis and the summary
+	// AI is the action items and the frame analysis
 	// (OPENROUTER_API_KEY, MEETINGS_ITEMS_*, MEETINGS_VISION_*;
 	// analysis.go), or nil. 🔴 nil is meetings exactly as before them: no
 	// worker, no route, no event, no AI call (TestNoModelAndNoMailChangeNothing).

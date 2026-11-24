@@ -31,8 +31,6 @@ type Notes struct {
 	// Names is every speaker name in the meeting, for Yours' first-name
 	// rule.
 	Names      []string
-	Summary    []string
-	Decisions  []string
 	VideoURL   string
 	VideoUntil string // e.g. "until 24 Dec 2026"; "" for no end
 	// Attached says the transcript is attached; false when it was too
@@ -158,10 +156,6 @@ YOUR ACTION ITEMS
 {{end}}{{if .Others}}
 EVERYONE ELSE'S ACTION ITEMS
 {{range .Others}}  - {{who .Assignee}}: {{.Text}}{{due .Due}}
-{{end}}{{end}}{{if or .Summary .Decisions}}
-SUMMARY
-{{range .Summary}}  - {{.}}
-{{end}}{{range .Decisions}}  - Decided: {{.}}
 {{end}}{{end}}{{if .VideoURL}}
 Watch the recording{{if .VideoUntil}} ({{.VideoUntil}}){{end}}:
 {{.VideoURL}}
@@ -186,10 +180,6 @@ var htmlNotes = htmltemplate.Must(htmltemplate.New("h").Funcs(funcs).Parse(`<!do
 {{if .Others}}<div id="others" style="margin-top:20px;color:#6e7781;font-size:14px;">
 <p style="margin:0 0 6px;font-size:12px;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;color:#8c959f;">Everyone else&#39;s action items</p>
 <ul style="margin:0;padding-left:20px;">{{range .Others}}<li style="margin:3px 0;">{{who .Assignee}}: {{.Text}}{{due .Due}}</li>{{end}}</ul>
-</div>{{end}}
-{{if or .Summary .Decisions}}<div id="summary" style="margin-top:20px;">
-<p style="margin:0 0 6px;font-size:12px;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;color:#57606a;">Summary</p>
-<ul style="margin:0;padding-left:20px;">{{range .Summary}}<li style="margin:3px 0;">{{.}}</li>{{end}}{{range .Decisions}}<li style="margin:3px 0;"><strong>Decided:</strong> {{.}}</li>{{end}}</ul>
 </div>{{end}}
 {{if .VideoURL}}<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-top:24px;"><tr><td style="background-color:#2f6fdf;border-radius:8px;"><a href="{{.VideoURL}}" style="display:inline-block;padding:10px 18px;font-weight:600;color:#ffffff;text-decoration:none;">&#9654;&nbsp; Watch the recording</a></td></tr></table>
 {{if .VideoUntil}}<p style="margin:6px 0 0;font-size:13px;color:#6e7781;">The link works {{.VideoUntil}}.</p>{{end}}{{end}}

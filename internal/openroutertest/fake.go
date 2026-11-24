@@ -1,15 +1,12 @@
 // Package openroutertest is a fake OpenRouter for the plugin's tests and the
-// e2e harness: one chat completions route that tells the three requests the
+// e2e harness: one chat completions route that tells the two requests the
 // plugin makes apart by their system message (the action items, the frame
-// analysis, the summary), records every request, and answers what its
-// scripts say. The default scripts are deterministic and read the request:
+// analysis), records every request, and answers what its scripts say. The default scripts are deterministic and read the request:
 //
 //   - items: every segment whose text holds "I will " or "I'll " is an item
 //     ("<the rest of the line>", owner the speaker), citing that segment;
 //   - vision: one note per frame ("Frame at <ms> ms: the screen shows the
-//     shared document.") citing the excerpt's first segment, and no item;
-//   - summary: the first three segments, each a point citing itself, and
-//     no decision.
+//     shared document.") citing the excerpt's first segment, and no item.
 package openroutertest
 
 import (
@@ -26,9 +23,8 @@ import (
 
 // Kinds of request.
 const (
-	KindItems   = "items"
-	KindVision  = "vision"
-	KindSummary = "summary"
+	KindItems  = "items"
+	KindVision = "vision"
 )
 
 // Request is one request the fake received.
@@ -136,8 +132,6 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		kind = KindItems
 	case items.VisionSystem:
 		kind = KindVision
-	case items.SummarySystem:
-		kind = KindSummary
 	}
 	var doc Doc
 	images := 0
@@ -215,16 +209,6 @@ var defaults = map[string]func(Doc) Reply{
 			notes = append(notes, map[string]any{"frame_ms": ms, "note": fmt.Sprintf("Frame at %d ms: the screen shows the shared document.", ms), "segment_ids": orEmpty(cite)})
 		}
 		return Reply{Content: JSON(map[string]any{"frames": notes, "items": []any{}})}
-	},
-	KindSummary: func(d Doc) Reply {
-		pts := []map[string]any{}
-		for i, s := range d.Segments {
-			if i == 3 {
-				break
-			}
-			pts = append(pts, map[string]any{"text": s.Speaker + " said: " + s.Text, "segment_ids": []int64{s.ID}})
-		}
-		return Reply{Content: JSON(map[string]any{"points": pts, "decisions": []any{}})}
 	},
 }
 

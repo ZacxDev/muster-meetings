@@ -1,7 +1,7 @@
 package server_test
 
 // The post-call feature, end to end through the server, against a fake
-// OpenRouter (items, vision, summary) and a fake SMTP server: the live
+// OpenRouter (items, vision) and a fake SMTP server: the live
 // items, the post run at End, the drafts, the owner's confirmed address,
 // Send and the exact message each recipient gets, reprocess and revert,
 // owner scoping on every new route, and the log.
@@ -9,6 +9,7 @@ package server_test
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -234,9 +235,6 @@ type analysisAns struct {
 			Text     string  `json:"text"`
 			Segments []int64 `json:"segments"`
 		} `json:"notes"`
-		Summary *struct {
-			Points []struct{ Text string } `json:"points"`
-		} `json:"summary"`
 	} `json:"output"`
 }
 
@@ -399,8 +397,8 @@ func TestEndRunsThePostCallPassAndDraftsTheOwnerAndTheCardGuest(t *testing.T) {
 	if a.Output == nil || len(a.Output.Items) != 2 || a.Output.Items[0].Assignee != "Ada L." || a.Output.Items[1].Assignee != grace || a.Output.Items[1].Source != "transcript" {
 		t.Fatalf("output = %+v", a.Output)
 	}
-	if a.Output.Summary == nil || len(a.Output.Summary.Points) != 2 {
-		t.Errorf("summary = %+v", a.Output.Summary)
+	if n := len(e.or.Requests()); n != 1 {
+		t.Errorf("%d model calls for a meeting with no screen share, want the items pass's 1", n)
 	}
 	ds := e.drafts(c)
 	var got []string
@@ -631,7 +629,7 @@ func TestReprocessMakesANewCurrentRunAndLeavesSentNotesAlone(t *testing.T) {
 	if second.Current == nil || *second.Current == *first.Current || second.Output.Items[0].Text != "Confirm the date" {
 		t.Fatalf("after reprocess: current %v (was %v), output %+v", second.Current, *first.Current, second.Output)
 	}
-	if e.or.Requests()[len(e.or.Requests())-2].Model != "z-ai/glm-5-20261001" {
+	if e.or.Requests()[len(e.or.Requests())-1].Model != "z-ai/glm-5-20261001" {
 		t.Errorf("the reprocess did not use its model")
 	}
 	after := e.drafts(c)
@@ -892,6 +890,82 @@ func TestAMeetingWithAIOffIsNeverSentToTheAIService(t *testing.T) {
 	e.dbQuery(`SELECT count(*) FROM participants WHERE card_email IS NOT NULL`).Scan(&kept)
 	if kept != 0 {
 		t.Errorf("%d card addresses kept for a meeting with no notes", kept)
+	}
+}
+
+// badAddr is one contacts' rule takes and the mail server's does not.
+const badAddr = "grace..h@example.test"
+
+// write runs one statement on the env's database through a connection of
+// its own (WAL: the server's connection is not disturbed).
+func (e *env) write(q string, args ...any) {
+	e.t.Helper()
+	db, err := sql.Open("sqlite", "file:"+e.dbPath+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(q, args...); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+// 🔴 An address the mail server cannot take fails its draft at once, with
+// a reason the owner reads; the owner fixes it and sends. The card refuses
+// such an address while the notes are on (one rule, both sides).
+func TestAnAddressTheMailServerCannotTakeFailsItsDraft(t *testing.T) {
+	if _, _, field := server.CardFields(grace, badAddr); field != "" {
+		t.Fatalf("the positive control: contacts' rule refuses %q too (field %q), so this test proves nothing", badAddr, field)
+	}
+	e := pcEnv(t, false)
+	c := e.meeting(ada)
+	e.started(c)
+	_, gs := e.inCall(c, grace)
+	e.end(c)
+	ev := endedOf(t, gs)
+	resp, raw := e.do("POST", "/card", "", map[string]string{"id": ev.Card.ID, "name": grace, "email": badAddr})
+	if resp.StatusCode != 400 || !strings.Contains(string(raw), `"field":"email"`) {
+		t.Fatalf("the card took %q with the notes on: %d %s", badAddr, resp.StatusCode, raw)
+	}
+
+	c = e.fixture()
+	e.postDone(c, 1)
+	e.confirmOwner(c)
+	e.write(`UPDATE mail_drafts SET email = ? WHERE recipient != 'owner'`, badAddr)
+	if resp, raw := e.do("POST", "/api/meetings/"+c.ID+"/drafts/send", c.Sess, map[string]any{}); !strings.Contains(string(raw), `"queued":2`) {
+		t.Fatalf("send = %d %s", resp.StatusCode, raw)
+	}
+	e.server.MailPass(context.Background())
+	var st, why string
+	e.dbQuery(`SELECT state, error FROM mail_drafts WHERE recipient != 'owner' AND state != 'superseded'`).Scan(&st, &why)
+	if st != "failed" || why != server.PhraseBadAddress {
+		t.Fatalf("the bad address's draft = %s %q, want failed with the reason the owner reads", st, why)
+	}
+	ds := e.drafts(c)
+	if resp, raw := e.do("PATCH", "/api/meetings/"+c.ID+"/drafts/"+ds[1].ID, c.Sess, map[string]any{"email": badAddr}); resp.StatusCode != 400 {
+		t.Errorf("an edit to the bad address = %d %s", resp.StatusCode, raw)
+	}
+	if resp, raw := e.do("PATCH", "/api/meetings/"+c.ID+"/drafts/"+ds[1].ID, c.Sess, map[string]any{"email": graceAddr}); resp.StatusCode != 200 || !strings.Contains(string(raw), `"state":"draft"`) {
+		t.Fatalf("fixing the address = %d %s", resp.StatusCode, raw)
+	}
+	if resp, raw := e.do("POST", "/api/meetings/"+c.ID+"/drafts/send", c.Sess, map[string]any{}); !strings.Contains(string(raw), `"queued":1`) {
+		t.Fatalf("send again = %d %s", resp.StatusCode, raw)
+	}
+	eventually(t, 10*time.Second, "Grace's sent", func() bool { return e.drafts(c)[1].State == "sent" })
+}
+
+// 🔴 With no mail server, every kept guest address is dropped at start (and
+// the 30-day purge runs either way).
+func TestKeptAddressesAreDroppedWithNoMailServer(t *testing.T) {
+	e := newEnv(t)
+	c := e.meeting(ada)
+	e.knock(c.Code, grace)
+	e.write(`UPDATE participants SET card_email = ?`, graceAddr)
+	e.server.MailRetention(context.Background(), true)
+	var kept int
+	e.dbQuery(`SELECT count(*) FROM participants WHERE card_email IS NOT NULL`).Scan(&kept)
+	if kept != 0 {
+		t.Errorf("%d card addresses kept with no mail server after the start's pass", kept)
 	}
 }
 

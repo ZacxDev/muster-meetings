@@ -122,19 +122,3 @@ func TestVisionRequestAndAnswer(t *testing.T) {
 		t.Error("a vision model with no provider pin was accepted")
 	}
 }
-
-// 🔴 The summary keeps only points citing lines of the meeting.
-func TestGuardSummary(t *testing.T) {
-	segs := []items.Segment{{ID: 1, Text: "a"}, {ID: 2, Text: "b"}}
-	got := items.GuardSummary(segs, items.Summary{
-		Points:    []items.Point{{Text: "cited", Segments: []int64{1}}, {Text: "uncited"}, {Text: "elsewhere", Segments: []int64{1, 9}}, {Text: " ", Segments: []int64{2}}},
-		Decisions: []items.Point{{Text: "decided", Segments: []int64{2}}},
-	})
-	b, _ := json.Marshal(got)
-	if string(b) != `{"points":[{"text":"cited","segments":[1]}],"decisions":[{"text":"decided","segments":[2]}]}` {
-		t.Errorf("summary = %s", b)
-	}
-	if in := items.SummaryInput([]items.Segment{{ID: 1, Text: strings.Repeat("x", items.SummaryMaxChars)}, {ID: 2, Text: "end"}}); len(in) != 1 || in[0].ID != 2 {
-		t.Errorf("summary input of a long meeting = %d segments", len(in))
-	}
-}

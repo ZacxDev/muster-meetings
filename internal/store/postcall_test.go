@@ -162,7 +162,7 @@ func TestApproveQueuesDraftsAndNotTheRemoved(t *testing.T) {
 	confirm(t, s, r)
 	ds, _ := r.Drafts(ctx, id)
 	yes := true
-	if _, err := r.EditDraft(ctx, id, ds[2].ID, nil, &yes, t0); err != nil {
+	if _, err := r.EditDraft(ctx, id, ds[2].ID, nil, &yes, nil, t0); err != nil {
 		t.Fatal(err)
 	}
 	n, err := r.Approve(ctx, id, nil, t0, nil)
@@ -173,7 +173,7 @@ func TestApproveQueuesDraftsAndNotTheRemoved(t *testing.T) {
 	if st["owner"][0] != "queued" || st[pidGrace][0] != "queued" || st[pidLinus][0] != "removed" {
 		t.Errorf("states = %v", st)
 	}
-	if _, err := r.EditDraft(ctx, id, ds[1].ID, &[]store.DraftItem{}, nil, t0); !errors.Is(err, store.ErrDraftLocked) {
+	if _, err := r.EditDraft(ctx, id, ds[1].ID, &[]store.DraftItem{}, nil, nil, t0); !errors.Is(err, store.ErrDraftLocked) {
 		t.Errorf("editing a queued draft = %v, want ErrDraftLocked", err)
 	}
 }
@@ -268,7 +268,7 @@ func TestRunsAndDraftsAreTheOwnersAlone(t *testing.T) {
 		t.Errorf("another owner's SetCurrent = %v", err)
 	}
 	ds, _ := r.Drafts(ctx, id)
-	if _, err := other.EditDraft(ctx, id, ds[0].ID, &[]store.DraftItem{}, nil, t0); !errors.Is(err, store.ErrNotFound) {
+	if _, err := other.EditDraft(ctx, id, ds[0].ID, &[]store.DraftItem{}, nil, nil, t0); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("another owner's EditDraft = %v", err)
 	}
 	confirm(t, s, other)
@@ -334,5 +334,53 @@ func TestGuestAddressesArePurgedAfterTheKeep(t *testing.T) {
 	confirm(t, s, r)
 	if n, _ := r.Approve(ctx, id, nil, t0, nil); n != 1 { // the owner's only
 		t.Errorf("approve after purge queued %d, want the owner's 1", n)
+	}
+}
+
+// 🔴 A reprocess keeps "Don't send" and the owner's edits: a removed guest
+// stays removed, an edit carries to the new run's item with the same text,
+// and when an edited item is gone the draft takes the new items and says
+// the edits were not carried.
+func TestReprocessCarriesRemovedAndEdits(t *testing.T) {
+	s, _ := open(t)
+	r := owner(t, s, subA, t0)
+	id, _ := ended(t, s, r)
+	ds, _ := r.Drafts(ctx, id)
+	yes := true
+	edit := []store.DraftItem{{Text: "Send the shortlist", Assignee: "Linus T.", Due: "Friday"}}
+	if _, err := r.EditDraft(ctx, id, ds[1].ID, &edit, nil, nil, t0); err != nil { // Grace's
+		t.Fatal(err)
+	}
+	if _, err := r.EditDraft(ctx, id, ds[2].ID, nil, &yes, nil, t0); err != nil { // Linus: don't send
+		t.Fatal(err)
+	}
+	byRcpt := func() map[string]store.Draft {
+		ds, _ := r.Drafts(ctx, id)
+		out := map[string]store.Draft{}
+		for _, d := range ds {
+			out[d.Recipient] = d
+		}
+		return out
+	}
+	postRun(t, s, id, "model/b", []store.NewItem{
+		{Source: store.SrcTranscript, Text: "Send the shortlist", Assignee: "Grace H.", Segments: []int64{1}},
+		{Source: store.SrcTranscript, Text: "Book the venue", Assignee: "Ada L.", Segments: []int64{2}}})
+	d := byRcpt()
+	if d[pidLinus].State != store.DraftRemoved {
+		t.Errorf("a removed recipient was put back by reprocess: %+v", d[pidLinus])
+	}
+	if len(d[pidGrace].Items) != 2 || d[pidGrace].Items[0] != edit[0] || d[pidGrace].Items[1].Text != "Book the venue" || d[pidGrace].ItemsChanged {
+		t.Errorf("Grace's edit was not carried to the same item: %+v", d[pidGrace])
+	}
+	if d["owner"].Items[0].Assignee != "Grace H." || d["owner"].ItemsChanged {
+		t.Errorf("the owner's unedited draft: %+v", d["owner"])
+	}
+	postRun(t, s, id, "model/c", []store.NewItem{{Source: store.SrcTranscript, Text: "Confirm the date", Assignee: "Ada L.", Segments: []int64{1}}})
+	d = byRcpt()
+	if !d[pidGrace].ItemsChanged || len(d[pidGrace].Items) != 1 || d[pidGrace].Items[0].Text != "Confirm the date" {
+		t.Errorf("an edit whose item is gone: %+v, want the new items flagged", d[pidGrace])
+	}
+	if d[pidLinus].State != store.DraftRemoved {
+		t.Errorf("removed lost on the second reprocess: %+v", d[pidLinus])
 	}
 }

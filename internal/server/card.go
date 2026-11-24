@@ -200,7 +200,8 @@ func (s *Server) handleCard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := s.cfg.Now()
-	if _, err := s.store.CardByID(r.Context(), in.ID, now); errors.Is(err, store.ErrNotFound) {
+	card, err := s.store.CardByID(r.Context(), in.ID, now)
+	if errors.Is(err, store.ErrNotFound) {
 		guestErr(w, http.StatusNotFound, CardExpired)
 		return
 	} else if err != nil {
@@ -209,6 +210,11 @@ func (s *Server) handleCard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name, email, field := CardFields(in.Name, in.Email)
+	// With the notes on, the address must also be one the mail server
+	// takes (NotesAddress, the outbox's own rule).
+	if field == "" && s.notesFor(r.Context(), card.MeetingID) && !NotesAddress(email) {
+		field = "email"
+	}
 	if field != "" {
 		msg := CardEmailError
 		if field == "name" {

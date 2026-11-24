@@ -865,10 +865,11 @@ func TestAMeetingWithAIOffIsNeverSentToTheAIService(t *testing.T) {
 	}
 	e.server.LiveTick(context.Background())
 	e.end(c)
-	ev := endedOf(t, s)
-	raw, _ := json.Marshal(ev.Card)
-	if ev.Card == nil || strings.Contains(string(raw), "notes") {
-		t.Fatalf("card = %s: want a card that promises no notes", raw)
+	raw := s.want("ended").Data
+	var ev endedEv
+	json.Unmarshal([]byte(raw), &ev)
+	if ev.Card == nil || strings.Contains(raw, `"notes"`) {
+		t.Fatalf("ended = %s: want a card that promises no notes", raw)
 	}
 	if resp, raw := e.do("POST", "/card", "", map[string]string{"id": ev.Card.ID, "name": grace, "email": graceAddr}); resp.StatusCode != 200 {
 		t.Fatalf("card = %d %s", resp.StatusCode, raw)

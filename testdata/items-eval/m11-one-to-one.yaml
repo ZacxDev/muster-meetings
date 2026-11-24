@@ -1,0 +1,31 @@
+id: m11
+kind: one_to_one
+title: One-to-one
+speakers:
+  - {name: Dev}
+  - {name: Eli}
+segments:
+  - {id: 1099, speaker: Dev, text: "Hey, thanks for moving this to the afternoon. The morning was back to back with interviews, I think we saw five candidates for the platform role today."}
+  - {id: 1100, speaker: Eli, text: "No problem. How did the interviews go? I heard from Gus that at least one of them had a really strong background in distributed systems."}
+  - {id: 1101, speaker: Dev, text: "Hi Eli. I wanted to talk about the on-call rotation and your promotion packet."}
+  - {id: 1102, speaker: Eli, text: "Sure. On-call has been rough, honestly. I got paged six times last week."}
+  - {id: 1103, speaker: Dev, text: "That's too many. I'll move two of the noisy alerts to business hours by Monday."}
+  - {id: 1104, speaker: Eli, text: "That would help a lot. Should I keep the weekend shift too?"}
+  - {id: 1105, speaker: Dev, text: "No, let's swap it. Eli, can you trade the weekend shift with Fay?"}
+  - {id: 1106, speaker: Eli, text: "Yes, I'll ask Fay today."}
+  - {id: 1107, speaker: Dev, text: "For the promotion packet, I already reviewed your first draft."}
+  - {id: 1108, speaker: Dev, text: "Could you add two examples of cross-team work and send it back by the end of next week?"}
+  - {id: 1109, speaker: Eli, text: "Sure, I'll add the examples and send it back by next Friday."}
+  - {id: 1110, speaker: Eli, text: "Maybe I could also get a peer review from Gus, if he has time."}
+  - {id: 1111, speaker: Dev, text: "Good idea, think about it."}
+  - {id: 1112, speaker: Dev, text: "I'll write your peer feedback request. Oh, actually that goes through HR now, so I can't."}
+  - {id: 1113, speaker: Eli, text: "Okay. Thanks Dev, this was useful."}
+labels:
+  - {id: m11-1, text: "Move two of the noisy alerts to business hours", assignee: Dev, due: "by Monday", segments: [1103]}
+  - {id: m11-2, text: "Ask Fay to trade the weekend on-call shift", assignee: Eli, due: "today", segments: [1105, 1106], cases: [cross_speaker]}
+  - {id: m11-3, text: "Add two cross-team examples to the promotion packet and send it back", assignee: Eli, due: "by next Friday", segments: [1108, 1109], cases: [cross_speaker]}
+traps:
+  - {kind: question, segments: [1104]}
+  - {kind: past_tense, segments: [1107]}
+  - {kind: hypothetical, segments: [1110]}
+  - {kind: retracted, segments: [1112]}

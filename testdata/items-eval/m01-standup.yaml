@@ -1,0 +1,37 @@
+id: m01
+kind: standup
+title: Platform team stand-up
+speakers:
+  - {name: Ada}
+  - {name: Bo}
+  - {name: Cleo}
+  - {name: Dev}
+segments:
+  - {id: 99, speaker: Ada, text: "Okay, I think everyone is here now. The coffee machine on our floor is broken again, so apologies if I sound half awake this morning, it has been a long week."}
+  - {id: 100, speaker: Bo, text: "Same here, honestly. The train was delayed twenty minutes and then the station lift was out, so I walked up four floors with my bike on my shoulder."}
+  - {id: 101, speaker: Ada, text: "Morning everyone. Let's keep this quick, we have the release review at ten. Bo, you want to start?"}
+  - {id: 102, speaker: Bo, text: "Sure. Yesterday I finished the retry logic for the upload service and merged it last night."}
+  - {id: 103, speaker: Bo, text: "Today I'm on the flaky integration tests. I'll have a fix for the timeout test up for review by noon."}
+  - {id: 104, speaker: Ada, text: "Great. Cleo?"}
+  - {id: 105, speaker: Cleo, text: "I'm still blocked on the staging certificate. Dev, can you take a look at the cert renewal today?"}
+  - {id: 106, speaker: Dev, text: "Yeah, I can take that. I'll renew it this morning."}
+  - {id: 107, speaker: Cleo, text: "Thanks. Otherwise I'm just continuing on the config work, nothing new there."}
+  - {id: 108, speaker: Dev, text: "From my side, we could maybe move the nightly build to the bigger runner at some point, but no rush."}
+  - {id: 109, speaker: Ada, text: "Did anyone already look at the disk alert from last night?"}
+  - {id: 110, speaker: Bo, text: "I looked at it this morning, it was the log volume, and I already cleared it."}
+  - {id: 111, speaker: Ada, text: "Okay. One more thing, I'll send out the release notes draft to the team after the review."}
+  - {id: 112, speaker: Dev, text: "Sounds good."}
+  - {id: 113, speaker: Cleo, text: "Oh, and I'll book the room for Thursday's retro. Actually no, Ada already booked it, never mind."}
+  - {id: 114, speaker: Ada, text: "Right, it's booked. And Dev, just a reminder that the cert renewal is today, right?"}
+  - {id: 115, speaker: Dev, text: "Yes, renewing the staging cert this morning, it's on my list."}
+  - {id: 116, speaker: Ada, text: "Perfect, thanks all. See you at the review."}
+labels:
+  - {id: m01-1, text: "Put a fix for the timeout test up for review", assignee: Bo, due: "by noon", segments: [103]}
+  - {id: m01-2, text: "Renew the staging certificate", assignee: Dev, due: "this morning", segments: [105, 106, 114, 115], cases: [cross_speaker, restated]}
+  - {id: m01-3, text: "Send the release notes draft to the team", assignee: Ada, due: "after the review", segments: [111]}
+traps:
+  - {kind: past_tense, segments: [102]}
+  - {kind: hypothetical, segments: [108]}
+  - {kind: question, segments: [109]}
+  - {kind: past_tense, segments: [110]}
+  - {kind: retracted, segments: [113]}

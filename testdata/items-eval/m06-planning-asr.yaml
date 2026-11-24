@@ -1,0 +1,35 @@
+id: m06
+kind: planning
+title: Team offsite planning (speech-to-text style)
+asr: true
+speakers:
+  - {name: Quin}
+  - {name: Rae}
+  - {name: Sol}
+segments:
+  - {id: 599, speaker: Quin, text: "hi both so the off site is the first one since the team doubled in size and i really want it to feel relaxed and not like a work week in a different building"}
+  - {id: 600, speaker: Sol, text: "agreed last year was way too packed we had sessions from eight in the morning until dinner and every one was exhausted by the second afternoon"}
+  - {id: 601, speaker: Quin, text: "so for the team off site in march we need a venue food and the agenda"}
+  - {id: 602, speaker: Rae, text: "i called three venues last week and the lake house was the cheapest one"}
+  - {id: 603, speaker: Rae, text: "ill book the lake house to day and send every one the address"}
+  - {id: 604, speaker: Quin, text: "great sol can you handle the food"}
+  - {id: 605, speaker: Sol, text: "sure ill get quotes from two caterers buy thursday"}
+  - {id: 606, speaker: Quin, text: "should we do a boat trip"}
+  - {id: 607, speaker: Rae, text: "we could maybe do a boat trip if the weathers good but lets not plan on it"}
+  - {id: 608, speaker: Quin, text: "ok ill draft the agenda and share it next week"}
+  - {id: 609, speaker: Sol, text: "do people need to bring lap tops"}
+  - {id: 610, speaker: Quin, text: "no lap tops thats the whole point"}
+  - {id: 611, speaker: Sol, text: "ill make the name badges oh wait ray said the venue does those never mind"}
+  - {id: 612, speaker: Rae, text: "yeah they do them"}
+  - {id: 613, speaker: Quin, text: "so ray books the venue to day and sol gets the food quotes"}
+  - {id: 614, speaker: Quin, text: "ok done thanks"}
+labels:
+  - {id: m06-1, text: "Book the lake house venue and send everyone the address", assignee: Rae, due: "today", segments: [603, 613], cases: [restated]}
+  - {id: m06-2, text: "Get quotes from two caterers", assignee: Sol, due: "by Thursday", segments: [604, 605, 613], cases: [cross_speaker, restated]}
+  - {id: m06-3, text: "Draft the offsite agenda and share it", assignee: Quin, due: "next week", segments: [608]}
+traps:
+  - {kind: past_tense, segments: [602]}
+  - {kind: question, segments: [606]}
+  - {kind: hypothetical, segments: [607]}
+  - {kind: question, segments: [609]}
+  - {kind: retracted, segments: [611]}

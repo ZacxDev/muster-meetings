@@ -1,0 +1,37 @@
+id: m12
+kind: one_to_one
+title: One-to-one (non-ASCII text)
+# Accented names, curly apostrophes and one character outside the Basic
+# Multilingual Plane: a span after them lands on the right text only if the
+# offsets are counted as the harness counts them. The run fails on any
+# rewritten span in this meeting.
+unicode: true
+speakers:
+  - {name: Inès}
+  - {name: Søren}
+segments:
+  - {id: 1199, speaker: Inès, text: "Hi Søren. Sorry I’m a few minutes late, the previous meeting ran over, we were going through the quarterly numbers and they took longer than anyone planned."}
+  - {id: 1200, speaker: Søren, text: "No worries at all. I used the time to finish a couple of tickets, the queue’s a lot calmer this week than it was last week 🎉 so that’s nice."}
+  - {id: 1201, speaker: Inès, text: "Søren, thanks for making time. Let’s talk about the support tooling project."}
+  - {id: 1202, speaker: Søren, text: "Sure. I already finished the macro cleanup last sprint."}
+  - {id: 1203, speaker: Inès, text: "Nice. What’s next on it?"}
+  - {id: 1204, speaker: Søren, text: "I want to build a tag dashboard. I’ll have a mockup ready by Thursday."}
+  - {id: 1205, speaker: Inès, text: "Great. Could you also check whether the old tags can be deleted?"}
+  - {id: 1206, speaker: Søren, text: "Can do. I’ll check with the data team."}
+  - {id: 1207, speaker: Inès, text: "We could maybe hire a contractor for the dashboard if it gets too big."}
+  - {id: 1208, speaker: Søren, text: "I think I can manage it."}
+  - {id: 1209, speaker: Inès, text: "Also, are you going to the support summit in Zürich?"}
+  - {id: 1210, speaker: Søren, text: "I’d like to. I’ll register for the summit this week."}
+  - {id: 1211, speaker: Inès, text: "Great. I’ll approve the travel budget once you’ve registered."}
+  - {id: 1212, speaker: Søren, text: "Thanks. So the mockup Thursday, the old tags question, and registering this week."}
+  - {id: 1213, speaker: Inès, text: "Perfect."}
+labels:
+  - {id: m12-1, text: "Have a mockup of the tag dashboard ready", assignee: Søren, due: "by Thursday", segments: [1204, 1212], cases: [restated]}
+  - {id: m12-2, text: "Check with the data team whether the old tags can be deleted", assignee: Søren, segments: [1205, 1206, 1212], cases: [cross_speaker, restated]}
+  - {id: m12-3, text: "Register for the support summit", assignee: Søren, due: "this week", segments: [1210, 1212], cases: [restated]}
+  - {id: m12-4, text: "Approve the travel budget for the summit", assignee: Inès, due: "once Søren has registered", segments: [1211]}
+traps:
+  - {kind: past_tense, segments: [1202]}
+  - {kind: question, segments: [1203]}
+  - {kind: hypothetical, segments: [1207]}
+  - {kind: question, segments: [1209]}

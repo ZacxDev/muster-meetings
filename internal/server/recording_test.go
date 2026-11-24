@@ -109,8 +109,13 @@ func TestRecordingStartsAtTheFirstAdmitAndItsStartIsTheEgressReport(t *testing.T
 	c := e.meeting(ada)
 	e.started(c)
 	e.clock.Add(5 * time.Second)
-	if n := len(e.lk.Composites()); n != 0 {
-		t.Fatalf("%d composites before any guest was admitted", n)
+	// A start would be asynchronous (its loop runs in a goroutine): none may
+	// appear for half a second. The admit below is the positive control: its
+	// composite appears within milliseconds.
+	for end := time.Now().Add(500 * time.Millisecond); time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
+		if n := len(e.lk.Composites()); n != 0 {
+			t.Fatalf("%d composites before any guest was admitted", n)
+		}
 	}
 	e.admitGuest(c, grace)
 	g := e.composite(1)

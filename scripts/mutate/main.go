@@ -290,7 +290,7 @@ var mutants = []mutant{
 		pkg: "./cmd/items-eval", test: "TestWorstIsEachMetricsWorstRun", want: "worst ="},
 	{name: "items-eval controls: the oracle's check removed", file: ieCtl, from: "o.Recall == 1 && o.Precision == 1, o})", to: "true, o})",
 		pkg: "./cmd/items-eval", test: "TestAFailedControlStopsTheRunBeforeAnyModel", want: "a failing oracle: exit 0"},
-	{name: "items-eval controls: a failed control does not stop the run", file: ieMain, from: "if !ControlsPass(res.Controls) {", to: "if false {",
+	{name: "items-eval controls: a failed control does not stop the run", file: ieMain, from: "if !ControlsPass(res.Controls) || !ControlsPass(res.STTControls) {", to: "if false {",
 		pkg: "./cmd/items-eval", test: "TestAFailedControlStopsTheRunBeforeAnyModel", want: "a failing oracle: exit 0"},
 	{name: "items-eval controls: the liar cites only the window", file: ieCtl, from: "in = []int64{in[0], top + 1000}", to: "in = []int64{in[0]}",
 		pkg: "./cmd/items-eval", test: "TestTheControlsScoreAsStatedOnTheCorpus", want: "control liar"},

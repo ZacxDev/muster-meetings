@@ -110,6 +110,9 @@ func servedPages(t *testing.T, e *env) map[string]struct {
 	share := at.share(finishedRecording(t, at))
 	add("a share link's page", "share.html", share, 200, false, `class="share-video"`)
 	add("a share link's refusal", "share.html", "/r/"+strings.Repeat("A", 43), 404, false, `id="message"`)
+	// The confirmation link's refusal: only a plugin that mails serves it.
+	at = pcEnv(t, false).env
+	add("a confirmation link's refusal", "confirm.html", "/e/"+strings.Repeat("A", 43), 404, false, `id="message"`)
 	return out
 }
 

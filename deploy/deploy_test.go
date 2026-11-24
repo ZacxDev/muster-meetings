@@ -831,8 +831,8 @@ func TestTheExampleOverlaySetsEveryKnob(t *testing.T) {
 	if err := yaml.Unmarshal([]byte(`{to: [{podSelector: {matchLabels: {app.kubernetes.io/name: muster-contacts}}}], ports: [{protocol: TCP, port: 8081}]}`), &want); err != nil {
 		t.Fatal(err)
 	}
-	if len(eg) != 7 || !reflect.DeepEqual(eg[5], want) {
-		t.Errorf("the overlay's plugin egress = %v, want the base's five, the contacts rule, then the store's", eg)
+	if len(eg) != 9 || !reflect.DeepEqual(eg[5], want) {
+		t.Errorf("the overlay's plugin egress = %v, want the base's five, the contacts rule, the store's, then the notes' two", eg)
 	}
 	// The recording: the store's address and port, last in the plugin's
 	// egress AND Egress's, and the params naming it and the bucket.
@@ -840,8 +840,24 @@ func TestTheExampleOverlaySetsEveryKnob(t *testing.T) {
 	if err := yaml.Unmarshal([]byte(`{to: [{ipBlock: {cidr: 192.0.2.50/32}}], ports: [{protocol: TCP, port: 9000}]}`), &store); err != nil {
 		t.Fatal(err)
 	}
-	if len(eg) == 7 && !reflect.DeepEqual(eg[6], store) {
+	if len(eg) == 9 && !reflect.DeepEqual(eg[6], store) {
 		t.Errorf("the overlay's plugin egress to the store = %v", eg[6])
+	}
+	// The post-call notes: OpenRouter's HTTPS and the mail server's
+	// submission port, after the store's; the params name the models (with
+	// their provider pins) and the mail server.
+	var or, smtp any
+	yaml.Unmarshal([]byte(`{to: [{ipBlock: {cidr: 198.51.100.0/24}}], ports: [{protocol: TCP, port: 443}]}`), &or)
+	yaml.Unmarshal([]byte(`{to: [{ipBlock: {cidr: 192.0.2.60/32}}], ports: [{protocol: TCP, port: 587}]}`), &smtp)
+	if len(eg) == 9 && (!reflect.DeepEqual(eg[7], or) || !reflect.DeepEqual(eg[8], smtp)) {
+		t.Errorf("the overlay's plugin egress for the notes = %v, %v", eg[7], eg[8])
+	}
+	for _, d := range ofKind(docs, "ConfigMap") {
+		data := d["data"].(obj)
+		if data["items-model"] != "deepseek/deepseek-v4.1-flash-1017" || data["items-provider-prefs"] != `{"data_collection":"deny","order":["deepinfra/fp8"],"allow_fallbacks":false}` ||
+			data["vision-model"] != "anthropic/claude-haiku-5.5" || data["smtp-addr"] != "mail.example.test:587" || data["mail-from"] != "meetings@mail.example.test" {
+			t.Errorf("the overlay's notes params = %v", data)
+		}
 	}
 	base := dig(find(t, render(t, "kubernetes"), "NetworkPolicy", "egress"), "spec", "egress").([]any)
 	ee := dig(find(t, docs, "NetworkPolicy", "egress"), "spec", "egress").([]any)

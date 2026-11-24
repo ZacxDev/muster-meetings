@@ -184,6 +184,7 @@
       });
       $('archive-empty').hidden = b.segments.length > 0;
       if (b.parts) media.load(m);
+      notes.load(m, 0);
     }).catch(function (e) { if (token && archived === m) archiveSay('Could not load the transcript: ' + e.message); });
     $('archive-back').focus();
   }
@@ -191,6 +192,7 @@
   function closeArchive() {
     archived = null;
     media.reset();
+    notes.reset();
     show('list-view');
   }
 
@@ -346,6 +348,304 @@
     });
   }).catch(function () { /* no recording: the setting stays hidden */ });
 
+  // ---- the meeting notes' address (only a plugin that mails) ----
+  //
+  // Typed once; a link mailed to it confirms it. Until then no notes are
+  // sent (the server refuses Send).
+  function renderAddr(e) {
+    var st = $('notes-addr-state');
+    if (e.pending) st.textContent = 'We sent a link to ' + e.pending + '. Open it to confirm.' + (e.confirmed ? ' Until then notes go from and to ' + e.confirmed + '.' : '');
+    else if (e.confirmed) st.textContent = 'Notes are sent from and to ' + e.confirmed + ' (confirmed).';
+    else st.textContent = 'Type your email address: we mail you a link to confirm it. Notes are sent only after that.';
+    if (e.confirmed && !$('notes-addr').value) $('notes-addr').value = e.confirmed;
+  }
+  api('GET', '/api/settings/email').then(function (e) {
+    $('notes-settings').hidden = false;
+    renderAddr(e);
+  }).catch(function () { /* no mail: the setting stays hidden */ });
+  $('notes-addr-form').addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    var b = $('notes-addr-send');
+    b.disabled = true;
+    api('PUT', '/api/settings/email', { email: $('notes-addr').value.trim() }).then(function (r) {
+      renderAddr({ pending: r.pending });
+      UI.toast('Check your inbox for the link.', { kind: 'success', timeout: 3000 });
+    }).catch(function (e) { if (token) $('notes-addr-state').textContent = e.message; })
+      .then(function () { b.disabled = false; });
+  });
+
+  // ---- the archive's notes: action items, screen notes, runs,
+  // and the drafts of the email (only with a model configured) ----
+  var notes = (function () {
+    var meeting = null, runID = 0, poll = null, cur = null;
+    function el(tag, cls, text) {
+      var x = document.createElement(tag);
+      if (cls) x.className = cls;
+      if (text != null) x.textContent = text;
+      return x;
+    }
+    function stop() { if (poll) { clearTimeout(poll); poll = null; } }
+    function state(t) { $('analysis-state').textContent = t || ''; }
+    function runLabel(r) {
+      var bits = ['Run ' + r.id, r.items_model];
+      if (r.vision_model) bits.push('frames ' + r.vision_model);
+      bits.push(r.state === 'done' ? when(r.finished_at || r.created_at) : r.state === 'failed' ? 'failed' : 'running');
+      if (r.current) bits.push('current');
+      return bits.join(' · ');
+    }
+    function render(v) {
+      var m = meeting;
+      $('analysis').hidden = false;
+      cur = v.current;
+      var busy = v.runs.some(function (r) { return r.kind === 'post' && (r.state === 'queued' || r.state === 'running'); });
+      var shown = v.run;
+      if (!v.runs.length) state(m.ai ? (m.state === 'open' ? '' : 'The notes are being made.') : 'AI action items were off for this meeting.');
+      else if (busy) state('The notes are being made. This can take a few minutes.');
+      else if (shown && shown.state === 'failed') state('This run failed: ' + shown.error);
+      else if (shown && shown.partial) state('Part of this run failed: ' + shown.error);
+      else state('');
+      var o = v.output || { items: [], notes: [] };
+      var list = $('archive-items');
+      list.textContent = '';
+      o.items.forEach(function (it) {
+        var li = MeetingsCall.itemEl(it);
+        if (it.frames && it.frames.length) {
+          var chip = el('span', 'mu-chip', 'On screen at ' + MeetingsCall.clock(it.frames[0]));
+          chip.setAttribute('data-icon', 'screen-share');
+          li.querySelector('.item__meta').appendChild(chip);
+          UI.decorate(li);
+        }
+        list.appendChild(li);
+      });
+      $('archive-items-empty').hidden = o.items.length > 0 || !v.run;
+      var fn = $('frame-notes');
+      fn.textContent = '';
+      o.notes.forEach(function (n) { var li = el('li', ''); li.appendChild(el('span', 'when', MeetingsCall.clock(n.frame_ms))); li.appendChild(document.createTextNode(n.text)); fn.appendChild(li); });
+      $('notes-box').hidden = o.notes.length === 0;
+      var pick = $('run-pick');
+      pick.textContent = '';
+      v.runs.forEach(function (r) { var op = el('option', '', runLabel(r)); op.value = String(r.id); pick.appendChild(op); });
+      if (shown) pick.value = String(shown.id);
+      pick.parentElement.hidden = v.runs.length === 0;
+      $('run-current').hidden = !shown || shown.current || shown.state !== 'done';
+      $('reprocess').disabled = m.state !== 'ended' || busy;
+      $('rp-go').disabled = m.state !== 'ended' || busy;
+      if (v.mail) drafts.load(m, busy); else $('drafts').hidden = true;
+      stop();
+      if (busy) poll = setTimeout(function () { if (meeting === m) load(m, runID); }, 4000);
+    }
+    function load(m, id) {
+      meeting = m;
+      runID = id;
+      return api('GET', '/api/meetings/' + encodeURIComponent(m.id) + '/analysis' + (id ? '?run=' + id : '')).then(function (v) {
+        if (meeting === m) render(v);
+      }).catch(function (e) {
+        if (e.status === 404 && !id) { $('analysis').hidden = true; return; } // no model: no notes
+        if (token && meeting === m) archiveSay('Could not load the notes: ' + e.message);
+      });
+    }
+    function reprocess(body) {
+      var m = meeting;
+      if (!m) return;
+      api('POST', '/api/meetings/' + encodeURIComponent(m.id) + '/reprocess', body).then(function () {
+        UI.toast('Running the notes again. The newest run becomes current; notes already sent stay as they were.', { timeout: 4000 });
+        load(m, 0);
+      }).catch(function (e) { if (token) UI.toast(e.message, { kind: 'error' }); });
+    }
+    $('run-pick').addEventListener('change', function () { if (meeting) load(meeting, parseInt(this.value, 10)); });
+    $('run-current').addEventListener('click', function () {
+      var m = meeting, id = parseInt($('run-pick').value, 10);
+      api('POST', '/api/meetings/' + encodeURIComponent(m.id) + '/analysis/runs/' + id + '/current').then(function (r) {
+        var d = r.drafts || {};
+        UI.toast('Run ' + id + ' is current again.' + (d.already_sent ? ' ' + d.already_sent + ' already sent: not changed.' : ''), { kind: 'success', timeout: 4000 });
+        load(m, 0);
+      }).catch(function (e) { if (token) UI.toast(e.message, { kind: 'error' }); });
+    });
+    $('reprocess').addEventListener('click', function () { reprocess({}); });
+    $('rp-go').addEventListener('click', function () {
+      var body = { items_model: $('rp-model').value.trim() };
+      var raw = $('rp-prefs').value.trim();
+      if (raw) {
+        try { body.items_provider_prefs = JSON.parse(raw); } catch (e) { UI.toast('The provider preferences are not JSON.', { kind: 'error' }); return; }
+      }
+      reprocess(body);
+    });
+    return {
+      load: load,
+      reset: function () { stop(); meeting = null; $('analysis').hidden = true; $('drafts').hidden = true; },
+      current: function () { return cur; }
+    };
+  })();
+
+  // The drafts: one card per recipient (the owner, and each guest who sent
+  // the card). 🔴 Nothing is sent until Send notes; every name, address and
+  // item is textContent or an input's value.
+  var drafts = (function () {
+    var meeting = null, poll = null;
+    function el(tag, cls, text) {
+      var x = document.createElement(tag);
+      if (cls) x.className = cls;
+      if (text != null) x.textContent = text;
+      return x;
+    }
+    var chips = { removed: ['', 'Not sending'], queued: ['mu-chip--progress', 'Sending'], sending: ['mu-chip--progress', 'Sending'],
+      sent: ['mu-chip--complete', 'Sent'], failed: ['mu-chip--error', 'Failed'], unknown: ['mu-chip--warning', 'May have been sent'] };
+    function path(m, rest) { return '/api/meetings/' + encodeURIComponent(m.id) + '/drafts' + rest; }
+    function rowEl(it, editable, save) {
+      var row = el('div', 'draft__row');
+      var f = el('div', 'draft__fields');
+      [['text', 'Action item'], ['assignee', 'Whose'], ['due', 'Due']].forEach(function (x) {
+        var i = el('input', 'mu-input');
+        i.value = it[x[0]] || '';
+        i.setAttribute('aria-label', x[1]);
+        i.placeholder = x[1];
+        i.setAttribute('data-field', x[0]);
+        i.disabled = !editable;
+        i.addEventListener('change', save);
+        f.appendChild(i);
+      });
+      row.appendChild(f);
+      if (editable) row.appendChild(UI.iconButton('close', 'Remove this item', 'row-remove', function () { row.remove(); save(); }));
+      return row;
+    }
+    function card(m, d) {
+      var c = el('article', 'mu-card draft');
+      c.setAttribute('data-state', d.state);
+      c.setAttribute('data-recipient', d.recipient === 'owner' ? 'owner' : 'guest');
+      var head = el('div', 'draft__head');
+      var who = el('span', 'draft__who', d.name + (d.recipient === 'owner' ? ' (you)' : ''));
+      head.appendChild(who);
+      if (d.email) head.appendChild(el('span', 'draft__addr', d.email));
+      if (chips[d.state]) {
+        var chip = el('span', 'mu-chip ' + chips[d.state][0], chips[d.state][1]);
+        chip.setAttribute('data-icon', d.state === 'sent' ? 'check' : d.state === 'failed' ? 'error' : d.state === 'removed' ? 'minus' : 'send');
+        head.appendChild(chip);
+      }
+      c.appendChild(head);
+      // A failed draft is editable (its address, its items), and is a draft
+      // again once edited.
+      var editable = d.state === 'draft' || d.state === 'failed';
+      if (d.state === 'failed' && d.error) c.appendChild(el('p', 'mu-help draft__error', d.error));
+      if (d.items_changed) c.appendChild(el('p', 'mu-help draft__changed', 'The notes were made again and their items changed, so your edits were not carried over.'));
+      if (editable && d.recipient !== 'owner') {
+        var addr = el('input', 'mu-input draft__email');
+        addr.type = 'email';
+        addr.value = d.email || '';
+        addr.setAttribute('aria-label', 'Email address of ' + d.name);
+        addr.addEventListener('change', function () {
+          api('PATCH', path(m, '/' + encodeURIComponent(d.id)), { email: addr.value.trim() }).then(function () { load(m); })
+            .catch(function (e) { if (token) UI.toast(e.message, { kind: 'error' }); });
+        });
+        c.appendChild(addr);
+      }
+      var rows = el('div', 'draft__rows');
+      function save() {
+        var items = Array.prototype.map.call(rows.querySelectorAll('.draft__row'), function (r) {
+          var o = {};
+          Array.prototype.forEach.call(r.querySelectorAll('input'), function (i) { o[i.getAttribute('data-field')] = i.value; });
+          return o;
+        });
+        api('PATCH', path(m, '/' + encodeURIComponent(d.id)), { items: items }).then(function () {
+          if (preview.isConnected && !preview.hidden) showPreview();
+        }).catch(function (e) { if (token) UI.toast(e.message, { kind: 'error' }); });
+      }
+      d.items.forEach(function (it) { rows.appendChild(rowEl(it, editable, save)); });
+      c.appendChild(rows);
+      var actions = el('div', 'draft__actions');
+      if (editable) {
+        var add = el('button', 'mu-btn mu-btn--ghost mu-btn--sm add-item', 'Add item');
+        add.type = 'button';
+        add.setAttribute('data-icon', 'plus');
+        add.addEventListener('click', function () { rows.appendChild(rowEl({}, true, save)); rows.lastChild.querySelector('input').focus(); });
+        actions.appendChild(add);
+      }
+      var preview = el('div', 'preview');
+      preview.hidden = true;
+      function showPreview() {
+        api('GET', path(m, '/' + encodeURIComponent(d.id) + '/preview')).then(function (p) {
+          preview.textContent = '';
+          preview.appendChild(el('div', 'preview__subject', p.subject));
+          preview.appendChild(el('div', 'muted', 'From ' + p.from));
+          var y = el('div', 'preview__yours');
+          y.appendChild(el('h3', '', 'Your action items'));
+          var yl = el('ul', '');
+          p.yours.forEach(function (it) { yl.appendChild(el('li', '', it.text + (it.due ? ' (due ' + it.due + ')' : ''))); });
+          if (!p.yours.length) y.appendChild(el('p', 'muted', 'No action items for ' + d.name + '.')); else y.appendChild(yl);
+          preview.appendChild(y);
+          if (p.others.length) {
+            var o = el('div', 'preview__others');
+            o.appendChild(el('h3', '', "Everyone else's"));
+            var ol = el('ul', '');
+            p.others.forEach(function (it) { ol.appendChild(el('li', '', (it.assignee || 'Unassigned') + ': ' + it.text)); });
+            o.appendChild(ol);
+            preview.appendChild(o);
+          }
+          preview.appendChild(el('p', 'muted', 'With the transcript attached (text and WebVTT)' + (p.video ? ' and a link to the recording.' : '.')));
+          preview.hidden = false;
+        }).catch(function (e) { if (token) UI.toast(e.message, { kind: 'error' }); });
+      }
+      var pv = el('button', 'mu-btn mu-btn--ghost mu-btn--sm preview-btn', 'Preview');
+      pv.type = 'button';
+      pv.setAttribute('data-icon', 'search');
+      pv.addEventListener('click', function () { if (!preview.hidden) { preview.hidden = true; return; } showPreview(); });
+      actions.appendChild(pv);
+      if (d.state === 'draft' || d.state === 'removed') {
+        var rm = el('button', 'mu-btn mu-btn--ghost mu-btn--sm remove-recipient', d.state === 'removed' ? 'Include' : "Don't send");
+        rm.type = 'button';
+        rm.addEventListener('click', function () {
+          api('PATCH', path(m, '/' + encodeURIComponent(d.id)), { removed: d.state !== 'removed' }).then(function () { load(m); })
+            .catch(function (e) { if (token) UI.toast(e.message, { kind: 'error' }); });
+        });
+        actions.appendChild(rm);
+      }
+      if (d.state === 'failed' || d.state === 'unknown') {
+        var rt = el('button', 'mu-btn mu-btn--secondary mu-btn--sm', d.state === 'unknown' ? 'Send again (it may arrive twice)' : 'Try again');
+        rt.type = 'button';
+        rt.addEventListener('click', function () {
+          api('POST', path(m, '/' + encodeURIComponent(d.id) + '/retry')).then(function () { load(m); })
+            .catch(function (e) { if (token) UI.toast(e.message, { kind: 'error' }); });
+        });
+        actions.appendChild(rt);
+      }
+      c.appendChild(actions);
+      c.appendChild(preview);
+      UI.decorate(c);
+      return c;
+    }
+    function load(m, busy) {
+      meeting = m;
+      if (poll) { clearTimeout(poll); poll = null; }
+      return api('GET', path(m, '')).then(function (v) {
+        if (meeting !== m || archived !== m) return;
+        var box = $('drafts');
+        box.hidden = !v.drafts.length && !busy;
+        var list = $('draft-list');
+        list.textContent = '';
+        v.drafts.forEach(function (d) { list.appendChild(card(m, d)); });
+        var unsent = v.drafts.filter(function (d) { return d.state === 'draft'; }).length;
+        var confirmed = !!(v.owner_email && v.owner_email.confirmed);
+        $('drafts-state').textContent = !confirmed ? 'Confirm your email address under "Meeting notes by email" on the meetings list before sending.'
+          : unsent ? 'Each person reads their own action items first, then everyone else\'s. Nothing is sent until you press Send notes.'
+          : v.drafts.length ? 'Every email has been sent, or is set not to be.' : '';
+        $('drafts-send').hidden = !unsent;
+        $('drafts-send').disabled = !confirmed;
+        if (v.drafts.some(function (d) { return d.state === 'queued' || d.state === 'sending'; })) {
+          poll = setTimeout(function () { if (meeting === m && archived === m) load(m); }, 2000);
+        }
+      }).catch(function (e) { if (token && meeting === m) archiveSay('Could not load the drafts: ' + e.message); });
+    }
+    $('drafts-send').addEventListener('click', function () {
+      var m = meeting, b = this;
+      if (!m) return;
+      b.disabled = true;
+      api('POST', path(m, '/send'), {}).then(function (r) {
+        UI.toast(r.queued === 1 ? 'One email is on its way.' : r.queued + ' emails are on their way.', { kind: 'success', timeout: 3000 });
+        load(m);
+      }).catch(function (e) { if (token) UI.toast(e.message, { kind: 'error' }); b.disabled = false; });
+    });
+    return { load: load };
+  })();
+
   // download fetches the export with the bearer (a link cannot carry it) and
   // saves it from a blob: URL.
   function download(format) {
@@ -386,6 +686,7 @@
   var side = MeetingsCall.Side();
   side.add('people', $('lobby-panel'), $('btn-people'));
   var transcript = MeetingsCall.transcriptPanel(side, function () { return waiting.length > 0; });
+  var actionItems = MeetingsCall.itemsPanel(side);
   var knocked = {}; // participant ids already announced
   var waiting = [];
 
@@ -472,12 +773,14 @@
     return request('GET', '/api/meetings/' + encodeURIComponent(id) + '/events', undefined, abort.signal).then(function (res) {
       if (!res.ok) throw new Error('the server answered ' + res.status);
       transcript.reset();
+      actionItems.reset();
       return MeetingsCall.readEvents(res, function (name, data) {
         if (name === 'meeting') renderSnapshot(data);
         else if (name === 'segment') transcript.segment(data);
         else if (name === 'amend') transcript.amend(data);
         else if (name === 'partials') transcript.partials(data.partials);
         else if (name === 'transcript') transcript.status(data.status);
+        else if (name === 'items') actionItems.update(data);
       });
     }).then(function () {
       // The stream ended. While this meeting is still open here and has not

@@ -23,6 +23,27 @@ const (
 	BadgeRecordingFailed = "Recording failed"
 )
 
+// NoticeAIFrames is the AI clause for a recorded meeting on a plugin with a
+// vision model: the frames of shared screens go too.
+const NoticeAIFrames = "The transcript text and pictures of shared screens (not the audio) are sent to an AI service (OpenRouter) to find action items."
+
+// WithAIClause is n with its AI clause naming the frames when frames is
+// set; otherwise, and for a notice without the clause, n unchanged.
+func (n Notice) WithAIClause(frames bool) Notice {
+	if !frames {
+		return n
+	}
+	repl := NoticeAIFrames
+	out := append([]string(nil), n.Text...)
+	for i, t := range out {
+		if t == NoticeAI {
+			out[i] = repl
+		}
+	}
+	n.Text = out
+	return n
+}
+
 // Without an engine (MEETINGS_STT_ENGINE off) nothing is transcribed, so
 // nothing is sent to the AI service either: the notice then says only what
 // does happen.

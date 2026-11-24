@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex">
+<title>Meetings</title>
+<link rel="stylesheet" href="{{kit "kit.css"}}">
+<link rel="stylesheet" href="{{asset "app.css"}}">
+</head>
+<body class="mu-root">
+<!-- The owner's address confirmation (a link mailed to it). Opening the link
+     changes nothing: a mail scanner that follows it confirms nothing. The
+     button does. No script. -->
+<main id="confirm" class="page notice">
+  <h1>Meetings</h1>
+  {{- if .Missing}}
+  <p id="message">This link is not valid. It may have expired or been used already; ask for a new one in Meetings.</p>
+  {{- else if .Done}}
+  <p id="message"><span data-icon="check"></span>Confirmed. Meetings will send your meeting notes from and to <strong>{{.Address}}</strong>.</p>
+  {{- else}}
+  <p id="message">Send your meeting notes from and to <strong>{{.Address}}</strong>?</p>
+  <form method="post" action="{{.Action}}"><button id="confirm-yes" type="submit" class="mu-btn mu-btn--primary" data-icon="check">Confirm this address</button></form>
+  {{- end}}
+</main>
+</body>
+</html>

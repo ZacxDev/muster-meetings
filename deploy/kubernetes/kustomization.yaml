@@ -78,3 +78,18 @@ configMapGenerator:
       - s3-endpoint=
       - s3-bucket=
       - s3-region=us-east-1
+      # The post-call notes (optional): the action items' model (an
+      # OpenRouter slug) and its provider object, the live window, the frame
+      # analysis' model, the mail server and the sender. items-model empty:
+      # no AI call and no email, meetings exactly as before. Set it together
+      # with OPENROUTER_API_KEY in the Secret AND the NetworkPolicy patches
+      # for OpenRouter (HTTPS) and the mail server (README "Post-call notes";
+      # deploy/example-overlay does it).
+      - items-model=
+      - items-provider-prefs=
+      - items-every=
+      - vision-model=
+      - vision-provider-prefs=
+      - smtp-addr=
+      - smtp-server-name=
+      - mail-from=

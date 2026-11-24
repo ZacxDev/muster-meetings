@@ -162,7 +162,21 @@ func TestAConnectedStreamStopsTheStartRetries(t *testing.T) {
 		tok := ingest.Token(ingestKey, c.ID, a, nonce, time.UnixMilli(meetingCreated).Add(store.LinkLifetime))
 		code, got := dialStatus(t, "ws"+strings.TrimPrefix(e.ingest.URL, "http")+ingest.Path(a, tok))
 		cl = got
-		return code == 101
+		if code != 101 {
+			return false
+		}
+		// Taken means registered as the track's CURRENT stream: a token
+		// check that passed just before an attempt drew a new nonce
+		// registers a stale stream, which is cut as designed. Once current,
+		// no attempt draws another (regMu).
+		for end := time.Now().Add(2 * time.Second); e.server.ConnNonceForTest(a) == "" && time.Now().Before(end); {
+			time.Sleep(5 * time.Millisecond)
+		}
+		if cur := e.server.ConnNonceForTest(a); cur != "" && cur == e.nonceOf(a) {
+			return true
+		}
+		cl.Drop()
+		return false
 	})
 	if err := cl.Stream(egresstest.Silence(100), 0); err != nil {
 		t.Fatal(err)

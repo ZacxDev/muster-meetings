@@ -23,6 +23,10 @@ func (s *Server) Run(ctx context.Context) {
 	// A recording waiting to retry lost its loop; the sweeper starts.
 	s.resumeRecording(ctx)
 	s.runRetention(ctx)
+	// The analysis' workers and the notes' outbox (only when configured).
+	s.runAI(ctx)
+	s.runMail(ctx)
+	s.runMailRetention(ctx)
 	t := time.NewTicker(s.cfg.ReconcileEvery)
 	defer t.Stop()
 	for {

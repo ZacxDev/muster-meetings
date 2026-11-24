@@ -220,3 +220,55 @@ h2 { font-size: 1rem; font-weight: 600; margin: 0; }
 .delete-confirm { margin-top: .5rem; padding: .75rem; display: grid; gap: .5rem; }
 .delete-q { display: flex; align-items: center; gap: .5rem; font-weight: 600; margin: 0; }
 .delete-q .mu-icon { color: rgb(var(--mu-danger)); }
+
+/* ---- the action items: the live panel and the archive ---- */
+.items { list-style: none; margin: 0; padding: .5rem; display: flex; flex-direction: column; gap: .375rem; overflow-y: auto; min-height: 0; }
+.panel .items { flex: 1 1 auto; }
+.item { display: flex; gap: .625rem; align-items: flex-start; padding: .5rem .625rem; border-radius: var(--mu-radius-md);
+  background: rgb(var(--mu-s1)); box-shadow: inset 0 0 0 1px rgb(var(--mu-line)); overflow-wrap: anywhere; }
+.item.new { animation: rise var(--mu-dur-slow) var(--mu-ease-enter); box-shadow: inset 3px 0 0 rgb(var(--mu-accent)), inset 0 0 0 1px rgb(var(--mu-line)); }
+.item__icon { display: inline-flex; color: rgb(var(--mu-accent)); flex: 0 0 auto; padding-top: .125rem; }
+.item__icon .mu-icon { width: 1.125rem; height: 1.125rem; }
+.item__body { display: flex; flex-direction: column; gap: .25rem; min-width: 0; }
+.item__text { font-weight: 600; line-height: 1.4; }
+.item__meta { display: flex; flex-wrap: wrap; align-items: center; gap: .375rem; font-size: .8125rem; color: rgb(var(--mu-muted)); }
+.items-empty { padding: 1.5rem 1rem; }
+.items-empty .mu-icon { width: 2rem; height: 2rem; }
+
+/* ---- the archive's notes ---- */
+.analysis { display: flex; flex-direction: column; gap: 1rem; margin-bottom: 1.5rem; }
+.section-title { display: flex; align-items: center; gap: .375rem; margin-bottom: .375rem; }
+.section-title .mu-icon { width: 1.125rem; height: 1.125rem; color: rgb(var(--mu-accent)); }
+.analysis .items { padding: 0; overflow: visible; }
+.frame-notes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .25rem; }
+.frame-notes li { color: rgb(var(--mu-text2)); overflow-wrap: anywhere; }
+.frame-notes .when { color: rgb(var(--mu-muted)); font-size: .75rem; margin-right: .5rem; font-variant-numeric: tabular-nums; }
+.runs { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+.runs .mu-select { flex: 1 1 12rem; min-width: 0; }
+.reprocess-more { display: flex; flex-direction: column; gap: .5rem; }
+.reprocess-more[open] > summary { margin-bottom: .5rem; }
+.reprocess-more .mu-field { margin-bottom: .5rem; }
+
+/* ---- the drafts: one card per recipient ---- */
+.drafts { display: flex; flex-direction: column; gap: .75rem; }
+.draft-list { display: flex; flex-direction: column; gap: .75rem; }
+.draft { padding: .75rem; display: flex; flex-direction: column; gap: .5rem; animation: rise var(--mu-dur-base) var(--mu-ease-enter); }
+.draft[data-state="removed"] { opacity: .6; }
+.draft__head { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+.draft__who { font-weight: 600; flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.draft__addr { color: rgb(var(--mu-muted)); font-size: .8125rem; overflow-wrap: anywhere; }
+.draft__rows { display: flex; flex-direction: column; gap: .375rem; }
+.draft__row { display: grid; grid-template-columns: 1fr auto; gap: .375rem; align-items: start; }
+.draft__fields { display: grid; grid-template-columns: 1fr; gap: .25rem; min-width: 0; }
+@media (min-width: 40rem) { .draft__fields { grid-template-columns: 2fr 1fr 1fr; } }
+.draft__actions { display: flex; flex-wrap: wrap; gap: .375rem; }
+.preview { padding: .75rem; display: flex; flex-direction: column; gap: .5rem; background: rgb(var(--mu-s2)); border-radius: var(--mu-radius-md); }
+.preview__subject { font-weight: 600; }
+.preview__yours { padding: .5rem .75rem; border-radius: var(--mu-radius-md); background: rgb(var(--mu-s1)); box-shadow: inset 3px 0 0 rgb(var(--mu-accent)); }
+.preview__yours h3, .preview__others h3 { font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; margin: 0 0 .25rem; }
+.preview__yours li { font-weight: 600; }
+.preview__others { color: rgb(var(--mu-muted)); font-size: .875rem; }
+.preview ul { margin: 0; padding-left: 1.25rem; }
+.notes-settings { padding: .75rem 1rem; margin: 0 0 1rem; display: flex; flex-direction: column; gap: .5rem; }
+.notes-settings h2 { display: flex; align-items: center; gap: .375rem; }
+.notes-settings .mu-icon { width: 1.125rem; height: 1.125rem; color: rgb(var(--mu-accent)); }

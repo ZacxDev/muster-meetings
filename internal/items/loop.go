@@ -82,6 +82,17 @@ func (l *Loop) Tick(ctx context.Context, finals []Segment, nowMS int64) (st Step
 	return st, true
 }
 
+// Resume restores a loop the worker kept across a restart: the anchor
+// (the last segment a successful call covered) and the items kept so far,
+// so the next window covers only what came after, not the whole meeting.
+func (l *Loop) Resume(lastID int64, kept []Item) {
+	l.last = lastID
+	l.kept = append([]Item{}, kept...)
+}
+
+// Anchor is the last segment a successful call covered (what Resume takes).
+func (l *Loop) Anchor() int64 { return l.last }
+
 // Items is what the loop has kept, in order.
 func (l *Loop) Items() []Item { return append([]Item{}, l.kept...) }
 

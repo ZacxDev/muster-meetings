@@ -44,6 +44,17 @@ configMapGenerator:
       - s3-endpoint=http://minio.example.test:9000
       - s3-bucket=meetings
       - s3-region=us-east-1
+      # The post-call notes (optional): the models (OpenRouter; the Secret
+      # holds OPENROUTER_API_KEY) and the mail server (STARTTLS required; the
+      # Secret holds MEETINGS_SMTP_USER and MEETINGS_SMTP_PASS). The
+      # NetworkPolicy patches below let the plugin reach OpenRouter over
+      # HTTPS and the mail server's port, and nothing more.
+      - items-model=deepseek/deepseek-v4.1-flash-1017
+      - 'items-provider-prefs={"data_collection":"deny","order":["deepinfra/fp8"],"allow_fallbacks":false}'
+      - vision-model=anthropic/claude-haiku-5.5
+      - 'vision-provider-prefs={"data_collection":"deny","order":["anthropic"],"allow_fallbacks":false}'
+      - smtp-addr=mail.example.test:587
+      - mail-from=meetings@mail.example.test
 
 patches:
   # The NodePorts the outside route targets.
@@ -95,6 +106,24 @@ patches:
             - ipBlock: {cidr: 192.0.2.50/32}
           ports:
             - {protocol: TCP, port: 9000}
+      # The post-call notes (optional): OpenRouter over HTTPS, and the mail
+      # server's port, last. OpenRouter's edge has no fixed range: a real
+      # tenant writes the public internet here (README "Post-call notes"),
+      # not this documentation block.
+      - op: add
+        path: /spec/egress/-
+        value:
+          to:
+            - ipBlock: {cidr: 198.51.100.0/24}
+          ports:
+            - {protocol: TCP, port: 443}
+      - op: add
+        path: /spec/egress/-
+        value:
+          to:
+            - ipBlock: {cidr: 192.0.2.60/32}
+          ports:
+            - {protocol: TCP, port: 587}
   # The recording (optional): Egress uploads to the same store, and only to it.
   - target: {kind: NetworkPolicy, name: egress}
     patch: |-

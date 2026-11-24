@@ -873,14 +873,94 @@
       if (open === '' && was === 'transcript') closed = true;
     });
     return Transcript($('transcript'), $('transcript-status'), {
-      reveal: function () { if (!closed && !side.isOpen('transcript') && !(side.isOpen('people') && busy && busy())) side.open('transcript'); },
+      // The action items the person opened are not taken over by a line.
+      reveal: function () { if (!closed && !side.isOpen('transcript') && !side.isOpen('items') && !(side.isOpen('people') && busy && busy())) side.open('transcript'); },
       unseen: function () { if (!side.isOpen('transcript')) dot.hidden = false; },
       hide: function () { closed = false; dot.hidden = true; if (side.isOpen('transcript')) side.close(false); }
+    });
+  }
+
+  // ---- the action items (phase 4b): one panel, the owner's and every
+  // admitted guest's alike ----
+  //
+  // itemEl draws one item: a check icon, the task, and under it whose it is
+  // and when it is due. 🔴 All textContent: an item is a model's words over
+  // what was said.
+  function itemEl(it) {
+    var li = document.createElement('li');
+    li.className = 'item';
+    if (it.id != null) li.setAttribute('data-id', String(it.id));
+    var ic = document.createElement('span');
+    ic.className = 'item__icon';
+    ic.setAttribute('data-icon', 'check');
+    var body = document.createElement('div');
+    body.className = 'item__body';
+    var text = document.createElement('span');
+    text.className = 'item__text';
+    text.textContent = it.text;
+    body.appendChild(text);
+    var meta = document.createElement('span');
+    meta.className = 'item__meta';
+    var who = document.createElement('span');
+    who.className = 'mu-chip item__who';
+    who.setAttribute('data-icon', 'people');
+    who.textContent = it.assignee || 'Unassigned';
+    meta.appendChild(who);
+    if (it.due) {
+      var due = document.createElement('span');
+      due.className = 'item__due';
+      due.textContent = 'Due ' + it.due;
+      meta.appendChild(due);
+    }
+    body.appendChild(meta);
+    li.appendChild(ic);
+    li.appendChild(body);
+    UI.decorate(li);
+    return li;
+  }
+
+  // ActionItems is the live panel over a list: each "items" event is the
+  // meeting's whole list (new ones rise in), and paused says "Action items
+  // paused" (three failed calls in a row, or the service refused).
+  function ActionItems(list, statusEl, emptyEl, ui) {
+    ui = ui || {};
+    var shown = {};
+    return {
+      update: function (d) {
+        if (ui.available) ui.available();
+        var fresh = false;
+        (d.items || []).forEach(function (it) {
+          if (shown[it.id]) return;
+          shown[it.id] = true;
+          var li = itemEl(it);
+          li.classList.add('new');
+          list.appendChild(li);
+          fresh = true;
+        });
+        emptyEl.hidden = list.children.length > 0;
+        statusEl.hidden = !d.paused;
+        if (fresh && ui.unseen) ui.unseen();
+      },
+      reset: function () { list.textContent = ''; shown = {}; emptyEl.hidden = false; statusEl.hidden = true; }
+    };
+  }
+
+  // itemsPanel joins ActionItems to the side panel and its button: the
+  // button appears with the first "items" event (no model, or the switch
+  // off, is no event and no button); a dot marks new items while it is shut.
+  function itemsPanel(side) {
+    var btn = $('btn-items'), dot = $('items-new');
+    side.add('items', $('items-panel'), btn);
+    side.on(function (open) { if (open === 'items') dot.hidden = true; });
+    return ActionItems($('items-list'), $('items-status'), $('items-empty'), {
+      available: function () { btn.hidden = false; },
+      unseen: function () { if (!side.isOpen('items')) dot.hidden = false; }
     });
   }
 
   UI.decorate(document);
 
   window.MeetingsCall = { prejoin: prejoin, join: join, usable: usable, PENDING_MS: PENDING_MS, readEvents: readEvents, showBadge: showBadge, replacedElsewhere: replacedElsewhere,
-    Transcript: Transcript, transcriptPanel: transcriptPanel, Side: Side, lineEl: lineEl, clock: clock };
+    Transcript: Transcript, transcriptPanel: transcriptPanel, Side: Side, lineEl: lineEl, clock: clock,
+    itemEl: itemEl, ActionItems: ActionItems, itemsPanel: itemsPanel };
 })();

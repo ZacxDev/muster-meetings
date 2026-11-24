@@ -21,6 +21,16 @@
     <p id="retention" class="retention muted" hidden><label for="retention-days">Recordings are kept</label>
       <select id="retention-days" class="mu-select"><option value="0">forever</option><option value="30">30 days</option><option value="90">90 days</option><option value="365">365 days</option></select>
       <span id="retention-after">until you delete them.</span></p>
+    <!-- The meeting notes' address (only a plugin that mails): typed once,
+         confirmed by a link mailed to it, before any notes are sent. -->
+    <section id="notes-settings" class="mu-card notes-settings" hidden aria-labelledby="notes-settings-title">
+      <h2 id="notes-settings-title"><span data-icon="send"></span>Meeting notes by email</h2>
+      <p id="notes-addr-state" class="mu-help"></p>
+      <form id="notes-addr-form" class="share-row">
+        <input id="notes-addr" class="mu-input" type="email" autocomplete="email" placeholder="you@example.com" aria-label="Your email address for meeting notes">
+        <button id="notes-addr-send" type="submit" class="mu-btn mu-btn--secondary mu-btn--sm">Send link</button>
+      </form>
+    </section>
     <section aria-label="Past meetings">
       <div id="empty" class="empty" hidden><span data-icon="people"></span>No meetings yet.</div>
       <ul id="meetings" class="meetings"></ul>
@@ -69,6 +79,41 @@
         </div>
       </section>
       <div class="archive-text">
+        <!-- What the AI made of the meeting (only with a model configured):
+             the action items and the screen notes of the
+             current run, the runs, and the drafts of the notes. -->
+        <section id="analysis" class="analysis" hidden aria-label="Notes">
+          <p id="analysis-state" class="muted"></p>
+          <section aria-labelledby="archive-items-title">
+            <h2 id="archive-items-title" class="section-title"><span data-icon="check"></span>Action items</h2>
+            <ol id="archive-items" class="items"></ol>
+            <p id="archive-items-empty" class="muted" hidden>No action items were found.</p>
+          </section>
+          <section id="notes-box" hidden aria-labelledby="notes-title">
+            <h2 id="notes-title" class="section-title"><span data-icon="screen-share"></span>On the shared screen</h2>
+            <ol id="frame-notes" class="frame-notes"></ol>
+          </section>
+          <div class="runs">
+            <label class="mu-label" for="run-pick">Run</label>
+            <select id="run-pick" class="mu-select" aria-label="Run"></select>
+            <button id="run-current" type="button" class="mu-btn mu-btn--secondary mu-btn--sm" hidden>Use this run</button>
+            <button id="reprocess" type="button" class="mu-btn mu-btn--ghost mu-btn--sm" data-icon="send">Run again</button>
+          </div>
+          <details class="reprocess-more">
+            <summary class="muted">Run with another model</summary>
+            <div class="mu-field"><label class="mu-label" for="rp-model">Items model</label><input id="rp-model" class="mu-input" placeholder="provider/model" aria-label="Items model"></div>
+            <div class="mu-field"><label class="mu-label" for="rp-prefs">Provider preferences (JSON, with a provider pin)</label><textarea id="rp-prefs" class="mu-textarea" rows="2" aria-label="Provider preferences"></textarea></div>
+            <button id="rp-go" type="button" class="mu-btn mu-btn--secondary mu-btn--sm">Run with this model</button>
+          </details>
+          <!-- The notes by email: one draft per recipient; nothing is sent
+               until Send. -->
+          <section id="drafts" class="drafts" hidden aria-labelledby="drafts-title">
+            <h2 id="drafts-title" class="section-title"><span data-icon="send"></span>Email the notes</h2>
+            <p id="drafts-state" class="mu-help"></p>
+            <div id="draft-list" class="draft-list"></div>
+            <button id="drafts-send" type="button" class="mu-btn mu-btn--primary" data-icon="send">Send notes</button>
+          </section>
+        </section>
         <p id="archive-empty" class="empty" hidden>Nothing was transcribed in this meeting.</p>
         <ol id="archive-lines" class="transcript"></ol>
       </div>
@@ -155,7 +200,17 @@
             <p id="lobby-empty" class="empty">No one is waiting.</p>
           </div>
         </section>
-        <!-- The live transcript; the action items join it in phase 4. -->
+        <!-- The live action items (only with the AI action items on and a
+             model configured): what the AI service found, each with whose it
+             is, the same for the owner and every admitted guest. -->
+        <section id="items-panel" class="panel" hidden aria-labelledby="items-title">
+          <div class="panel__head"><h2 id="items-title">Action items</h2>
+            <span id="items-status" class="mu-chip mu-chip--warning" data-icon="warning" role="status" hidden>Action items paused</span>
+            <button type="button" class="mu-icon-btn panel-close" aria-label="Close action items" data-icon="close"></button></div>
+          <ol id="items-list" class="items" aria-live="polite"></ol>
+          <p id="items-empty" class="empty items-empty"><span data-icon="check"></span>No action items yet.</p>
+        </section>
+        <!-- The live transcript. -->
         <section id="panels" class="panel" hidden aria-labelledby="transcript-title">
           <div class="panel__head"><h2 id="transcript-title">Transcript</h2>
             <span id="transcript-status" class="mu-chip mu-chip--warning" role="status"></span>
@@ -171,6 +226,7 @@
       <button id="btn-share" type="button" class="mu-icon-btn mu-toggle" aria-label="Share screen" data-mu-tooltip="Share screen (S)" aria-keyshortcuts="S" aria-pressed="false" data-icon="screen-share"></button>
       <button id="btn-layout" type="button" class="mu-icon-btn mu-toggle" aria-label="Presentation view" aria-pressed="false" data-icon="fullscreen"></button>
       <span class="sep" aria-hidden="true"></span>
+<button id="btn-items" type="button" class="mu-icon-btn mu-toggle" aria-label="Action items" aria-pressed="false" aria-controls="items-panel" data-icon="check" hidden><span id="items-new" class="dot" hidden></span></button>
       <button id="btn-transcript" type="button" class="mu-icon-btn mu-toggle" aria-label="Transcript" aria-pressed="false" aria-controls="panels" data-icon="transcript"><span id="transcript-new" class="dot" hidden></span></button>
       <button id="btn-people" type="button" class="mu-icon-btn mu-toggle" aria-label="People" aria-pressed="false" aria-controls="lobby-panel" data-icon="people"><span id="lobby-count" class="mu-badge mu-badge--accent" hidden></span></button>
       <button id="btn-leave" type="button" class="mu-icon-btn mu-icon-btn--danger" aria-label="Leave" aria-haspopup="menu" data-icon="leave"></button>

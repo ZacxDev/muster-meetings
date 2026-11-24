@@ -62,12 +62,35 @@
 //	MEETINGS_S3_ACCESS_KEY    a key scoped to that bucket alone
 //	MEETINGS_S3_SECRET_KEY    its secret
 //	MEETINGS_FFMPEG           the ffmpeg frame sampling runs (default: ffmpeg on PATH; the image carries one)
+//
+// The post-call notes, OPTIONAL (README: "Post-call notes"): unset, the
+// plugin makes no AI call and sends no email, exactly as without them.
+//
+//	OPENROUTER_API_KEY              OpenRouter's key (required unless MEETINGS_ITEMS_MODEL is off or unset)
+//	MEETINGS_ITEMS_MODEL            the action items' model, an OpenRouter slug; unset or off: no analysis
+//	MEETINGS_ITEMS_ADAPTER          extract or chat_json (default: derived from the slug)
+//	MEETINGS_ITEMS_PROVIDER_PREFS   OpenRouter's provider object (data_collection "deny" always; a chat_json model needs a pin)
+//	MEETINGS_ITEMS_EVERY            the live window's period (default 10s)
+//	MEETINGS_VISION_MODEL           the frame analysis' model (default anthropic/claude-haiku-5.5; off: none)
+//	MEETINGS_VISION_PROVIDER_PREFS  its provider object (default: Anthropic only, no fallbacks)
+//	MEETINGS_SMTP_ADDR              the mail server, host:port (STARTTLS required); unset: no email
+//	MEETINGS_SMTP_USER, _PASS       its login (both or neither)
+//	MEETINGS_SMTP_SERVER_NAME       the name its certificate carries (default: the host)
+//	MEETINGS_MAIL_FROM              the sender address, e.g. meetings@mail.example.test (required with MEETINGS_SMTP_ADDR)
+//
+// `muster-meetings reprocess -from YYYY-MM-DD -to YYYY-MM-DD [-items-model …]
+// [-items-prefs …] [-vision-model …|off] [-vision-prefs …]` queues a post-call
+// pass for every meeting that ended in the range (the running plugin's worker
+// runs them; see README "Reprocessing").
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -84,7 +107,9 @@ import (
 	"github.com/ZacxDev/muster-meetings/internal/contacts"
 	"github.com/ZacxDev/muster-meetings/internal/frames"
 	"github.com/ZacxDev/muster-meetings/internal/ingest"
+	"github.com/ZacxDev/muster-meetings/internal/items"
 	"github.com/ZacxDev/muster-meetings/internal/livekit"
+	"github.com/ZacxDev/muster-meetings/internal/mail"
 	"github.com/ZacxDev/muster-meetings/internal/muster"
 	"github.com/ZacxDev/muster-meetings/internal/owners"
 	"github.com/ZacxDev/muster-meetings/internal/s3"
@@ -95,6 +120,13 @@ import (
 
 func main() {
 	logger := log.New(os.Stderr, "", log.LstdFlags)
+	if len(os.Args) > 1 && os.Args[1] == "reprocess" {
+		if err := reprocess(os.Args[2:], os.Getenv, os.Stdout); err != nil {
+			logger.Printf("muster-meetings reprocess: %v", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(logger); err != nil {
 		logger.Printf("muster-meetings: %v", err)
 		os.Exit(1)
@@ -139,6 +171,87 @@ type Config struct {
 	// variable is unset (no recording). FFmpeg is MEETINGS_FFMPEG.
 	S3     *s3.Client
 	FFmpeg string
+
+	// AI is the analysis (nil: off); Mail the notes' mail server (nil: off).
+	AI   *server.AIConfig
+	Mail *mail.Sender
+}
+
+// The frame analysis' default model and provider pin (the operator's
+// decision: DeepSeek reads no images).
+const (
+	DefaultVisionModel = "anthropic/claude-haiku-5.5"
+	DefaultVisionPrefs = `{"data_collection":"deny","order":["anthropic"],"allow_fallbacks":false}`
+)
+
+// loadAI reads the analysis: MEETINGS_ITEMS_MODEL unset or off is none,
+// whatever else is set; a model needs OPENROUTER_API_KEY. 🔴 No value is
+// echoed: the key is a secret.
+func loadAI(getenv func(string) string) (*server.AIConfig, error) {
+	model := strings.TrimSpace(getenv("MEETINGS_ITEMS_MODEL"))
+	if model == "" || model == items.Off {
+		return nil, nil
+	}
+	key := strings.TrimSpace(getenv("OPENROUTER_API_KEY"))
+	if key == "" {
+		return nil, errors.New("MEETINGS_ITEMS_MODEL is set but OPENROUTER_API_KEY is not (set MEETINGS_ITEMS_MODEL=off for no action items)")
+	}
+	ad := strings.TrimSpace(getenv("MEETINGS_ITEMS_ADAPTER"))
+	switch ad {
+	case "":
+		ad = items.AdapterFor(model)
+	case items.AdapterExtract, items.AdapterChatJSON:
+	default:
+		return nil, errors.New("MEETINGS_ITEMS_ADAPTER is extract or chat_json")
+	}
+	prefs, err := items.ParsePrefs(getenv("MEETINGS_ITEMS_PROVIDER_PREFS"), ad)
+	if err != nil {
+		return nil, err
+	}
+	c := &server.AIConfig{Items: items.Config{Model: model, Adapter: ad, Prefs: prefs, APIKey: key}, Every: items.DefaultEvery}
+	if _, err := items.New(c.Items, nil); err != nil {
+		return nil, err
+	}
+	if v := strings.TrimSpace(getenv("MEETINGS_ITEMS_EVERY")); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < time.Second || d > 5*time.Minute {
+			return nil, errors.New("MEETINGS_ITEMS_EVERY is a duration from 1s to 5m, e.g. 10s")
+		}
+		c.Every = d
+	}
+	vm := strings.TrimSpace(getenv("MEETINGS_VISION_MODEL"))
+	vp := getenv("MEETINGS_VISION_PROVIDER_PREFS")
+	switch {
+	case vm == items.Off:
+		return c, nil
+	case vm == "":
+		vm = DefaultVisionModel
+		if strings.TrimSpace(vp) == "" {
+			vp = DefaultVisionPrefs
+		}
+	}
+	vprefs, err := items.ParsePrefs(vp, items.AdapterChatJSON)
+	if err != nil {
+		return nil, errors.New(strings.Replace(err.Error(), "MEETINGS_ITEMS_PROVIDER_PREFS", "MEETINGS_VISION_PROVIDER_PREFS", 1))
+	}
+	c.Vision = items.Config{Model: vm, Adapter: items.AdapterChatJSON, Prefs: vprefs, APIKey: key}
+	if _, err := items.NewVision(c.Vision, nil); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// loadMail reads the notes' mail server: MEETINGS_SMTP_ADDR unset is none.
+func loadMail(getenv func(string) string, haveAI bool) (*mail.Sender, error) {
+	addr := strings.TrimSpace(getenv("MEETINGS_SMTP_ADDR"))
+	if addr == "" {
+		return nil, nil
+	}
+	if !haveAI {
+		return nil, errors.New("MEETINGS_SMTP_ADDR is set but MEETINGS_ITEMS_MODEL is not: the notes need the action items")
+	}
+	return mail.New(mail.Config{Addr: addr, User: strings.TrimSpace(getenv("MEETINGS_SMTP_USER")), Pass: getenv("MEETINGS_SMTP_PASS"),
+		From: strings.TrimSpace(getenv("MEETINGS_MAIL_FROM")), ServerName: strings.TrimSpace(getenv("MEETINGS_SMTP_SERVER_NAME"))})
 }
 
 // ErrS3Half is a recording configuration with some of its variables and not
@@ -279,6 +392,12 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	c.FFmpeg = strings.TrimSpace(getenv("MEETINGS_FFMPEG"))
+	if c.AI, err = loadAI(getenv); err != nil {
+		return Config{}, err
+	}
+	if c.Mail, err = loadMail(getenv, c.AI != nil); err != nil {
+		return Config{}, err
+	}
 	return c, nil
 }
 
@@ -523,7 +642,7 @@ func (cfg Config) serverConfig(logger *log.Logger, lk *livekit.Client) server.Co
 	return server.Config{PublicURL: cfg.PublicURL, MusterOrigin: cfg.MusterOrigin, KitUpstream: cfg.URL, Log: logger,
 		LiveKit: lk, LiveKitURL: cfg.LiveKitURL, ICE: cfg.ICE, TrustedProxies: cfg.TrustedProxies,
 		ClientIPHeader: cfg.ClientIPHeader, IngestURL: cfg.IngestURL, IngestKey: cfg.IngestKey,
-		Contacts: cfg.Contacts, S3: cfg.S3, Frames: cfg.frames()}
+		Contacts: cfg.Contacts, S3: cfg.S3, Frames: cfg.frames(), AI: cfg.AI, Mail: cfg.Mail}
 }
 
 // frames is the frame sampler: off without a bucket (nothing to sample).
@@ -586,5 +705,101 @@ func startupLine(cfg Config, name string, pluginID int64, tasks bool) string {
 		}
 		line += fmt.Sprintf("; recording: bucket %q at %s, %s", cfg.S3.Bucket(), muster.Redact(cfg.S3.Endpoint()), fr)
 	}
+	// Nor without a model, nor without a mail server.
+	if cfg.AI != nil {
+		vision := "no frame analysis"
+		if cfg.AI.Vision.Model != "" && cfg.S3 != nil {
+			vision = "frames by " + cfg.AI.Vision.Model
+		}
+		line += fmt.Sprintf("; action items: %s (%s, live every %s), %s", cfg.AI.Items.Model, cfg.AI.Items.Adapter, cfg.AI.Every, vision)
+	}
+	if cfg.Mail != nil {
+		line += fmt.Sprintf("; notes: mail via %s from %s", cfg.Mail.Host(), cfg.Mail.From())
+	}
 	return line
+}
+
+// reprocess is the admin command: a post-call pass queued for every meeting
+// that ended in [-from, -to] (dates, UTC; -to inclusive), under the
+// configured models or the ones given. It writes to the database the
+// running plugin uses (same STATE_DIR): its worker runs them.
+func reprocess(args []string, getenv func(string) string, out io.Writer) error {
+	fs := flag.NewFlagSet("reprocess", flag.ContinueOnError)
+	from := fs.String("from", "", "first day, YYYY-MM-DD (UTC)")
+	to := fs.String("to", "", "last day, YYYY-MM-DD (UTC), inclusive")
+	im := fs.String("items-model", "", "the items model (default MEETINGS_ITEMS_MODEL)")
+	ip := fs.String("items-prefs", "", "its provider object (required with another model)")
+	vm := fs.String("vision-model", "", "the vision model (default MEETINGS_VISION_MODEL's; off for none)")
+	vp := fs.String("vision-prefs", "", "its provider object (required with another model)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	d0, err1 := time.Parse("2006-01-02", *from)
+	d1, err2 := time.Parse("2006-01-02", *to)
+	if err1 != nil || err2 != nil || d1.Before(d0) {
+		return errors.New("-from and -to are dates, YYYY-MM-DD, -to not before -from")
+	}
+	cfg, err := LoadConfig(getenv)
+	if err != nil {
+		return err
+	}
+	if cfg.AI == nil {
+		return errors.New("MEETINGS_ITEMS_MODEL is off: there is nothing to reprocess with")
+	}
+	pick := func(model, prefs, defModel string, defPrefs map[string]any, adapter func(string) string, name string) (string, string, error) {
+		if model == "" {
+			model = defModel
+			if prefs == "" {
+				b, _ := json.Marshal(defPrefs)
+				prefs = string(b)
+			}
+		} else if prefs == "" && model != defModel {
+			return "", "", fmt.Errorf("-%s-model %s needs -%s-prefs (a provider pin)", name, model, name)
+		} else if prefs == "" {
+			b, _ := json.Marshal(defPrefs)
+			prefs = string(b)
+		}
+		p, err := items.ParsePrefs(prefs, adapter(model))
+		if err != nil {
+			return "", "", err
+		}
+		b, _ := json.Marshal(p)
+		return model, string(b), nil
+	}
+	itemsModel, itemsPrefs, err := pick(*im, *ip, cfg.AI.Items.Model, cfg.AI.Items.Prefs, items.AdapterFor, "items")
+	if err != nil {
+		return err
+	}
+	visionModel, visionPrefs := "", ""
+	if *vm != items.Off && cfg.S3 != nil && (cfg.AI.Vision.Model != "" || *vm != "") {
+		if visionModel, visionPrefs, err = pick(*vm, *vp, cfg.AI.Vision.Model, cfg.AI.Vision.Prefs, func(string) string { return items.AdapterChatJSON }, "vision"); err != nil {
+			return err
+		}
+	}
+	st, err := store.Open(filepath.Join(cfg.StateDir, "meetings.db"), cfg.LinkKey)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	ctx := context.Background()
+	ids, err := st.EndedBetween(ctx, d0, d1.Add(24*time.Hour))
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	for _, id := range ids {
+		if _, err := st.QueuePost(ctx, id, itemsModel, itemsPrefs, visionModel, visionPrefs, "admin", now); err != nil {
+			return fmt.Errorf("meeting %s: %w", id, err)
+		}
+	}
+	fmt.Fprintf(out, "queued %d post-call runs (items %s, vision %s) for meetings that ended %s to %s; the running plugin runs them\n",
+		len(ids), itemsModel, orNone(visionModel), *from, *to)
+	return nil
+}
+
+func orNone(v string) string {
+	if v == "" {
+		return "none"
+	}
+	return v
 }

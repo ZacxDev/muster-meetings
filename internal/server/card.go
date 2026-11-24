@@ -117,13 +117,16 @@ type cardPayload struct {
 	ID    string `json:"id"`
 	Name  string `json:"name"`
 	Owner string `json:"owner"`
+	// Notes says the address is also kept for the meeting notes (only with
+	// mail configured: the card's consent then says so).
+	Notes bool `json:"notes,omitempty"`
 }
 
 // offerCard mints participant pid's card when contacts is configured, the
 // cached answer says contacts accepts the meeting's owner, and the store's
 // card predicate holds (an admitted guest, never the owner, whose meeting
 // ended by End or their Leave, offered none before). nil otherwise.
-func (s *Server) offerCard(ctx context.Context, subject, pid string) *cardPayload {
+func (s *Server) offerCard(ctx context.Context, subject, pid, meetingID string) *cardPayload {
 	if s.contacts == nil || !s.contacts.accepting.Get(subject) {
 		return nil
 	}
@@ -135,14 +138,14 @@ func (s *Server) offerCard(ctx context.Context, subject, pid string) *cardPayloa
 	if !ok {
 		return nil
 	}
-	return &cardPayload{ID: off.ID, Name: off.TypedName, Owner: off.OwnerName}
+	return &cardPayload{ID: off.ID, Name: off.TypedName, Owner: off.OwnerName, Notes: s.notesFor(ctx, meetingID)}
 }
 
 // endedPayload is a guest's "ended" event: its message, and the card when
 // one is offered. Without a card it is the event as it always was.
 func (s *Server) endedPayload(ctx context.Context, g store.Guest) map[string]any {
 	out := map[string]any{"message": GuestEnded}
-	if c := s.offerCard(ctx, g.Subject, g.ParticipantID); c != nil {
+	if c := s.offerCard(ctx, g.Subject, g.ParticipantID, g.MeetingID); c != nil {
 		out["card"] = c
 	}
 	return out
@@ -197,7 +200,8 @@ func (s *Server) handleCard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := s.cfg.Now()
-	if _, err := s.store.CardByID(r.Context(), in.ID, now); errors.Is(err, store.ErrNotFound) {
+	card, err := s.store.CardByID(r.Context(), in.ID, now)
+	if errors.Is(err, store.ErrNotFound) {
 		guestErr(w, http.StatusNotFound, CardExpired)
 		return
 	} else if err != nil {
@@ -206,6 +210,11 @@ func (s *Server) handleCard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name, email, field := CardFields(in.Name, in.Email)
+	// With the notes on, the address must also be one the mail server
+	// takes (NotesAddress, the outbox's own rule).
+	if field == "" && s.notesFor(r.Context(), card.MeetingID) && !NotesAddress(email) {
+		field = "email"
+	}
 	if field != "" {
 		msg := CardEmailError
 		if field == "name" {
@@ -227,6 +236,8 @@ func (s *Server) handleCard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.contacts.outbox.Kick()
+	// With mail on, the address is also kept for this meeting's notes.
+	s.keepCardEmail(r.Context(), spent, email)
 	writeJSON(w, http.StatusOK, map[string]any{"message": CardSentMessage(spent.OwnerName)})
 }
 

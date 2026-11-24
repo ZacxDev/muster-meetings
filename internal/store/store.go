@@ -43,7 +43,7 @@ var ErrNotFound = errors.New("not found")
 
 // migrations are applied in order; PRAGMA user_version counts those done.
 // Never edit one that has shipped: add the next. Later phases add
-// participants, segments, action items, recordings, summaries and the
+// participants, segments, action items, recordings and the
 // owner's settings as their own migrations.
 var migrations = []string{
 	// 1: the 2a core.
@@ -280,6 +280,110 @@ var migrations = []string{
 		end_ms     INTEGER             -- NULL while it is shared
 	) STRICT;
 	CREATE INDEX screen_shares_meeting ON screen_shares (meeting_id, start_ms);`,
+
+	// 7: the post-call pass (design: "Action items"; decisions
+	// 1–4 and 7). ai_runs is one row per analysis of a meeting: the live
+	// worker's (kind live, one per meeting) and every post-call pass (kind
+	// post: at End, and each reprocess), with the models and provider
+	// preferences that made it; exactly one run per meeting is CURRENT (the
+	// newest finished one, or the one the owner reverted to). ai_items,
+	// ai_items and ai_notes are what a run made, each citing transcript
+	// segment ids (and frame times). mail_drafts is one email per recipient
+	// per run; 🔴 a recipient has at most ONE row queued, sending, sent or
+	// of unknown outcome per meeting (mail_drafts_one_send), so nothing a
+	// reprocess does can send a second email or change a sent one.
+	// participants.card_email is the address a guest typed on the card,
+	// kept for the drafts: cleared when their notes are sent, and for every
+	// meeting MailKeepDays after it ended. owners gain the owner's address,
+	// confirmed by a mailed link (its token stored only as SHA-256).
+	// recording_shares gain a kind: the notes' video links (mail) are not
+	// turned off by the owner sharing again. agent_tokens are owner-minted,
+	// read-only, one-meeting tokens for a muster agent (SHA-256 only).
+	// 🔴 One-way, like every migration here: an older build refuses a
+	// database at schema 7; roll back by unsetting OPENROUTER_API_KEY and
+	// MEETINGS_SMTP_ADDR (README: "Post-call notes"), never by running an
+	// older image on this database. Every column added is NULL or its
+	// default on every existing row.
+	`ALTER TABLE owners ADD COLUMN email TEXT;
+	ALTER TABLE owners ADD COLUMN email_pending TEXT;
+	ALTER TABLE owners ADD COLUMN email_token_sha256 TEXT;
+	ALTER TABLE owners ADD COLUMN email_token_expires_at INTEGER;
+	CREATE UNIQUE INDEX owners_email_token ON owners (email_token_sha256) WHERE email_token_sha256 IS NOT NULL;
+	ALTER TABLE participants ADD COLUMN card_email TEXT; -- a guest's address from the card: never logged
+	ALTER TABLE meetings ADD COLUMN ai_frames INTEGER NOT NULL DEFAULT 0 CHECK (ai_frames IN (0, 1)); -- its notice named the frames of shared screens
+	ALTER TABLE recording_shares ADD COLUMN kind TEXT NOT NULL DEFAULT 'owner' CHECK (kind IN ('owner', 'mail'));
+	CREATE TABLE ai_runs (
+		id           INTEGER PRIMARY KEY,
+		meeting_id   TEXT    NOT NULL REFERENCES meetings (id),
+		kind         TEXT    NOT NULL CHECK (kind IN ('live', 'post')),
+		items_model  TEXT    NOT NULL,
+		items_prefs  TEXT    NOT NULL,           -- the provider object as sent (JSON)
+		vision_model TEXT    NOT NULL DEFAULT '', -- '' for no frame analysis
+		vision_prefs TEXT    NOT NULL DEFAULT '',
+		state        TEXT    NOT NULL CHECK (state IN ('queued', 'running', 'done', 'failed')),
+		current      INTEGER NOT NULL DEFAULT 0 CHECK (current IN (0, 1)),
+		attempts     INTEGER NOT NULL DEFAULT 0,
+		next_at      INTEGER NOT NULL,
+		anchor       INTEGER NOT NULL DEFAULT 0, -- live: the last segment a successful call covered
+		failures     INTEGER NOT NULL DEFAULT 0, -- live: failed calls in a row
+		partial      INTEGER NOT NULL DEFAULT 0 CHECK (partial IN (0, 1)),
+		error        TEXT    NOT NULL DEFAULT '', -- a fixed phrase, never a model's words
+		requested_by TEXT    NOT NULL DEFAULT '' CHECK (requested_by IN ('', 'end', 'owner', 'admin')),
+		created_at   INTEGER NOT NULL,
+		finished_at  INTEGER
+	) STRICT;
+	CREATE INDEX ai_runs_meeting ON ai_runs (meeting_id, id);
+	CREATE INDEX ai_runs_due ON ai_runs (state, next_at) WHERE state IN ('queued', 'running');
+	CREATE UNIQUE INDEX ai_runs_live ON ai_runs (meeting_id) WHERE kind = 'live';
+	CREATE UNIQUE INDEX ai_runs_current ON ai_runs (meeting_id) WHERE current = 1;
+	CREATE TABLE ai_items (
+		id         INTEGER PRIMARY KEY,
+		run_id     INTEGER NOT NULL REFERENCES ai_runs (id),
+		source     TEXT    NOT NULL CHECK (source IN ('live', 'transcript', 'frames')),
+		text       TEXT    NOT NULL, -- a model's words over what was said: untrusted, never logged
+		assignee   TEXT    NOT NULL DEFAULT '',
+		due        TEXT    NOT NULL DEFAULT '',
+		segments   TEXT    NOT NULL, -- JSON segment ids
+		frames     TEXT    NOT NULL DEFAULT '[]', -- JSON meeting times
+		created_at INTEGER NOT NULL
+	) STRICT;
+	CREATE INDEX ai_items_run ON ai_items (run_id, id);
+	CREATE TABLE ai_notes (
+		id       INTEGER PRIMARY KEY,
+		run_id   INTEGER NOT NULL REFERENCES ai_runs (id),
+		frame_ms INTEGER NOT NULL,
+		text     TEXT    NOT NULL,
+		segments TEXT    NOT NULL
+	) STRICT;
+	CREATE INDEX ai_notes_run ON ai_notes (run_id, frame_ms);
+	CREATE TABLE mail_drafts (
+		id          TEXT    PRIMARY KEY,           -- random; the Message-ID's local part
+		meeting_id  TEXT    NOT NULL REFERENCES meetings (id),
+		run_id      INTEGER NOT NULL REFERENCES ai_runs (id),
+		recipient   TEXT    NOT NULL,              -- 'owner', or the guest's participant id
+		name        TEXT    NOT NULL,              -- the name they spoke under
+		email       TEXT,                          -- a guest's address; NULL for the owner's (read at send), once sent, or purged
+		items       TEXT    NOT NULL,              -- JSON [{text, assignee, due}], as the owner left them
+		state       TEXT    NOT NULL CHECK (state IN ('draft', 'removed', 'superseded', 'queued', 'sending', 'sent', 'failed', 'unknown')),
+		attempts    INTEGER NOT NULL DEFAULT 0,
+		next_at     INTEGER,
+		approved_at INTEGER,
+		sent_at     INTEGER,
+		error       TEXT    NOT NULL DEFAULT '',   -- a fixed phrase and a reply code
+		changed     INTEGER NOT NULL DEFAULT 0 CHECK (changed IN (0, 1)), -- a reprocess changed the items the owner had edited
+		created_at  INTEGER NOT NULL,
+		updated_at  INTEGER NOT NULL
+	) STRICT;
+	CREATE INDEX mail_drafts_meeting ON mail_drafts (meeting_id, run_id);
+	CREATE INDEX mail_drafts_due ON mail_drafts (state, next_at) WHERE state = 'queued';
+	CREATE UNIQUE INDEX mail_drafts_one_send ON mail_drafts (meeting_id, recipient) WHERE state IN ('queued', 'sending', 'sent', 'unknown');
+	CREATE TABLE agent_tokens (
+		token_sha256 TEXT    PRIMARY KEY,
+		meeting_id   TEXT    NOT NULL REFERENCES meetings (id),
+		subject      TEXT    NOT NULL REFERENCES owners (subject),
+		created_at   INTEGER NOT NULL,
+		expires_at   INTEGER NOT NULL
+	) STRICT;`,
 }
 
 // ErrNeedsSubjectMap is a phase-2a database that holds owners or meetings:

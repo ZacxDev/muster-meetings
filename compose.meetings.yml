@@ -40,6 +40,10 @@
 #   MEETINGS_S3_SECRET_KEY (and MEETINGS_S3_REGION)  optional, all or none:
 #                       the recording's bucket, for the plugin and Egress alike
 #                       (README "Recording (optional)")
+#   OPENROUTER_API_KEY, MEETINGS_ITEMS_MODEL (and _PROVIDER_PREFS, _EVERY,
+#   MEETINGS_VISION_MODEL, _PROVIDER_PREFS), MEETINGS_SMTP_ADDR (and _USER,
+#   _PASS, _SERVER_NAME), MEETINGS_MAIL_FROM  optional: the post-call notes
+#                             (README "Post-call notes"); no model is none
 #   MEETINGS_CONTACTS_URL, MEETINGS_CONTACTS_TOKEN  optional, both or neither:
 #                             the contacts plugin's internal API and a COPY of
 #                             its CONTACTS_API_TOKEN (README "Contacts
@@ -99,6 +103,17 @@ services:
       MEETINGS_S3_REGION: ${MEETINGS_S3_REGION:-}
       MEETINGS_S3_ACCESS_KEY: ${MEETINGS_S3_ACCESS_KEY:-}
       MEETINGS_S3_SECRET_KEY: ${MEETINGS_S3_SECRET_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      MEETINGS_ITEMS_MODEL: ${MEETINGS_ITEMS_MODEL:-}
+      MEETINGS_ITEMS_PROVIDER_PREFS: ${MEETINGS_ITEMS_PROVIDER_PREFS:-}
+      MEETINGS_ITEMS_EVERY: ${MEETINGS_ITEMS_EVERY:-}
+      MEETINGS_VISION_MODEL: ${MEETINGS_VISION_MODEL:-}
+      MEETINGS_VISION_PROVIDER_PREFS: ${MEETINGS_VISION_PROVIDER_PREFS:-}
+      MEETINGS_SMTP_ADDR: ${MEETINGS_SMTP_ADDR:-}
+      MEETINGS_SMTP_USER: ${MEETINGS_SMTP_USER:-}
+      MEETINGS_SMTP_PASS: ${MEETINGS_SMTP_PASS:-}
+      MEETINGS_SMTP_SERVER_NAME: ${MEETINGS_SMTP_SERVER_NAME:-}
+      MEETINGS_MAIL_FROM: ${MEETINGS_MAIL_FROM:-}
       STATE_DIR: /state
       MEETINGS_STT_ENGINE: ${MEETINGS_STT_ENGINE:-utterance}
       MEETINGS_STT_URL: ${MEETINGS_STT_URL:-http://stt-cohere:8000}

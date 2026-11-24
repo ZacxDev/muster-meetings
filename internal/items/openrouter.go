@@ -59,8 +59,10 @@ func newClient(c Config, hc *http.Client) *client {
 }
 
 type message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role string `json:"role"`
+	// Content is a string, or (the vision request) a list of parts: the
+	// same JSON as a string for every text-only request.
+	Content any `json:"content"`
 }
 
 // request is the body both adapters send. Field order is the JSON's order,

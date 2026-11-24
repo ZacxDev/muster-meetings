@@ -29,9 +29,15 @@ video from that moment. **Share recording** makes a link anyone can open
 to watch it, with no muster sign-in, until the link is turned off or the
 recording deleted: recordings are kept **forever** by default, or 30, 90 or
 365 days after the meeting, and **Delete recording** in the archive deletes
-one at once. Action items come later: the
-**AI action items** switch and its notice are already here, because the
-notice says what will happen.
+one at once. **The notes (optional: only with a model configured,
+[Post-call notes (optional)](#post-call-notes-optional)):** with **AI
+action items** on, the call's lines go to an AI service as they are said,
+and the action items it finds appear in an **Action items** panel that you
+and every admitted guest see alike; after End, the whole transcript, the
+frames of a shared screen (with what was said over them) make the meeting's notes in its archive, and with a mail server configured
+you review one email per person (yours, and each guest's who sent the
+card), edit them, and press **Send notes**. Nothing is ever sent by
+itself.
 
 For you, the owner, that is the whole feature: open **Meetings**, press
 **New meeting**, copy the link, send it, admit whoever knocks.
@@ -192,6 +198,17 @@ Read from the environment only; `.env.example` lists them.
 | `MEETINGS_S3_ACCESS_KEY`, `MEETINGS_S3_SECRET_KEY` | with `MEETINGS_S3_ENDPOINT` | a key scoped to that bucket alone; Egress uploads with the same key. Never logged. 🔴 All four or none: some alone refuse to start |
 | `MEETINGS_S3_REGION` | no | the signing region; default `us-east-1` (MinIO's). Set alone it means nothing |
 | `MEETINGS_FFMPEG` | no | the ffmpeg that samples frames from a recording; default `ffmpeg` on `PATH` (the image carries a minimal one). Missing: the timeline still lists frame times, and the frame route answers `503` |
+| `MEETINGS_ITEMS_MODEL` | no | the action items' model, an OpenRouter slug, e.g. `deepseek/deepseek-v4.1-flash-1017` ([Post-call notes (optional)](#post-call-notes-optional)). Unset or `off`: no AI call, no notes, no email, exactly as before, whatever else is set |
+| `OPENROUTER_API_KEY` | with a model | OpenRouter's key. Never logged |
+| `MEETINGS_ITEMS_ADAPTER` | no | `chat_json` or `extract`; default derived from the slug (`scaledown/extract…` is `extract`) |
+| `MEETINGS_ITEMS_PROVIDER_PREFS` | with a `chat_json` model | OpenRouter's `provider` object, e.g. `{"data_collection":"deny","order":["deepinfra/fp8"],"allow_fallbacks":false}`. 🔴 `data_collection` is always `deny` (another value refuses to start), and a chat model must pin its provider (`order` with `allow_fallbacks: false`, or `quantizations`) |
+| `MEETINGS_ITEMS_EVERY` | no | the live window's period, `1s` to `5m`; default `10s` |
+| `MEETINGS_VISION_MODEL` | no | the frame analysis' model (it reads images); default `anthropic/claude-haiku-5.5`; `off` for none. Used only with a bucket (frames come from the recording) |
+| `MEETINGS_VISION_PROVIDER_PREFS` | with another vision model | its provider object; default `{"data_collection":"deny","order":["anthropic"],"allow_fallbacks":false}`. The same rules |
+| `MEETINGS_SMTP_ADDR` | no (needs a model) | the mail server the notes go through, `host:port`, e.g. `mail.example.test:587`. 🔴 STARTTLS is required (a server that does not offer it is refused before anything is sent; there is no switch). Unset: no email, the card keeps no address |
+| `MEETINGS_SMTP_USER`, `MEETINGS_SMTP_PASS` | no | its login (PLAIN, after STARTTLS), both or neither. Never logged |
+| `MEETINGS_SMTP_SERVER_NAME` | no | the name the server's certificate must carry; default `MEETINGS_SMTP_ADDR`'s host |
+| `MEETINGS_MAIL_FROM` | with `MEETINGS_SMTP_ADDR` | the sender address, e.g. `meetings@mail.example.test`. Each email is from `"<owner's name> via Meetings" <this>`, with Reply-To the owner's confirmed address |
 
 The plugin refuses to start when muster answers the token `401`
 (uninstalled or rotated away; it ends every session and open meeting
@@ -386,7 +403,11 @@ With the **muster-contacts** plugin deployed beside it (muster's
 optional card when the meeting ends for them, by **End** or by their own
 **Leave**: their name (prefilled from the knock) and email, the sentence
 "Your name and email go to *owner*, who will see that you were in this
-meeting. Nothing else is shared.", **Send** and **Skip**. Once per guest per
+meeting. Nothing else is shared." (with a mail server configured for the
+[post-call notes](#post-call-notes-optional): "…who will see that you were
+in this meeting, and you get the meeting notes when *owner* sends them.
+Nothing else is shared.", and the address is also kept for that meeting's
+notes), **Send** and **Skip**. Once per guest per
 meeting; never the owner; never a guest who only waited, was denied or was
 removed; only while contacts says it accepts that owner (asked in the
 background at most once a minute; a failed ask keeps the last answer for up
@@ -566,7 +587,9 @@ the pre-recording commit's).
   answers that moment as a JPEG (at most 1280 wide), with `X-Meeting-Ms`,
   `X-Recording-Part` and `X-Recording-Offset-Ms`. It runs ffmpeg against the
   store through a loopback range proxy (`internal/frames`), never copying the
-  file to disk. No model is called by this release. **Memory:** one ffmpeg
+  file to disk. With a model configured the bundle also carries
+  `analysis`: the current run and its items and frame notes
+  ([Post-call notes (optional)](#post-call-notes-optional)). **Memory:** one ffmpeg
   at a time, each with one thread (`-threads 1 -filter_threads 1`): a 1080p
   H.264 frame peaked at **64.5 MiB** that way, against 198 MiB with ffmpeg's
   default threads (measured on an 8-core host, ffmpeg 7.1). The plugin's
@@ -636,6 +659,135 @@ recordings at once: Egress's own capacity check refuses a composite it
 cannot take, and the plugin retries); **Apply to existing**
 (a retention change applies from the next meeting); recording while the
 owner is alone in the call (it starts at the first admit, as designed).
+
+### Post-call notes (optional)
+
+With `MEETINGS_ITEMS_MODEL` and `OPENROUTER_API_KEY` set, meetings with
+**AI action items** on get action items while they run and notes after
+they end; with `MEETINGS_SMTP_ADDR` and `MEETINGS_MAIL_FROM` too, the owner
+emails the notes. Unset, the plugin makes no AI call and sends no email, and
+every answer is the one before this feature
+(`TestNoModelAndNoMailChangeNothing`, a golden taken at the commit before
+it).
+
+**Live (during the call).** Every `MEETINGS_ITEMS_EVERY` (10 s), each open
+meeting with the switch on and a new final line gets one window: the lines
+of the last 90 s, and every line since the last window that succeeded,
+sent as a JSON document of data (a line of speech cannot become an
+instruction), with the items found so far. The model's answer goes through
+deterministic guards (a citation of a line outside the window, an owner
+who is not a speaker or named in the cited lines, a duplicate, more than 5
+in one window: dropped). Kept items appear in the **Action items** panel for
+the owner and every admitted guest; three failed calls in a row show
+"Action items paused". A refused key or model stops the live items for that
+meeting.
+
+**After End.** A post run is queued in the database (it survives a
+restart), and the worker runs, in order:
+
+1. the action items over the whole stored transcript (`items.PostCall`:
+   chunks of about 80 minutes, the same guards, at most 3 a minute), each
+   assigned to the speaker the model names;
+2. with a bucket, a vision model, and a screen shared while a line was
+   said: **frames + transcript**. A frame is sampled from the recording at
+   the middle of each line said over a shared screen (at most 24 a meeting,
+   spread evenly), and each batch of 4 goes to `MEETINGS_VISION_MODEL` with
+   what was said from a minute before to 30 s after. The answer is a note
+   per frame and the items the screen makes clearer; a note citing a frame
+   that was not sent, or a line outside the excerpt, is dropped, and so is
+   an item citing no frame. An item that restates one the transcript found
+   (same lines) sharpens it (the screen's wording, and its frame), never a
+   second item. The post run waits up to 20 minutes for a recording still
+   being written;
+
+A failed pass is tried at most three times, five minutes apart, then
+failed with its reason ("Run again" tries once more): never an endless
+re-spend on the model. A pass that loses part of the meeting keeps what it
+found and says "Part of this run failed". The finished run becomes the
+meeting's **current** run. Every ended meeting with AI action items on
+that has never had a pass gets one, however long ago it ended (so the
+first start after upgrading runs one for each past meeting with the switch
+on; a meeting from before the frame analysis gets no frames, since its
+notice never named them). With AI action items off, a meeting is never
+analysed, reprocessed, or promised notes.
+
+**Reprocessing.** Every run is kept with the models and the provider
+preferences that made it. In the archive, **Run again** queues a new run
+under the configured models, and **Run with another model** under another
+(its provider object is required, and is checked as the configuration's is:
+`deny` always, a pin). The newest finished run becomes current; any older
+run can be viewed and made current again (**Use this run**). For many
+meetings at once, as an admin, in the plugin's container:
+
+```sh
+muster-meetings reprocess -from 2026-11-01 -to 2026-11-24 \
+  [-items-model provider/model -items-prefs '{"order":["provider"],"allow_fallbacks":false}'] \
+  [-vision-model provider/model -vision-prefs '…' | -vision-model off]
+```
+
+queues one post run per meeting with AI action items on that ended in the
+range (UTC days, `-to`
+inclusive) in the plugin's database; the running plugin's worker runs them
+(within 30 s). One run waits per meeting: a new request replaces one not
+yet started. 🔴 A reprocess never changes notes already sent: a person
+whose email was sent (or is on its way, or may have arrived) keeps it as it
+was, and only the others get new drafts; the archive says how many were
+left alone. A new draft keeps what the owner did to the old one: a person
+taken out (**Don't send**) stays out, and edited items stay edited where
+the new run has the same item; when an edited item is gone, the draft
+takes the new items and says the edits were not carried.
+
+**The emails (owner approves first).** After a run, there is one draft per
+person: the owner, and every guest who sent the card (its address is kept
+for this; guests who skipped get nothing). In the archive the owner sees
+each draft's action items, can edit an item, its assignee and due date, add
+or remove items, take a person out (**Don't send**), **Preview** what that
+person will read, and press **Send notes**. 🔴 Nothing is queued but by
+Send, and Send needs the owner's address confirmed: on the meetings list,
+**Meeting notes by email** takes it once and mails a link to it (its token
+stored only as SHA-256, live 24 hours; opening the link changes nothing,
+its button confirms). Each email: thanks, **your** action items in a styled
+block (the items assigned to the name you spoke under; a first name alone
+counts only when no one else has it), everyone else's muted,
+the recording as a link (the share page, its own link per email, working as
+long as the recording is kept; Stop sharing or Delete recording turns it
+off), and the transcript attached as `.txt` and `.vtt` (left off, and said
+so, when the message would pass 7 MB). HTML with a plain-text twin, inline
+styles, no remote image. From `"<owner> via Meetings" <MEETINGS_MAIL_FROM>`,
+Reply-To the owner's confirmed address; Message-ID per draft, so a retry is
+the same message. The outbox retries a deferred send (1 min, 5 min, 15 min,
+1 h, 3 h) and shows each person's state: sent, failed (with its reason:
+the owner may fix a guest's address, then Send, or Try again), or "may
+have been sent" when the connection broke after the message was handed over
+(never retried by itself).
+
+**A muster agent reading a meeting (decision 4).** muster gives a plugin no
+way to answer an agent today (the plugin calls muster; muster never calls
+it), so the reachable path is a token the owner hands over:
+`POST /api/meetings/{id}/agent-token` (owner session) answers a read-only
+`mmr_…` token for that one meeting, live 7 days (stored as SHA-256), and its
+`timeline_url`. With `Authorization: Bearer mmr_…`,
+`GET /api/agent/meetings/{id}/timeline` is the time-aligned bundle (every
+line with its place in the recording, the screen shares, the frames' times)
+plus the current run's items and frame notes, and
+`GET /api/agent/meetings/{id}/frame?at=<ms>` one frame. Any other meeting,
+or a token that is unknown or expired, is 404. A native agent path (an agent
+asking muster, muster asking the plugin) needs a muster core change and is
+not in this release.
+
+**Deploying it.** The Secret gains `OPENROUTER_API_KEY`, and for a mail
+server with a login `MEETINGS_SMTP_USER` and `MEETINGS_SMTP_PASS`; the
+params gain `items-model`, `items-provider-prefs`, `vision-model`,
+`vision-provider-prefs` (optional), `smtp-addr`, `smtp-server-name`
+(optional) and `mail-from`. The plugin's NetworkPolicy needs two more egress
+rules: TCP 443 to OpenRouter (`openrouter.ai`, behind a CDN with no fixed
+range, so in practice the public internet: `0.0.0.0/0` except the private
+ranges) and the mail server's submission port. `deploy/example-overlay`
+shows both with documentation addresses.
+
+**Rolling back.** Unset `MEETINGS_ITEMS_MODEL` (and the mail server): no AI
+call, no email, every new route a 404. Migration 7 is one-way like the
+others: never run an older image on the database.
 
 ### Capacity and limits
 
@@ -731,6 +883,29 @@ that does not exist.
 | `POST /livekit/webhook` | internal listener only: LiveKit's signed webhook |
 | `WS /stt/ingest/{track}/{token}` | the ingest listener only: one track egress's audio (above) |
 | `GET /healthz` | internal listener only |
+
+With a model configured ([Post-call notes (optional)](#post-call-notes-optional)),
+and only then (otherwise each is the 404 of an unknown path):
+
+| route | does |
+|---|---|
+| `GET /api/meetings/{id}/analysis[?run=<id>]` | the runs (models, provider preferences, state, which is current) and one run's items and frame notes (default: the current run) |
+| `POST /api/meetings/{id}/reprocess` | `{"items_model"?, "items_provider_prefs"?, "vision_model"? (or "off"), "vision_provider_prefs"?}` → `202 {"run"}`; `409` while the meeting is open; another model needs its provider object |
+| `POST /api/meetings/{id}/analysis/runs/{rid}/current` | make a finished run current again → `{"current", "drafts": {"made", "already_sent"}}` |
+| `POST /api/meetings/{id}/agent-token` | `201 {"token": "mmr_…", "expires_at", "timeline_url"}`: read-only, this meeting, 7 days |
+| `GET /api/agent/meetings/{id}/timeline`, `…/frame?at=` | with `Bearer mmr_…`: the bundle with the analysis, a frame; anything else `404` |
+
+With a mail server configured too:
+
+| route | does |
+|---|---|
+| `GET /api/meetings/{id}/drafts` | `{"drafts": [...], "owner_email": {"confirmed", "pending"}}`, the owner's first |
+| `GET /api/meetings/{id}/drafts/{did}/preview` | `{"subject", "text", "yours", "others", "from", "video"}`: what that person will read |
+| `PATCH /api/meetings/{id}/drafts/{did}` | `{"items"?: [{"text", "assignee", "due"}], "removed"?: bool}`; `409` once sent or on its way |
+| `POST /api/meetings/{id}/drafts/send` | `{"ids"?: [...]}` → `{"queued"}`; `409` until the owner's address is confirmed |
+| `POST /api/meetings/{id}/drafts/{did}/retry` | send a failed (or "may have been sent") draft again |
+| `GET`/`PUT /api/settings/email` | the owner's notes address; `PUT {"email"}` mails the confirmation link (`202`), at most 5 an hour |
+| `GET`/`POST /e/{token}` | the confirmation page (GET changes nothing) and its button; an unknown, used or expired link is one `404` |
 
 **The link** is `https://meet-<x>.<domain>/j/<code>`. The code is
 HMAC-SHA256 under `MEETINGS_LINK_KEY` of the meeting's id, cut to 128 bits
@@ -1024,7 +1199,18 @@ guest name and email included, in `contacts_outbox`; with a bucket
 configured each owner's recording retention, each meeting's purge time, its
 recording parts (object key, size, length, state, and the file's start in
 meeting time), its recording gaps, its share links (hashed) and when a
-screen was shared (and by whom, by name); and an audit trail
+screen was shared (and by whom, by name); with a model configured each
+analysis run (its models and provider preferences, its state) and what it
+made (action items with their cited line ids, frame notes),
+and with a mail server configured the owner's notes address (confirmed, and
+one waiting for its link, whose token is stored only as SHA-256), each
+draft email (the recipient's name, the items as the owner left them, its
+state) and, 🔴 **each card guest's email address**: kept for that meeting's
+notes (only when its AI action items were on and a mail server is
+configured; the card says so), and dropped when their notes are sent, for
+every meeting 30 days after it ended whether or not they were (an hourly
+pass, with or without a mail server), and all at once at a start with no
+mail server configured; and an audit trail
 of what happened, which never holds a code, a token, a display name,
 transcript text or a guest's name. Every owner-facing query goes through one
 repository layer that filters by the session's subject.
@@ -1059,9 +1245,16 @@ configured) your own contacts plugin at `MEETINGS_CONTACTS_URL`, which gets
 the name and email a guest chose to send on the card, the meeting's id,
 title and times, and that guest's knock name and times. Audio and video go
 between browsers and your LiveKit; only the microphones' audio reaches the
-plugin, from your Egress, and it is not stored. Later phases send transcript **text** (never audio) to an AI
-service for action items, on by default and off per meeting, as the notice
-already tells guests; this README will say so in the release that adds it.
+plugin, from your Egress, and it is not stored. With a model configured
+([Post-call notes (optional)](#post-call-notes-optional)), each meeting
+with **AI action items** on (the default; off per meeting before anyone
+knocks, as the notice tells guests) sends OpenRouter its transcript
+**text** (never audio), with every request's provider object saying
+`data_collection: deny` (a provider that keeps prompts is never used), and
+with a bucket and a vision model the frames of shared screens sampled from
+the recording, which the notice then names too. With a mail server
+configured, the notes the owner sends go through it to the owner and the
+guests who gave their address on the card.
 
 ## Tests
 
@@ -1357,6 +1550,9 @@ phase 4b.
 | `compose.meetings.yml` | the fragment for muster's Compose stack |
 | `deploy/deploy_test.go` | the rendered objects and both LiveKit configs, pinned |
 | `internal/items` | action items: the `extract` and `chat_json` adapters, their OpenRouter client, the guards after the model, the window selection and the worker's loop (`items.Loop`), the post-call pass (`items.PostCall`), `MEETINGS_ITEMS_PROVIDER_PREFS` |
+| `internal/items` (vision) | the frame analysis' adapter and its guards (`items.Vision`, `items.GuardVision`) |
+| `internal/mail`, `internal/mailtest` | the notes email (its words, the YOUR/everyone-else split, the MIME message, STARTTLS-only submission) and a fake SMTP server with STARTTLS |
+| `internal/openroutertest` | a fake OpenRouter (items, vision) for the server tests and the e2e harness |
 | `cmd/items-eval`, `testdata/items-eval` | the action-item evaluation (run by hand) and its labelled synthetic corpus, as written and through the real STT |
 | `cmd/items-corpus-stt`, `internal/sttcorpus` | makes the STT corpus (Piper, then the plugin's STT engine; run by hand), its word error rate and its writer |
 | `scripts/mutate` | the security-gate mutation sweep |

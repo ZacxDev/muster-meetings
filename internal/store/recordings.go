@@ -616,7 +616,9 @@ func (r *OwnerRepo) Share(ctx context.Context, meetingID string, now time.Time) 
 	if err != nil {
 		return "", nil, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE recording_shares SET revoked_at = ? WHERE meeting_id = ? AND revoked_at IS NULL`, ms(now), meetingID); err != nil {
+	// The owner's own link is replaced; the meeting notes' video links
+	// (kind mail) stay, until Stop sharing or Delete now turns every link off.
+	if _, err := tx.ExecContext(ctx, `UPDATE recording_shares SET revoked_at = ? WHERE meeting_id = ? AND revoked_at IS NULL AND kind = 'owner'`, ms(now), meetingID); err != nil {
 		return "", nil, err
 	}
 	tok := random(ShareTokenBytes)

@@ -188,6 +188,16 @@ const (
 	icsMain = "cmd/items-corpus-stt/main.go"
 	icsTr   = "cmd/items-corpus-stt/transcribe.go"
 	scVoice = "internal/sttcorpus/voices.go"
+	// the post-call notes (analysis, drafts, the outbox)
+	pcAn    = "internal/server/analysis.go"
+	pcNotes = "internal/server/notes.go"
+	pcCard  = "internal/server/card.go"
+	pcTr    = "internal/server/transcribe.go"
+	pcMail  = "internal/store/mail.go"
+	pcRuns  = "internal/store/analysis.go"
+	mlNotes = "internal/mail/notes.go"
+	mlSMTP  = "internal/mail/smtp.go"
+	itVis   = "internal/items/vision.go"
 )
 
 var mutants = []mutant{
@@ -1078,15 +1088,19 @@ var mutants = []mutant{
 		pkg: "./internal/server", test: "TestTheExportsFenceGuestSpeech", want: "txt ="},
 	{name: "export: a fence mark in a name not escaped (txt)", file: tscript, from: "name = strings.NewReplacer(`\\`, `\\\\`, \"«\", `\\«`, \"»\", `\\»`).Replace(oneLine(name))", to: "name = oneLine(name)",
 		pkg: "./internal/server", test: "TestTheExportsFenceGuestSpeech", want: "txt ="},
-	{name: "notice: transcribed without an engine", file: trans, from: "return lobby.NoticeFull(record, ai, s.Transcribing(), s.Recording())", to: "return lobby.NoticeFull(record, ai, true, s.Recording())",
+	{name: "notice: transcribed without an engine", file: trans, from: "n := lobby.NoticeFull(record, ai, s.Transcribing(), s.Recording())", to: "n := lobby.NoticeFull(record, ai, true, s.Recording())",
 		pkg: "./internal/server", test: "TestTheNoticeSaysTranscribedOnlyWithAnEngine", want: "engine false"},
 	{name: "notice: a knock's transcribed answer not checked", file: guest, from: "if in.Notice.Transcribed == nil || *in.Notice.Transcribed != s.Transcribing() {", to: "if false {",
 		pkg: "./internal/server", test: "TestTheNoticeSaysTranscribedOnlyWithAnEngine", want: "want 409 with the current notice"},
 
 	// ---- 3a: a connected stream ends the start retries (CI, real LiveKit) ----
+	// Two checks hold it since regMu: the one before LiveKit is asked, and
+	// the one made with the new nonce; both go, or the second hides the first.
 	{name: "egress retry: the check before an attempt removed", file: trans, from: "\t\tif s.streamingCurrent(ctx, track) {\n\t\t\treturn\n\t\t}\n\t\troom := store.RoomName(t.MeetingID)", to: "\t\troom := store.RoomName(t.MeetingID)",
-		pkg: "./internal/server", test: "TestAStreamThatConnectsDuringAFailingStartEndsTheLoop", want: "phase 2:"},
-	{name: "egress retry (real LiveKit): the check before an attempt removed", file: trans, from: "\t\tif s.streamingCurrent(ctx, track) {\n\t\t\treturn\n\t\t}\n\t\troom := store.RoomName(t.MeetingID)", to: "\t\troom := store.RoomName(t.MeetingID)", realLiveKit: true,
+		more: []edit{{trans, "\t\t\ts.tr.regMu.Lock()\n\t\t\tif s.streamingCurrent(ctx, track) {\n\t\t\t\ts.tr.regMu.Unlock()\n\t\t\t\treturn\n\t\t\t}\n", "\t\t\ts.tr.regMu.Lock()\n"}},
+		pkg:  "./internal/server", test: "TestAStreamThatConnectsDuringAFailingStartEndsTheLoop", want: "phase 2:"},
+	{name: "egress retry (real LiveKit): the check before an attempt removed", file: trans, from: "\t\tif s.streamingCurrent(ctx, track) {\n\t\t\treturn\n\t\t}\n\t\troom := store.RoomName(t.MeetingID)", to: "\t\troom := store.RoomName(t.MeetingID)",
+		more: []edit{{trans, "\t\t\ts.tr.regMu.Lock()\n\t\t\tif s.streamingCurrent(ctx, track) {\n\t\t\t\ts.tr.regMu.Unlock()\n\t\t\t\treturn\n\t\t\t}\n", "\t\t\ts.tr.regMu.Lock()\n"}}, realLiveKit: true,
 		pkg: "./internal/server", test: "TestTheTranscriptAgainstARealLiveKitServer", want: "an attempt after the stream connected superseded it"},
 	{name: "egress retry: the check after a failed attempt removed", file: trans, from: "s.tr.gapMu.Lock()\n\t\tif s.streamingCurrent(ctx, track) {\n\t\t\ts.tr.gapMu.Unlock()\n\t\t\treturn\n\t\t}\n", to: "s.tr.gapMu.Lock()\n",
 		pkg: "./internal/server", test: "TestAStreamThatConnectsDuringAFailingStartEndsTheLoop", want: "phase 1:"},
@@ -1556,6 +1570,63 @@ var mutants = []mutant{
 		pkg: "./internal/server", test: "TestAPartIsNotGoneWhileTheRoomListsAnUnnamedComposite", want: "a part resolved as gone while its egress may still be starting"},
 	{name: "reconcile: one failed list ends the pass", file: recGo, from: "\t\t\ts.cfg.Log.Printf(\"reconcile: meeting %s part %d: LiveKit: %s\", p.MeetingID, p.Part, lkKind(err))\n\t\t\tcontinue", to: "\t\t\ts.cfg.Log.Printf(\"reconcile: meeting %s part %d: LiveKit: %s\", p.MeetingID, p.Part, lkKind(err))\n\t\t\treturn",
 		pkg: "./internal/server", test: "TestOneFailedListDoesNotEndThePass", want: "one failed list ended the pass"},
+	// ---- 🔴 the post-call notes: the analysis, the drafts, the outbox ----
+	// Two lines hold it: the outbox takes only queued drafts, and a draft
+	// with no approval time is never sent. Both go, or the second hides the
+	// first.
+	{name: "notes: a draft sent without approval", file: pcMail, from: "FROM mail_drafts d WHERE d.state = 'queued' AND d.next_at <= ? ORDER BY d.next_at, d.id LIMIT 1`", to: "FROM mail_drafts d WHERE d.state IN ('queued', 'draft') AND coalesce(d.next_at, 0) <= ? ORDER BY d.next_at, d.id LIMIT 1`",
+		more: []edit{{pcNotes, "if to == \"\" || o.OwnerEmail == \"\" || o.ApprovedAt == nil {", "if to == \"\" || o.OwnerEmail == \"\" {"}},
+		pkg:  "./internal/server", test: "TestEndRunsThePostCallPassAndDraftsTheOwnerAndTheCardGuest", want: "messages sent with no Send"},
+	{name: "notes: another person's item in the YOUR section", file: mlNotes, from: "\tif a == r {\n\t\treturn true\n\t}", to: "\tif a != \"\" {\n\t\treturn true\n\t}",
+		pkg: "./internal/server", test: "TestSendMailsEachRecipientTheirNotesExactly", want: "the YOUR section is not their own items alone"},
+	{name: "notes: a sent draft redrafted by reprocess", file: pcMail, from: "\t\tif sent[r.key] {\n\t\t\tcontinue\n\t\t}\n", to: "",
+		more: []edit{{pcMail, "AND recipient = ? AND state IN ('draft', 'removed', 'failed')`", "AND recipient = ? AND state IN ('draft', 'removed', 'failed', 'sent')`"}},
+		pkg:  "./internal/server", test: "TestReprocessMakesANewCurrentRunAndLeavesSentNotesAlone", want: "a sent draft was changed by reprocess"},
+	{name: "notes: an unconfirmed owner address used", file: pcMail, from: "\tif !email.Valid || email.String == \"\" {\n\t\treturn 0, ErrNoOwnerEmail", to: "\tif false {\n\t\treturn 0, ErrNoOwnerEmail",
+		pkg: "./internal/server", test: "TestSendNeedsTheOwnersConfirmedAddress", want: "an unconfirmed owner address was used"},
+	{name: "notes: a removed recipient sent", file: pcMail, from: "AND m.subject = ? AND d.state = 'draft' AND (d.recipient = 'owner' OR d.email IS NOT NULL)`", to: "AND m.subject = ? AND d.state IN ('draft', 'removed') AND (d.recipient = 'owner' OR d.email IS NOT NULL)`",
+		pkg: "./internal/server", test: "TestEditedDraftsAreWhatIsSent", want: "send = "},
+	{name: "notes: transcript text reaching the log", file: pcAn, from: "done: %d items, %d frame notes, partial %t; %d drafts made, %d recipients already sent\",\n\t\trun.MeetingID, run.ID, len(out.Items),", to: "done: %v items, %d frame notes, partial %t; %d drafts made, %d recipients already sent\",\n\t\trun.MeetingID, run.ID, out.Items,",
+		pkg: "./internal/server", test: "TestTheLogCarriesNoTranscriptItemNameOrAddress", want: "the log carries"},
+	{name: "notes: the confirmation link works past its expiry", file: pcMail, from: "subtle.ConstantTimeCompare([]byte(stored), []byte(h)) != 1 || exp <= ms(now) {\n\t\treturn \"\", ErrNotFound", to: "subtle.ConstantTimeCompare([]byte(stored), []byte(h)) != 1 || exp < 0 {\n\t\treturn \"\", ErrNotFound",
+		pkg: "./internal/server", test: "TestTheConfirmationDoorAnswersOneNotFound", want: "want the first's 404"},
+	{name: "notes: mail to a server without STARTTLS", file: mlSMTP, from: "if ok, _ := cl.Extension(\"STARTTLS\"); !ok {", to: "if ok, _ := cl.Extension(\"STARTTLS\"); !ok && false {",
+		pkg: "./internal/mail", test: "TestSendRequiresStartTLS", want: "the mail server does not offer STARTTLS"},
+	{name: "agent token: another meeting read", file: pcAn, from: "if err != nil || meetingID != r.PathValue(\"id\") || !s.app.Live() {", to: "if err != nil || (meetingID != r.PathValue(\"id\") && false) || !s.app.Live() {",
+		pkg: "./internal/server", test: "TestAnAgentTokenReadsOneMeetingsTimeline", want: "want 404"},
+	{name: "no AI: the notice's AI clause rewritten with no model", file: pcTr, from: "\tif s.ai != nil {\n\t\tframes := s.ai.visionModel != \"\" && record && s.Recording()\n\t\tn = n.WithAIClause(frames)\n\t}", to: "\tn = n.WithAIClause(true)",
+		pkg: "./internal/server", test: "TestNoModelAndNoMailChangeNothing", want: "the surface changed from the pre-change commit's"},
+	{name: "live: the AI switch ignored", file: pcRuns, from: "WHERE state = 'open' AND ai = 1 AND created_at > ?", to: "WHERE state = 'open' AND created_at > ?",
+		pkg: "./internal/server", test: "TestLiveItemsReachTheOwnerAndAnAdmittedGuest", want: "a meeting switched off"},
+	{name: "live: paused never shown", file: pcAn, from: "Paused: st.Stopped || st.Failures >= items.PausedAfter}", to: "Paused: st.Stopped}",
+		pkg: "./internal/server", test: "TestLiveItemsPauseAfterThreeFailures", want: "no \"items\" event"},
+	{name: "frames: an item citing no frame kept", file: itVis, from: "\t\tif len(it.Frames) == 0 {\n\t\t\tdropped = append(dropped, Dropped{it, DropNoFrame})", to: "\t\tif false {\n\t\t\tdropped = append(dropped, Dropped{it, DropNoFrame})",
+		pkg: "./internal/items", test: "TestGuardVision", want: "dropped = "},
+	{name: "frames: a note citing a frame not sent kept", file: itVis, from: "\t\tcase !w.hasFrame(n.FrameMS):", to: "\t\tcase false:",
+		pkg: "./internal/items", test: "TestGuardVision", want: "notes kept ="},
+
+	{name: "notes: a removed recipient put back by reprocess", file: pcMail, from: "\tif prevState == DraftRemoved {\n\t\tstate = DraftRemoved\n\t}", to: "\tif false {\n\t\tstate = DraftRemoved\n\t}",
+		pkg: "./internal/store", test: "TestReprocessCarriesRemovedAndEdits", want: "a removed recipient was put back by reprocess"},
+	// Two lines carry an edit: the same items (wholesale) and item by item.
+	{name: "notes: the owner's edits dropped by reprocess", file: pcMail, from: "\tif runItems == orig {\n", to: "\tif false {\n",
+		more: []edit{{pcMail, "\t\t\tapplied[n[i].Text] = true\n\t\t\tn[i] = e\n", "\t\t\tapplied[n[i].Text] = true\n\t\t\t_ = e\n"}},
+		pkg:  "./internal/store", test: "TestReprocessCarriesRemovedAndEdits", want: "Grace's edit was not carried to the same item"},
+	{name: "notes: an address the server cannot take queued forever", file: pcNotes, from: "\t\tcase !NotesAddress(to):\n", to: "\t\tcase false:\n",
+		pkg: "./internal/server", test: "TestAnAddressTheMailServerCannotTakeFailsItsDraft", want: "want failed with the reason the owner reads"},
+	{name: "notes: the card takes an address the server cannot", file: pcCard, from: "if field == \"\" && s.notesFor(r.Context(), card.MeetingID) && !NotesAddress(email) {", to: "if false && card.MeetingID != \"\" {",
+		pkg: "./internal/server", test: "TestAnAddressTheMailServerCannotTakeFailsItsDraft", want: "the card took"},
+	{name: "notes: addresses kept with no mail server", file: pcNotes, from: "\tif boot && s.notes == nil {\n", to: "\tif false && boot {\n",
+		pkg: "./internal/server", test: "TestKeptAddressesAreDroppedWithNoMailServer", want: "card addresses kept with no mail server"},
+
+	// Consent: the notice is what may go to the AI service.
+	{name: "consent: a meeting with AI off reprocessed", file: pcRuns, from: "FROM meetings WHERE id = ? AND state = 'ended' AND ai = 1`", to: "FROM meetings WHERE id = ? AND state = 'ended'`",
+		more: []edit{{pcAn, "\tif !m.AI {\n\t\twriteJSON(w, http.StatusConflict, map[string]any{\"error\": ErrReprocessNoAI})", "\tif false {\n\t\twriteJSON(w, http.StatusConflict, map[string]any{\"error\": ErrReprocessNoAI})"}},
+		pkg:  "./internal/server", test: "TestAMeetingWithAIOffIsNeverSentToTheAIService", want: "reprocess = "},
+	{name: "consent: frames sent though the notice did not name them", file: pcAn, from: "if on, err := s.store.AIFrames(ctx, run.MeetingID); err != nil || !on {", to: "if on, err := s.store.AIFrames(ctx, run.MeetingID); err != nil || (!on && false) {",
+		pkg: "./internal/server", test: "TestAMeetingWhoseNoticeNamedNoFramesSendsNone", want: "vision calls for a meeting whose notice did not name the frames"},
+	{name: "consent: the card promises notes with AI off", file: pcNotes, from: "\treturn err == nil && ai\n", to: "\treturn err == nil && (ai || true)\n",
+		pkg: "./internal/server", test: "TestAMeetingWithAIOffIsNeverSentToTheAIService", want: "want a card that promises no notes"},
+
 	// ---- 🔴 contacts, phase 1b, in a browser (go run ./scripts/mutate -e2e) ----
 	{name: "contacts ui: the consent sentence reworded", file: guestJS, from: "', who will see that you were in this meeting. Nothing else is shared.'", to: "', who may see that you were in this meeting. Nothing else is shared.'",
 		e2e: cardE2E, test: "End: the guest's card .*\\(mobile\\)", want: "Your name and email go to Ada L., who will see"},

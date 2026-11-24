@@ -53,8 +53,8 @@ func TestMigration5KeepsEveryRowAndAddsNoCard(t *testing.T) {
 		t.Fatal(err)
 	}
 	n, err := s.CountOutbox(t.Context())
-	if v != 5 || name != "Grace H." || card.Valid || state.Valid || err != nil || n != 0 {
-		t.Fatalf("after migration 5: schema %d, row %q card %v state %v, outbox %d (%v)", v, name, card, state, n, err)
+	if v != store.SchemaForTest || name != "Grace H." || card.Valid || state.Valid || err != nil || n != 0 {
+		t.Fatalf("after migrations 5+: schema %d, row %q card %v state %v, outbox %d (%v)", v, name, card, state, n, err)
 	}
 	// An admitted guest of an ended meeting from before the upgrade is
 	// eligible by the predicate, so the store would offer one only if

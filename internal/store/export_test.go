@@ -16,3 +16,10 @@ var Migration1ForTest = migrations[0]
 // MigrationsBeforeContactsForTest are migrations 1–4: the schema before
 // contacts (migration 5).
 var MigrationsBeforeContactsForTest = append([]string(nil), migrations[:4]...)
+
+// SchemaForTest is this build's schema version.
+var SchemaForTest = len(migrations)
+
+// MigrationsBeforeRecordingForTest are migrations 1–5: the schema before the
+// recording (migration 6).
+var MigrationsBeforeRecordingForTest = append([]string(nil), migrations[:5]...)

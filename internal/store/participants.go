@@ -382,11 +382,17 @@ func (s *Store) EndRoom(ctx context.Context, room, why string, now time.Time) (s
 }
 
 // endParticipants moves everyone still waiting or admitted in an ended
-// meeting to ended, inside the transaction that ended it.
+// meeting to ended, inside the transaction that ended it. 🔴 Every way a
+// meeting ends (End, room_finished, the 24 h cap, an uninstall, a revoked
+// owner) calls it in that transaction, so it is also where the rest of an
+// end is written, once: closeEnded.
 func endParticipants(ctx context.Context, tx *sql.Tx, now time.Time) error {
 	_, err := tx.ExecContext(ctx, `UPDATE participants SET state = 'ended', left_at = coalesce(left_at, ?)
 		WHERE state IN (`+fromList(EvEnd)+`) AND meeting_id IN (SELECT id FROM meetings WHERE state = 'ended')`, ms(now))
-	return err
+	if err != nil {
+		return err
+	}
+	return closeEnded(ctx, tx)
 }
 
 // ---- the owner side: through OwnerRepo, so always the owner's own meeting ----

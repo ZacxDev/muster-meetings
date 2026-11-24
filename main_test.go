@@ -1,14 +1,18 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"errors"
 	"net/netip"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ZacxDev/muster-meetings/internal/livekit"
+	"github.com/ZacxDev/muster-meetings/internal/store"
 )
 
 // The startup line names muster by scheme and host only. cfg is built here,
@@ -442,5 +446,152 @@ func TestRecordingConfigIsAllOrNothing(t *testing.T) {
 	m["MEETINGS_S3_ENDPOINT"] = "http://minio.example.test:9000/" + secret
 	if _, err := LoadConfig(env(m)); err == nil || strings.Contains(err.Error(), secret) {
 		t.Errorf("an endpoint with a path: %v", err)
+	}
+}
+
+// The analysis and the notes are optional: no model is off whatever else is
+// set (the key included); a model needs the key; the default vision model is
+// Anthropic's, pinned; mail needs the analysis; data_collection is always
+// deny; and no secret reaches an error or the startup line.
+func TestPostCallConfigIsOptional(t *testing.T) {
+	key := strings.Join([]string{"or", "fixture", "only"}, "-")
+	pass := strings.Join([]string{"smtp", "fixture", "only"}, "-")
+	m := base()
+	m["OPENROUTER_API_KEY"] = key
+	m["MEETINGS_SMTP_ADDR"] = ""
+	c, err := LoadConfig(env(m))
+	if err != nil || c.AI != nil || c.Mail != nil {
+		t.Fatalf("a key and no model: %v %v %v; want off", c.AI, c.Mail, err)
+	}
+	if line := startupLine(c, "meet", 1, false); strings.Contains(line, "action items") || strings.Contains(line, "notes") {
+		t.Errorf("startup line with the analysis off: %q", line)
+	}
+	m["MEETINGS_ITEMS_MODEL"] = "off"
+	if c, err := LoadConfig(env(m)); err != nil || c.AI != nil {
+		t.Errorf("off: %v %v", c.AI, err)
+	}
+	m = base()
+	m["MEETINGS_ITEMS_MODEL"] = "deepseek/deepseek-v4.1-flash-1017"
+	m["MEETINGS_ITEMS_PROVIDER_PREFS"] = `{"data_collection":"deny","order":["deepinfra/fp8"],"allow_fallbacks":false}`
+	if _, err := LoadConfig(env(m)); err == nil || !strings.Contains(err.Error(), "OPENROUTER_API_KEY") {
+		t.Errorf("a model with no key: %v", err)
+	}
+	m["OPENROUTER_API_KEY"] = key
+	c, err = LoadConfig(env(m))
+	if err != nil || c.AI == nil || c.AI.Items.Adapter != "chat_json" || c.AI.Every.String() != "10s" || c.AI.Vision.Model != DefaultVisionModel ||
+		c.AI.Vision.Prefs["order"].([]any)[0] != "anthropic" || c.AI.Vision.Prefs["allow_fallbacks"] != false {
+		t.Fatalf("a model and a key: %+v %v", c.AI, err)
+	}
+	for k, v := range map[string]string{
+		"MEETINGS_ITEMS_PROVIDER_PREFS":  `{"data_collection":"allow","order":["deepinfra/fp8"],"allow_fallbacks":false}`,
+		"MEETINGS_VISION_PROVIDER_PREFS": `{"data_collection":"allow","order":["anthropic"],"allow_fallbacks":false}`,
+		"MEETINGS_ITEMS_EVERY":           "100ms",
+	} {
+		m2 := maps(m)
+		m2[k] = v
+		if _, err := LoadConfig(env(m2)); err == nil || strings.Contains(err.Error(), key) {
+			t.Errorf("%s=%s: %v", k, v, err)
+		}
+	}
+	m2 := maps(m)
+	m2["MEETINGS_VISION_MODEL"] = "google/gemini-9-flash"
+	if _, err := LoadConfig(env(m2)); err == nil || !strings.Contains(err.Error(), "MEETINGS_VISION_PROVIDER_PREFS") {
+		t.Errorf("another vision model with no pin: %v", err)
+	}
+	m2["MEETINGS_VISION_MODEL"] = "off"
+	if c, err := LoadConfig(env(m2)); err != nil || c.AI.Vision.Model != "" {
+		t.Errorf("vision off: %+v %v", c.AI, err)
+	}
+	m["MEETINGS_SMTP_ADDR"] = "mail.example.test:587"
+	if _, err := LoadConfig(env(m)); err == nil || !strings.Contains(err.Error(), "MEETINGS_MAIL_FROM") {
+		t.Errorf("mail with no sender: %v", err)
+	}
+	m["MEETINGS_MAIL_FROM"] = "meetings@mail.example.test"
+	m["MEETINGS_SMTP_USER"] = "meetings"
+	if _, err := LoadConfig(env(m)); err == nil || strings.Contains(err.Error(), pass) {
+		t.Errorf("a user with no password: %v", err)
+	}
+	m["MEETINGS_SMTP_PASS"] = pass
+	c, err = LoadConfig(env(m))
+	if err != nil || c.Mail == nil {
+		t.Fatalf("mail: %v", err)
+	}
+	line := startupLine(c, "meet", 1, false)
+	if !strings.Contains(line, "; action items: deepseek/deepseek-v4.1-flash-1017 (chat_json, live every 10s), no frame analysis; notes: mail via mail.example.test:587 from meetings@mail.example.test") ||
+		strings.Contains(line, key) || strings.Contains(line, pass) {
+		t.Errorf("startup line: %q", line)
+	}
+	m3 := base()
+	m3["MEETINGS_SMTP_ADDR"] = "mail.example.test:587"
+	m3["MEETINGS_MAIL_FROM"] = "meetings@mail.example.test"
+	if _, err := LoadConfig(env(m3)); err == nil || !strings.Contains(err.Error(), "MEETINGS_ITEMS_MODEL") {
+		t.Errorf("mail with no model: %v", err)
+	}
+}
+
+func maps(m map[string]string) map[string]string {
+	out := map[string]string{}
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// The reprocess command queues one post run per meeting that ended in the
+// range (inclusive of -to's day), under the configured model or another
+// with its own pin, and nothing for a meeting outside it.
+func TestReprocessQueuesTheRange(t *testing.T) {
+	dir := t.TempDir()
+	m := base()
+	m["STATE_DIR"] = dir
+	m["OPENROUTER_API_KEY"] = strings.Join([]string{"or", "fixture", "only"}, "-")
+	m["MEETINGS_ITEMS_MODEL"] = "deepseek/deepseek-v4.1-flash-1017"
+	m["MEETINGS_ITEMS_PROVIDER_PREFS"] = `{"data_collection":"deny","order":["deepinfra/fp8"],"allow_fallbacks":false}`
+	st, err := store.Open(filepath.Join(dir, "meetings.db"), fixtureKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	var ids []string
+	for _, day := range []string{"2031-03-01", "2031-03-02", "2031-03-05"} {
+		at, _ := time.Parse("2006-01-02", day)
+		at = at.Add(12 * time.Hour)
+		tok, _, err := st.CreateSession(ctx, "Aa1Bb2Cc3Dd4Ee5Ff6Gg7h", "Ada", at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sess, _ := st.LookupSession(ctx, tok, at)
+		r := st.ForSession(sess)
+		c, err := r.CreateMeeting(ctx, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.End(ctx, c.Meeting.ID, at.Add(time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, c.Meeting.ID)
+	}
+	st.Close()
+	var out strings.Builder
+	if err := reprocess([]string{"-from", "2031-03-01", "-to", "2031-03-02"}, env(m), &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(out.String(), "queued 2 post-call runs (items deepseek/deepseek-v4.1-flash-1017, vision none)") {
+		t.Errorf("out = %q", out.String())
+	}
+	if err := reprocess([]string{"-from", "2031-03-05", "-to", "2031-03-05", "-items-model", "z-ai/glm-5-20261001"}, env(m), &out); err == nil || !strings.Contains(err.Error(), "-items-prefs") {
+		t.Errorf("another model with no pin: %v", err)
+	}
+	if err := reprocess([]string{"-from", "2031-03-05", "-to", "2031-03-05", "-items-model", "z-ai/glm-5-20261001", "-items-prefs", `{"order":["z-ai"],"allow_fallbacks":false}`}, env(m), &out); err != nil {
+		t.Fatal(err)
+	}
+	st, _ = store.Open(filepath.Join(dir, "meetings.db"), fixtureKey)
+	defer st.Close()
+	want := map[string]string{ids[0]: "deepseek/deepseek-v4.1-flash-1017", ids[1]: "deepseek/deepseek-v4.1-flash-1017", ids[2]: "z-ai/glm-5-20261001"}
+	for id, model := range want {
+		runs, err := st.ForSubject("Aa1Bb2Cc3Dd4Ee5Ff6Gg7h").Runs(ctx, id)
+		if err != nil || len(runs) != 1 || runs[0].ItemsModel != model || runs[0].RequestedBy != "admin" || runs[0].State != "queued" {
+			t.Errorf("meeting %s runs = %+v, %v; want one queued %s run", id, runs, err, model)
+		}
 	}
 }

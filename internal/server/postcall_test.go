@@ -601,7 +601,6 @@ func TestTheConfirmationDoorAnswersOneNotFound(t *testing.T) {
 	}
 }
 
-
 // 🔴 Reprocess: a new run under another model becomes current, the sent
 // draft is untouched, the unsent are redrafted (and the answer says how
 // many were left alone), and the older run can be made current again.

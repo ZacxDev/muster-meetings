@@ -30,8 +30,28 @@ production would send. `go test ./cmd/items-eval` lints the corpus: ids,
 citations, speakers, the window count, the no-item share, every hard-case
 kind, the non-ASCII meeting, that injections are a guest's, and the controls.
 
-🔴 **Owed:** the design asks for the ASR variants to come from real
-speech-to-text over synthesised speech. These three are written by hand in
-that style; the real pass (TTS, then the `utterance` engine's STT) has not
-been run. A follow-up PR adds a real-STT variant of each of the 12 meetings
-before the phase 4c run counts as the gate.
+**The speech-to-text corpus.** Beside each meeting `<name>.yaml` is
+`<name>.stt.yaml`: the same meeting spoken by Piper (a distinct voice per
+speaker, British and American, `cmd/items-corpus-stt/voices.yaml`) and
+transcribed by the plugin's own STT engine (`nemotron`, as live calls are
+stored: one stream per speaker, 80 ms frames in real time, silence
+included, a flush per utterance, late closing marks amended onto the line
+they end). The ids, speakers, labels and traps are the source's; only each
+segment's `text` is the STT's, and its times are the source's (so the
+windows are the same). Its `stt` block records the engine (and the lines
+per engine), each speaker's voice, the tool's version and the word error
+rate against the source text (summed per segment; numbers are not spelled
+out, so "ten" and "10" differ). A segment the engine heard nothing in is
+left out of the timeline, as production stores no line for it.
+
+**The gate is the STT corpus.** `cmd/items-eval` replays every model on
+both corpora and reports both, but a model passes (and the choice is made)
+on the STT corpus's gates alone. Its lint requires every source to have its
+variant, the variant to match its source in everything but the text, and
+the recorded word error rate to be what the text gives. The three
+`asr: true` meetings are written by hand in speech-to-text style; their
+variants are STT over that.
+
+Remake the variants (by hand, never in CI: it needs the network, the Piper
+voices and the STT servers' GPU) with `cmd/items-corpus-stt`; its doc
+comment has the environment it reads.

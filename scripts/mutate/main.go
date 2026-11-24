@@ -171,6 +171,13 @@ const (
 	ieMain   = "cmd/items-eval/main.go"
 	ieCorpus = "cmd/items-eval/corpus.go"
 	ieReplay = "cmd/items-eval/replay.go"
+	// the STT corpus (cmd/items-corpus-stt, internal/sttcorpus)
+	ieSTT   = "cmd/items-eval/sttlint.go"
+	scWER   = "internal/sttcorpus/wer.go"
+	scVar   = "internal/sttcorpus/variant.go"
+	icsMain = "cmd/items-corpus-stt/main.go"
+	icsTr   = "cmd/items-corpus-stt/transcribe.go"
+	icsTTS  = "cmd/items-corpus-stt/tts.go"
 )
 
 var mutants = []mutant{
@@ -295,6 +302,43 @@ var mutants = []mutant{
 		pkg: "./cmd/items-eval", test: "TestTheLintCatchesEachProblem", want: "a label citing a segment not in its meeting"},
 	{name: "items-eval lint: a missing hard case accepted", file: ieCorpus, from: "if st.HardCases[k] < minPerHardCase {", to: "if false {",
 		pkg: "./cmd/items-eval", test: "TestTheLintCatchesEachProblem", want: "no retracted case"},
+
+	// ---- action items: the STT corpus (the gate's corpus) ----
+	{name: "stt lint: a source without its variant accepted", file: ieSTT, from: "if variant[sttcorpus.VariantName(m.file)] == nil {", to: "if false {",
+		pkg: "./cmd/items-eval", test: "TestTheSTTLintCatchesEachProblem", want: "a source without its variant"},
+	{name: "stt lint: a changed label accepted", file: ieSTT, from: "if !reflect.DeepEqual(v.Labels[i], src.Labels[i]) {", to: "if false {",
+		pkg: "./cmd/items-eval", test: "TestTheSTTLintCatchesEachProblem", want: "a changed label"},
+	{name: "stt lint: a missing word error rate accepted", file: ieSTT, from: "\t\tbad(\"%s: records no word error rate\", where)\n", to: "",
+		pkg: "./cmd/items-eval", test: "TestTheSTTLintCatchesEachProblem", want: "no word error rate: lint said"},
+	{name: "stt lint: a recorded WER not checked against the text", file: ieSTT, from: "if *in.WER != sc.Rate() || in.Words != sc.Words || in.Errors != sc.Errors {", to: "if false {",
+		pkg: "./cmd/items-eval", test: "TestTheSTTLintCatchesEachProblem", want: "a word error rate its text does not give"},
+	{name: "stt run: the STT lint not run", file: ieMain, from: "if p := append(Lint(ms), LintSTT(ms, sms)...); len(p) > 0 {", to: "if p := Lint(ms); len(p) > 0 {",
+		pkg: "./cmd/items-eval", test: "TestARunWithoutTheSTTCorpusScoresNoModel", want: "a missing variant: exit 0"},
+	{name: "stt gate: a model passed on the clean corpus", file: ieScore, from: "s.Pass = s.STT.Pass", to: "s.Pass = s.Clean.Pass",
+		pkg: "./cmd/items-eval", test: "TestTheSTTCorpusIsTheGate", want: "perfect on clean, 0.75 on stt"},
+	{name: "stt gate: the choice read from the clean corpus", file: ieScore, from: "w, b := s.STT.Worst, Metrics{}", to: "w, b := s.Clean.Worst, Metrics{}",
+		more: []edit{{ieScore, "b = ss[best].STT.Worst", "b = ss[best].Clean.Worst"}},
+		pkg:  "./cmd/items-eval", test: "TestChoose", want: "Choose = "},
+	{name: "stt corpus: a variant timed by its own words", file: ieCorpus, from: "if m.source != nil {\n\t\tm.buildVariant()", to: "if false {\n\t\tm.buildVariant()",
+		pkg: "./cmd/items-eval", test: "TestAnEmptyTranscriptIsNoLine", want: "timeline"},
+	{name: "wer: a substitution not counted", file: scWER, from: "if ref[i-1] != hyp[j-1] {", to: "if false {",
+		pkg: "./internal/sttcorpus", test: "TestDistanceAndRate", want: `Distance("the cat sat", "the bat sat") = 0, want 1`},
+	{name: "wer: case not ignored", file: scWER, from: `s = strings.NewReplacer("’", "'", "‘", "'").Replace(strings.ToLower(s))`, to: `s = strings.NewReplacer("’", "'", "‘", "'").Replace(s)`,
+		pkg: "./internal/sttcorpus", test: "TestWordsNormalises", want: "Words = "},
+	{name: "variant writer: the text not replaced", file: scVar, from: `text.Value, text.Tag, text.Style = t, "!!str", yaml.DoubleQuotedStyle`, to: `text.Tag = "!!str"`,
+		pkg: "./internal/sttcorpus", test: "TestWriteKeepsEverythingButTheText", want: "text \"Bo, can you renew the cert today?\", want"},
+	{name: "variant writer: a segment without a transcript written", file: scVar, from: "if !ok {\n\t\t\treturn nil, fmt.Errorf(\"segment %d has no transcript\", id)", to: "if !ok && false {\n\t\t\treturn nil, fmt.Errorf(\"segment %d has no transcript\", id)",
+		pkg: "./internal/sttcorpus", test: "TestWriteRefusesAMissingOrAnExtraTranscript", want: "a missing transcript"},
+	{name: "corpus-stt: a late mark not amended onto its line", file: icsTr, from: "l.Text = text + lead", to: "l.Text = text",
+		pkg: "./cmd/items-corpus-stt", test: "TestAMeetingThroughTheNemotronEngine", want: `segment 9701: "bo can you renew the search today", want`},
+	{name: "corpus-stt: a gap written as text", file: icsTr, from: "if l.Gap {", to: "if false {",
+		pkg: "./cmd/items-corpus-stt", test: "TestAssignByOverlapAndRefuseAGap", want: "a gap: <nil>"},
+	{name: "corpus-stt: every overlapping line to the first segment", file: icsTr, from: "best, bestOv = i, ov", to: "best, bestOv = min(i, 0), ov",
+		pkg: "./cmd/items-corpus-stt", test: "TestAssignByOverlapAndRefuseAGap", want: "assigned map"},
+	{name: "corpus-stt: two speakers of a meeting on one voice", file: icsTTS, from: "if o, dup := by[v]; dup {", to: "if o, dup := by[v]; false && dup {",
+		pkg: "./cmd/items-corpus-stt", test: "TestTheVoiceMapCoversTheCorpus", want: "two speakers on one voice: <nil>"},
+	{name: "corpus-stt: the record's WER over the wrong text", file: icsMain, from: "sc = sc.Add(s.Text, texts[s.ID])", to: "sc = sc.Add(s.Text, s.Text)",
+		pkg: "./cmd/items-corpus-stt", test: "TestAMeetingThroughTheNemotronEngine", want: "want 7 errors over 12 words"},
 
 	// ---- /enter: the frame gate (sign-in CSRF) ----
 	{name: "frame gate: removed", file: srv, from: `if ok, why := framed(r); !ok {`, to: `if ok, why := framed(r); false && !ok {`,

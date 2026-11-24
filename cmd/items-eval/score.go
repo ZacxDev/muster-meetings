@@ -252,27 +252,59 @@ func Passes(gs []Gate) bool {
 	return true
 }
 
-// Scored is one model's result.
+// Verdict is one model on one corpus: its runs, the worst of them, and the
+// gates on that worst.
+type Verdict struct {
+	Runs  []Metrics `json:"runs"`
+	Worst Metrics   `json:"worst"`
+	Gates []Gate    `json:"gates"`
+	Pass  bool      `json:"pass"`
+}
+
+// Judge is the verdict on runs for an adapter.
+func Judge(runs []Metrics, adapter string) Verdict {
+	v := Verdict{Runs: runs, Worst: Worst(runs)}
+	v.Gates = Gates(v.Worst, adapter)
+	v.Pass = len(runs) > 0 && Passes(v.Gates)
+	return v
+}
+
+// Scored is one model's result: on the clean corpus (as written: reported)
+// and on the speech-to-text corpus (the same meetings through the real STT:
+// the gate, design: "ASR-style noise (a variant of each meeting passed
+// through the real STT from synthesised speech)"). A model passes on the
+// STT corpus's gates alone.
 type Scored struct {
-	Model   string    `json:"model"`
-	Adapter string    `json:"adapter"`
-	Prefs   any       `json:"provider_prefs"`
-	Runs    []Metrics `json:"runs"`
-	Worst   Metrics   `json:"worst"`
-	Gates   []Gate    `json:"gates"`
-	Pass    bool      `json:"pass"`
+	Model   string  `json:"model"`
+	Adapter string  `json:"adapter"`
+	Prefs   any     `json:"provider_prefs"`
+	Clean   Verdict `json:"clean"`
+	STT     Verdict `json:"stt"`
+	Pass    bool    `json:"pass"`
+}
+
+// NewScored judges a model's clean and STT runs; it passes when the STT
+// verdict does.
+func NewScored(model, adapter string, prefs any, clean, stt []Metrics) Scored {
+	s := Scored{Model: model, Adapter: adapter, Prefs: prefs, Clean: Judge(clean, adapter), STT: Judge(stt, adapter)}
+	s.Pass = s.STT.Pass
+	return s
 }
 
 // Choose is the default model (design: "Choice"): of the models passing
-// every gate, the better recall, then the cheaper; "off" if none passes.
+// every gate (on the STT corpus), the better recall there, then the
+// cheaper; "off" if none passes.
 func Choose(ss []Scored) string {
 	best := -1
 	for i, s := range ss {
 		if !s.Pass {
 			continue
 		}
-		if best < 0 || s.Worst.Recall > ss[best].Worst.Recall ||
-			(s.Worst.Recall == ss[best].Worst.Recall && s.Worst.CostPerHour < ss[best].Worst.CostPerHour) {
+		w, b := s.STT.Worst, Metrics{}
+		if best >= 0 {
+			b = ss[best].STT.Worst
+		}
+		if best < 0 || w.Recall > b.Recall || (w.Recall == b.Recall && w.CostPerHour < b.CostPerHour) {
 			best = i
 		}
 	}

@@ -150,7 +150,9 @@ func TestWorstIsEachMetricsWorstRun(t *testing.T) {
 
 func TestChoose(t *testing.T) {
 	s := func(model string, pass bool, recall, cost float64) Scored {
-		return Scored{Model: model, Pass: pass, Worst: Metrics{Recall: recall, CostPerHour: cost}}
+		// The choice reads the STT corpus: the clean one says the opposite.
+		return Scored{Model: model, Pass: pass, STT: Verdict{Worst: Metrics{Recall: recall, CostPerHour: cost}},
+			Clean: Verdict{Worst: Metrics{Recall: 1 - recall, CostPerHour: 1 - cost}}}
 	}
 	cases := []struct {
 		ss   []Scored
@@ -171,14 +173,59 @@ func TestChoose(t *testing.T) {
 
 func TestTablesNameTheModelTheProviderAndTheChoice(t *testing.T) {
 	m := Score(scoringFixture())
-	res := Result{Date: "2026-11-24", Choice: "off", Models: []Scored{{Model: "deepseek/deepseek-v4.1-flash-1017", Adapter: items.AdapterChatJSON,
-		Prefs: map[string]any{"data_collection": "deny"}, Runs: []Metrics{m}, Worst: m, Gates: Gates(m, items.AdapterChatJSON)}}}
+	p := Score(passingFixture())
+	res := Result{Date: "2026-11-24", Choice: "off", Models: []Scored{NewScored("deepseek/deepseek-v4.1-flash-1017", items.AdapterChatJSON,
+		map[string]any{"data_collection": "deny"}, []Metrics{p}, []Metrics{m})},
+		STTMeetings: []STTMeeting{{"m01", "nemotron", 0.1, 100, "items-corpus-stt 1"}, {"m02", "nemotron", 0.4, 300, "items-corpus-stt 1"}}}
 	out := Tables(res)
 	for _, want := range []string{"# Action-item evaluation, 2026-11-24", "`deepseek/deepseek-v4.1-flash-1017` (chat_json)", `{"data_collection":"deny"}`,
-		"P1 (3), P2 (1)", "| recall | 0.75 | ≥ 0.80 | **no** |", "**Choice:** `off`."} {
+		"P1 (4), P2 (1)", "| metric | stt (the gate) | clean (reported) | bar | pass (stt) |",
+		"| recall | 0.75 | 1.00 | ≥ 0.80 | **no** |",
+		// (0.1·100 + 0.4·300) / 400 = 0.325
+		"word error rate 0.325 over 400 words (engines: nemotron (2); per meeting: m01 0.100, m02 0.400)",
+		"fails on the STT corpus** (on the clean corpus it passes", "**Choice:** `off`."} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the table has no %q:\n%s", want, out)
 		}
+	}
+}
+
+// passingFixture passes every gate, by hand: one label [1] Ada matched by
+// one item with its assignee (recall, precision, assignee 1, duplicates 0),
+// one 100 ms call costing $0.0001 over 30 min ($0.0002 per hour), no schema
+// or fatal failure.
+func passingFixture() []MeetingRun {
+	p := &Meeting{ID: "P", Labels: []Label{{ID: "LP1", Assignee: "Ada", Segments: []int64{1}}}}
+	return []MeetingRun{{Meeting: p, MeetingID: "P", DurationMS: 30 * 60 * 1000,
+		Emitted: []items.Item{{Assignee: "Ada", Segments: []int64{1}}},
+		Windows: []WindowRun{{Elapsed: 100 * time.Millisecond, Provider: "P1", CostUSD: 0.0001, CostKnown: true}}}}
+}
+
+// A model passes, and is chosen, on the STT corpus's verdict alone: a model
+// perfect on the clean corpus and at recall 0.75 on the STT one fails; the
+// reverse passes.
+func TestTheSTTCorpusIsTheGate(t *testing.T) {
+	good, bad := Score(passingFixture()), Score(scoringFixture())
+	if !Passes(Gates(good, items.AdapterChatJSON)) || Passes(Gates(bad, items.AdapterChatJSON)) {
+		t.Fatal("the fixtures: passing must pass and scoring must fail")
+	}
+	cleanOnly := NewScored("a/clean-only", items.AdapterChatJSON, nil, []Metrics{good}, []Metrics{bad})
+	sttOnly := NewScored("b/stt-only", items.AdapterChatJSON, nil, []Metrics{bad}, []Metrics{good})
+	if cleanOnly.Pass || !cleanOnly.Clean.Pass || cleanOnly.STT.Pass || cleanOnly.STT.Worst.Recall != 0.75 || cleanOnly.Clean.Worst.Recall != 1 {
+		t.Errorf("perfect on clean, 0.75 on stt: pass %v (clean %v, stt %v, recall stt %v clean %v), want a failure",
+			cleanOnly.Pass, cleanOnly.Clean.Pass, cleanOnly.STT.Pass, cleanOnly.STT.Worst.Recall, cleanOnly.Clean.Worst.Recall)
+	}
+	if !sttOnly.Pass || sttOnly.Clean.Pass {
+		t.Errorf("0.75 on clean, perfect on stt: pass %v (clean %v), want a pass", sttOnly.Pass, sttOnly.Clean.Pass)
+	}
+	if got := Choose([]Scored{cleanOnly}); got != "off" {
+		t.Errorf("only the clean-corpus pass: Choose = %s, want off", got)
+	}
+	if got := Choose([]Scored{cleanOnly, sttOnly}); got != "b/stt-only" {
+		t.Errorf("Choose = %s, want b/stt-only", got)
+	}
+	if v := Judge(nil, items.AdapterChatJSON); v.Pass {
+		t.Error("a corpus with no runs passed")
 	}
 }
 

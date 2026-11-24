@@ -17,6 +17,10 @@ const (
 	BadgeRecording    = "Recording"
 	BadgeTranscribing = "Transcribing"
 	BadgeAI           = "AI"
+	// BadgeRecordingFailed replaces BadgeRecording while the meeting should
+	// be recorded and no egress is (design: "Failure modes": "Egress fails to
+	// start or dies: 'Recording failed' badge for everyone").
+	BadgeRecordingFailed = "Recording failed"
 )
 
 // Without an engine (MEETINGS_STT_ENGINE off) nothing is transcribed, so
@@ -36,6 +40,31 @@ type Notice struct {
 	Transcribed bool     `json:"transcribed"`
 	Text        []string `json:"text"`
 	Badge       string   `json:"badge"`
+	// RecordingFailed is set while Record is on and the recording is not
+	// running (it failed to start, or died and has not restarted). Only a
+	// plugin that records says so (omitted otherwise, so the notice of a
+	// plugin without a bucket is exactly as before).
+	RecordingFailed bool `json:"recording_failed,omitempty"`
+	// Recordable says the plugin can record (it has a bucket): only then does
+	// the owner's page show the Record switch.
+	Recordable bool `json:"recordable"`
+}
+
+// WithRecordingFailed is n with the badge saying the recording failed. A
+// notice with Record off is unchanged: nothing was meant to be recorded.
+func (n Notice) WithRecordingFailed() Notice {
+	if !n.Record || !n.Recordable {
+		return n
+	}
+	parts := strings.Split(n.Badge, " · ")
+	for i, p := range parts {
+		if p == BadgeRecording {
+			parts[i] = BadgeRecordingFailed
+		}
+	}
+	n.Badge = strings.Join(parts, " · ")
+	n.RecordingFailed = true
+	return n
 }
 
 // NoticeFor writes the notice for the two switches on a plugin that
@@ -43,11 +72,22 @@ type Notice struct {
 func NoticeFor(record, ai bool) Notice { return NoticeWith(record, ai, true) }
 
 // NoticeWith writes the notice for the two switches and whether the plugin
-// transcribes at all: the "transcribed" clause and the Transcribing badge
-// only when it does, and the AI clause only when there is a transcript to
-// send.
+// transcribes at all, on a plugin that can record: NoticeFull.
 func NoticeWith(record, ai, transcribed bool) Notice {
-	n := Notice{Record: record, AI: ai, Transcribed: transcribed}
+	return NoticeFull(record, ai, transcribed, true)
+}
+
+// NoticeFull writes the notice for the two switches, whether the plugin
+// transcribes at all (the "transcribed" clause and the Transcribing badge
+// only when it does, and the AI clause only when there is a transcript to
+// send), and whether it can record at all (it has a bucket). 🔴 On a plugin
+// that cannot record, no clause and no badge part mentions recording,
+// whatever the Record switch says: nothing is recorded there. Record keeps
+// the switch's state (the knock's notice check compares the switches), and
+// Recordable says which of the two it is.
+func NoticeFull(record, ai, transcribed, recordable bool) Notice {
+	n := Notice{Record: record, AI: ai, Transcribed: transcribed, Recordable: recordable}
+	record = record && recordable
 	var badge []string
 	switch {
 	case record && transcribed:

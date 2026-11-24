@@ -42,11 +42,13 @@ import (
 	"time"
 
 	"github.com/ZacxDev/muster-meetings/internal/contacts"
+	"github.com/ZacxDev/muster-meetings/internal/frames"
 	"github.com/ZacxDev/muster-meetings/internal/ingest"
 	"github.com/ZacxDev/muster-meetings/internal/livekit"
 	"github.com/ZacxDev/muster-meetings/internal/lobby"
 	"github.com/ZacxDev/muster-meetings/internal/muster"
 	"github.com/ZacxDev/muster-meetings/internal/owners"
+	"github.com/ZacxDev/muster-meetings/internal/s3"
 	"github.com/ZacxDev/muster-meetings/internal/store"
 	"github.com/ZacxDev/muster-meetings/internal/stt"
 )
@@ -143,6 +145,18 @@ type Config struct {
 	// was before contacts: no card route, no card, no outbox worker, no
 	// call (card.go).
 	Contacts *contacts.Client
+
+	// S3 is the recordings bucket (MEETINGS_S3_*; internal/s3), or nil.
+	// 🔴 nil is meetings exactly as before the recording: no egress, no
+	// recording route, no share link, no sweeper, no screen-share rows
+	// (recording.go).
+	S3 *s3.Client
+	// Frames samples frames for the analysis (MEETINGS_FFMPEG); its zero
+	// value is frame sampling off (the bundle says frames_available false).
+	Frames frames.Sampler
+	// RetentionEvery is the recording sweeper's period; default
+	// DefaultRetentionEvery (1 h).
+	RetentionEvery time.Duration
 }
 
 // Server is the plugin's public handler.
@@ -170,6 +184,10 @@ type Server struct {
 	// contacts is the guest card's side (card.go); nil without
 	// Config.Contacts.
 	contacts *contactsSide
+	// rec is the recording's in-memory side (recording.go), and mediaKey
+	// the HMAC key of its signed media URLs.
+	rec      *recorder
+	mediaKey []byte
 }
 
 // New builds the handler.
@@ -202,7 +220,7 @@ func New(cfg Config, st *store.Store, app *owners.App) *Server {
 		cfg.EgressBackoff = DefaultEgressBackoff
 	}
 	s := &Server{cfg: cfg, store: st, app: app, mux: http.NewServeMux(), hub: lobby.NewHub(), limiter: lobby.NewLimiter(),
-		rtcOrigins: RTCOrigins(cfg.LiveKitURL), streams: newStreamReg(), tr: newTranscriber()}
+		rtcOrigins: RTCOrigins(cfg.LiveKitURL), streams: newStreamReg(), tr: newTranscriber(), rec: newRecorder(), mediaKey: st.MediaKey()}
 	s.bg, s.bgStop = context.WithCancel(context.Background())
 	s.kit = newKitProxy(cfg.KitUpstream, cfg.KitTimeout, cfg.KitTTL, cfg.KitRetry, cfg.Now)
 	s.knocker = lobby.NewKnocker(app.Client, s.hub, st.LobbyCount, cfg.Log, cfg.Now)
@@ -238,6 +256,11 @@ func New(cfg Config, st *store.Store, app *owners.App) *Server {
 	if s.contacts != nil {
 		s.mux.HandleFunc("POST /card", s.handleCard)
 		s.mux.HandleFunc("POST /card/skip", s.handleCardSkip)
+	}
+	// 🔴 The recording's routes exist only with a bucket (recording.go):
+	// without one each is the 404 every unknown path is.
+	if cfg.S3 != nil {
+		s.recordingRoutes()
 	}
 	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
@@ -351,6 +374,17 @@ func RedactPath(p string) string {
 	// is a 404, and its token still never reaches the log.
 	if strings.HasPrefix(c, "/stt/ingest/") || strings.Contains(p, "/stt/ingest/") {
 		return ingest.LogPath(c)
+	}
+	// A share link's last segments are its token (and a part): the token,
+	// a capability, never reaches the log.
+	if rest, ok := strings.CutPrefix(c, "/r/"); ok {
+		if _, tail, ok := strings.Cut(rest, "/"); ok {
+			return "/r/{token}/" + tail
+		}
+		return "/r/{token}"
+	}
+	if strings.Contains(p, "/r/") || strings.Contains(c+"/", "/r/") {
+		return "/{redacted}"
 	}
 	if rest, ok := strings.CutPrefix(c, "/j/"); ok {
 		if _, tail, ok := strings.Cut(rest, "/"); ok {

@@ -57,6 +57,20 @@
 // Without it (the default) the plugin has no contacts URL: the guest card
 // does not exist, exactly as in a deployment that never set one.
 //
+// With -s3=fake the plugin records, to a fake S3 store (internal/s3test): the
+// fake LiveKit is also the room composite Egress, whose file "begins" as soon
+// as it is accepted and, when it ends, "uploads" internal/frames/testdata's
+// 20 s VP9 MP4 (VP9: the test Chromium has no H.264 decoder). Frame sampling
+// uses the ffmpeg on PATH, if any. The parent adds:
+//
+//	GET /composite-kill?room=      the room's running composite dies (EGRESS_FAILED)
+//	GET /composite-refuse?n=       the next n composite starts are refused (0: none)
+//	GET /composite-start?room=     the room's latest composite's reported file start, Unix ms
+//	GET /latest-room               the room of the meeting made last (LiveKit's last CreateRoom)
+//
+// Without it (the default) the plugin has no bucket: it records nothing,
+// exactly as a deployment that never set one.
+//
 // LiveKit is a fake (internal/livekittest): rooms and participants over its
 // server API, and a signalling endpoint that records, verified, the token a
 // browser connects with and refuses the connection (it carries no media).
@@ -86,11 +100,14 @@ import (
 	"github.com/ZacxDev/muster-meetings/internal/contacts"
 	"github.com/ZacxDev/muster-meetings/internal/contactstest"
 	"github.com/ZacxDev/muster-meetings/internal/egresstest"
+	"github.com/ZacxDev/muster-meetings/internal/frames"
 	"github.com/ZacxDev/muster-meetings/internal/livekit"
 	"github.com/ZacxDev/muster-meetings/internal/livekittest"
 	"github.com/ZacxDev/muster-meetings/internal/muster"
 	"github.com/ZacxDev/muster-meetings/internal/mustertest"
 	"github.com/ZacxDev/muster-meetings/internal/owners"
+	"github.com/ZacxDev/muster-meetings/internal/s3"
+	"github.com/ZacxDev/muster-meetings/internal/s3test"
 	"github.com/ZacxDev/muster-meetings/internal/server"
 	"github.com/ZacxDev/muster-meetings/internal/store"
 	"github.com/ZacxDev/muster-meetings/internal/stt"
@@ -107,6 +124,7 @@ var (
 	sttMode  = flag.String("stt", "fake", "fake (the fake engine), or nemotron (the nemotron engine against the fake Nemotron server)")
 	nemLines = flag.String("nemotron-script", "", "with -stt=nemotron: the fake Nemotron server's script, lines separated by |")
 	ctMode   = flag.String("contacts", "off", "off (no contacts URL: no card), or fake (the fake contacts API)")
+	s3Mode   = flag.String("s3", "off", "off (no bucket: no recording), or fake (the fake S3 store and the fake composite Egress)")
 )
 
 // contactsToken is the harness's contacts API token (the fake's and the
@@ -229,7 +247,30 @@ func run(logger *log.Logger) error {
 	default:
 		return fmt.Errorf("-contacts is off or fake, not %q", *ctMode)
 	}
-	srv := server.New(server.Config{PublicURL: pluginURL, Contacts: ctClient, MusterOrigin: parentOrigin, KitUpstream: parentOrigin, KitTTL: time.Millisecond, KitRetry: time.Millisecond, Log: logger,
+	var bucket *s3.Client
+	var fs3 *s3test.Fake
+	switch *s3Mode {
+	case "off":
+	case "fake":
+		mp4, err := os.ReadFile(filepath.Join("internal", "frames", "testdata", "recording-vp9.mp4"))
+		if err != nil {
+			return err
+		}
+		fs3 = s3test.New()
+		defer fs3.Close()
+		if bucket, err = s3.New(fs3.Config()); err != nil {
+			return err
+		}
+		lk.CompositeAuto = true
+		lk.Upload = func(key string) int64 { fs3.Put(key, mp4); return int64(len(mp4)) }
+	default:
+		return fmt.Errorf("-s3 is off or fake, not %q", *s3Mode)
+	}
+	var sampler frames.Sampler
+	if bucket != nil {
+		sampler = frames.Find("")
+	}
+	srv := server.New(server.Config{PublicURL: pluginURL, Contacts: ctClient, S3: bucket, Frames: sampler, MusterOrigin: parentOrigin, KitUpstream: parentOrigin, KitTTL: time.Millisecond, KitRetry: time.Millisecond, Log: logger,
 		LiveKit: lkc, LiveKitURL: lkWS, ICE: "all",
 		// The fake engine (MEETINGS_TEST_MODE's) or the nemotron engine
 		// against the fake Nemotron server, and the ingest listener the fake
@@ -289,6 +330,57 @@ func run(logger *log.Logger) error {
 			io.WriteString(w, "ok")
 		})
 	}
+	if fs3 != nil {
+		latest := func(room string, active bool) *livekittest.Egress {
+			var out *livekittest.Egress
+			for _, e := range lk.Composites() {
+				if e.Room == room && (!active || e.Active()) {
+					e := e
+					out = &e
+				}
+			}
+			return out
+		}
+		mux.HandleFunc("GET /composite-kill", func(w http.ResponseWriter, r *http.Request) {
+			e := latest(r.URL.Query().Get("room"), true)
+			if e == nil {
+				http.Error(w, "no running composite in that room", http.StatusNotFound)
+				return
+			}
+			lk.KillEgress(e.ID)
+			io.WriteString(w, e.ID)
+		})
+		mux.HandleFunc("GET /composite-refuse", func(w http.ResponseWriter, r *http.Request) {
+			n, err := strconv.Atoi(r.URL.Query().Get("n"))
+			if err != nil || n < 0 {
+				http.Error(w, "n is a count", http.StatusBadRequest)
+				return
+			}
+			lk.RefuseComposite(n)
+			io.WriteString(w, "ok")
+		})
+		mux.HandleFunc("GET /latest-room", func(w http.ResponseWriter, r *http.Request) {
+			room := ""
+			for _, c := range lk.Calls() {
+				if rest, ok := strings.CutPrefix(c, "CreateRoom "); ok {
+					room = strings.TrimSpace(rest)
+				}
+			}
+			if room == "" {
+				http.Error(w, "no room yet", http.StatusNotFound)
+				return
+			}
+			io.WriteString(w, room)
+		})
+		mux.HandleFunc("GET /composite-start", func(w http.ResponseWriter, r *http.Request) {
+			e := latest(r.URL.Query().Get("room"), false)
+			if e == nil || e.StartedAt.IsZero() {
+				http.Error(w, "no composite has begun in that room", http.StatusNotFound)
+				return
+			}
+			io.WriteString(w, strconv.FormatInt(e.StartedAt.UnixMilli(), 10))
+		})
+	}
 	mux.HandleFunc("GET /livekit-joins", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(lk.RTCs())
@@ -325,7 +417,7 @@ func run(logger *log.Logger) error {
 	parent := &http.Server{Handler: mux}
 	go parent.Serve(parentLn)
 
-	b, _ := json.Marshal(map[string]any{"plugin": pluginURL, "parent": parentOrigin, "plugin_id": app.PluginID, "real_livekit": real, "contacts": ct != nil})
+	b, _ := json.Marshal(map[string]any{"plugin": pluginURL, "parent": parentOrigin, "plugin_id": app.PluginID, "real_livekit": real, "contacts": ct != nil, "s3": fs3 != nil})
 	fmt.Println(string(b))
 
 	done := make(chan struct{})

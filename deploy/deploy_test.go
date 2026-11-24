@@ -692,6 +692,22 @@ func egressConfig(t *testing.T, where, body string, apiKey, apiSecret string) ob
 	if n, _ := toInt(dig(cfg, "health_port")); n != 8080 {
 		t.Errorf("%s: health_port = %v, want 8080", where, dig(cfg, "health_port"))
 	}
+	// The recording's uploads: storage.s3 (a top-level s3: is silently
+	// ignored by Egress, which then writes to its local disk), path-style
+	// (MinIO), and no prefix (the plugin's key is the object's key).
+	s3, _ := dig(cfg, "storage", "s3").(obj)
+	if s3 == nil || dig(cfg, "s3") != nil {
+		t.Errorf("%s: the Egress config has no storage.s3 block (or a top-level s3:): %v", where, cfg)
+	} else {
+		for _, k := range []string{"endpoint", "bucket", "region", "access_key", "secret"} {
+			if _, ok := s3[k]; !ok {
+				t.Errorf("%s: storage.s3 has no %s", where, k)
+			}
+		}
+		if s3["force_path_style"] != true || dig(cfg, "storage", "prefix") != nil {
+			t.Errorf("%s: storage = %v, want force_path_style and no prefix", where, dig(cfg, "storage"))
+		}
+	}
 	return cfg
 }
 
@@ -815,8 +831,28 @@ func TestTheExampleOverlaySetsEveryKnob(t *testing.T) {
 	if err := yaml.Unmarshal([]byte(`{to: [{podSelector: {matchLabels: {app.kubernetes.io/name: muster-contacts}}}], ports: [{protocol: TCP, port: 8081}]}`), &want); err != nil {
 		t.Fatal(err)
 	}
-	if len(eg) != 6 || !reflect.DeepEqual(eg[5], want) {
-		t.Errorf("the overlay's plugin egress = %v, want the base's five and the contacts rule last", eg)
+	if len(eg) != 7 || !reflect.DeepEqual(eg[5], want) {
+		t.Errorf("the overlay's plugin egress = %v, want the base's five, the contacts rule, then the store's", eg)
+	}
+	// The recording: the store's address and port, last in the plugin's
+	// egress AND Egress's, and the params naming it and the bucket.
+	var store any
+	if err := yaml.Unmarshal([]byte(`{to: [{ipBlock: {cidr: 192.0.2.50/32}}], ports: [{protocol: TCP, port: 9000}]}`), &store); err != nil {
+		t.Fatal(err)
+	}
+	if len(eg) == 7 && !reflect.DeepEqual(eg[6], store) {
+		t.Errorf("the overlay's plugin egress to the store = %v", eg[6])
+	}
+	base := dig(find(t, render(t, "kubernetes"), "NetworkPolicy", "egress"), "spec", "egress").([]any)
+	ee := dig(find(t, docs, "NetworkPolicy", "egress"), "spec", "egress").([]any)
+	if len(ee) != len(base)+1 || !reflect.DeepEqual(ee[len(ee)-1], store) {
+		t.Errorf("the overlay's Egress egress = %v, want the base's and the store's last", ee)
+	}
+	for _, d := range ofKind(docs, "ConfigMap") {
+		data := d["data"].(obj)
+		if data["s3-endpoint"] != "http://minio.example.test:9000" || data["s3-bucket"] != "meetings" || data["s3-region"] != "us-east-1" {
+			t.Errorf("the overlay's recording params = %v", data)
+		}
 	}
 	for _, d := range ofKind(docs, "ConfigMap") {
 		if v := d["data"].(obj)["contacts-url"]; v != "http://muster-contacts:8081" {
@@ -952,7 +988,8 @@ func TestTheDeploymentFilesNameNoRealHost(t *testing.T) {
 			h := strings.TrimSuffix(strings.ToLower(m[1]), ".")
 			ok := h == "example.test" || strings.HasSuffix(h, ".example.test") || !strings.Contains(h, ".") ||
 				strings.HasSuffix(h, ".svc") || strings.HasSuffix(h, ".svc.cluster.local") ||
-				h == "github.com" || h == "127.0.0.1"
+				h == "github.com" || h == "127.0.0.1" ||
+				h == "ffmpeg.org" // the Dockerfile's pinned FFmpeg release tarball (checked by SHA-256)
 			if !ok {
 				t.Errorf("%s names the host %q: use example.test", f, h)
 			}
@@ -990,7 +1027,9 @@ func TestComposeEgressRedisAndTheIngestNetwork(t *testing.T) {
 	e, _ := envEntry(container(t, find(t, docs, "Deployment", "egress"), "egress"), "EGRESS_CONFIG_BODY")
 	var kube obj
 	yaml.Unmarshal([]byte(kubeVar.ReplaceAllStringFunc(e["value"].(string), func(m string) string {
-		return map[string]string{"$(LIVEKIT_API_KEY)": "APIcomposeFixture", "$(LIVEKIT_API_SECRET)": "compose-fixture-secret-0123456789"}[m]
+		return map[string]string{"$(LIVEKIT_API_KEY)": "APIcomposeFixture", "$(LIVEKIT_API_SECRET)": "compose-fixture-secret-0123456789",
+			// The recording's, unset in both: the params' default region.
+			"$(MEETINGS_S3_REGION)": "us-east-1"}[m]
 	})), &kube)
 	if !reflect.DeepEqual(kube, composeCfg) {
 		t.Errorf("the Egress configs differ:\nkubernetes: %v\ncompose:    %v", kube, composeCfg)

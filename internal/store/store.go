@@ -215,6 +215,71 @@ var migrations = []string{
 		attempts   INTEGER NOT NULL DEFAULT 0
 	) STRICT;
 	CREATE INDEX contacts_outbox_due ON contacts_outbox (next_at, id);`,
+
+	// 6: phase 5, the recording (design: "Media: LiveKit, TURN, Egress",
+	// "Retention"; recordings.go). The owner's recording retention (30, 90 or
+	// 365 days, or 0: forever, the default) and each meeting's purge time,
+	// stamped when it ends with a finite retention (NULL: kept forever), or set
+	// to the moment of Delete now. recordings is one row per room composite egress: a PART of the
+	// meeting's recording, its object, and its file's start in MEETING TIME
+	// as the egress reported it (start_ms; NULL until the egress says when
+	// its file began). recording_gaps are the stretches of a meeting that
+	// should have been recorded and were not (the egress starting, a failed
+	// egress until its successor began), as the transcript's gap markers
+	// are. recording_shares are the recording's capability links, stored
+	// only as SHA-256. screen_shares are when a screen was shared, in
+	// meeting time (the post-call analysis samples frames inside them).
+	// Every column added to an existing table is NULL or its default on every
+	// existing row, and nothing an older build reads changes. 🔴 One-way,
+	// like every migration here: an older build refuses a database at
+	// schema 6 ("newer than this build"); roll back by unsetting the S3
+	// variables (README: "Recording (optional)"), never by running an older
+	// image on this database.
+	`ALTER TABLE owners ADD COLUMN retention_days_recording INTEGER NOT NULL DEFAULT 0 CHECK (retention_days_recording IN (0, 30, 90, 365)); -- 0: forever
+	ALTER TABLE meetings ADD COLUMN purge_recording_at INTEGER; -- NULL: kept forever (or not ended)
+	CREATE INDEX meetings_purge_recording ON meetings (purge_recording_at) WHERE purge_recording_at IS NOT NULL;
+	CREATE TABLE recordings (
+		id           INTEGER PRIMARY KEY,
+		meeting_id   TEXT    NOT NULL REFERENCES meetings (id),
+		part         INTEGER NOT NULL CHECK (part >= 1),
+		egress_id    TEXT    NOT NULL DEFAULT '',
+		object_key   TEXT    NOT NULL,
+		state        TEXT    NOT NULL CHECK (state IN ('starting', 'active', 'complete', 'failed')),
+		requested_at INTEGER NOT NULL,  -- Unix ms: when the plugin asked for the egress
+		start_ms     INTEGER,           -- meeting time of the file's first frame, from the egress's own report
+		duration_ms  INTEGER,
+		bytes        INTEGER,
+		ended_at     INTEGER,           -- Unix ms
+		error        TEXT    NOT NULL DEFAULT '', -- a fixed phrase or an egress status, never Egress's message
+		egress_ended INTEGER NOT NULL DEFAULT 0 CHECK (egress_ended IN (0, 1)), -- its egress's end was observed (or none exists): its object is final
+		unseen_since INTEGER,           -- Unix ms: the first reconcile pass LiveKit did not list its egress; NULL once listed again
+		UNIQUE (meeting_id, part)
+	) STRICT;
+	CREATE INDEX recordings_egress ON recordings (egress_id) WHERE egress_id != '';
+	CREATE TABLE recording_gaps (
+		id         INTEGER PRIMARY KEY,
+		meeting_id TEXT    NOT NULL REFERENCES meetings (id),
+		from_ms    INTEGER NOT NULL,
+		to_ms      INTEGER,             -- NULL while it is open
+		why        TEXT    NOT NULL CHECK (why IN ('starting', 'failed'))
+	) STRICT;
+	CREATE UNIQUE INDEX recording_gaps_open ON recording_gaps (meeting_id) WHERE to_ms IS NULL;
+	CREATE TABLE recording_shares (
+		token_sha256 TEXT    PRIMARY KEY, -- the link's token is never stored
+		meeting_id   TEXT    NOT NULL REFERENCES meetings (id),
+		created_at   INTEGER NOT NULL,
+		revoked_at   INTEGER
+	) STRICT;
+	CREATE INDEX recording_shares_meeting ON recording_shares (meeting_id);
+	CREATE TABLE screen_shares (
+		track      TEXT    PRIMARY KEY,
+		meeting_id TEXT    NOT NULL REFERENCES meetings (id),
+		identity   TEXT    NOT NULL,
+		speaker    TEXT    NOT NULL,   -- a name: render as text only, never logged
+		start_ms   INTEGER NOT NULL,
+		end_ms     INTEGER             -- NULL while it is shared
+	) STRICT;
+	CREATE INDEX screen_shares_meeting ON screen_shares (meeting_id, start_ms);`,
 }
 
 // ErrNeedsSubjectMap is a phase-2a database that holds owners or meetings:

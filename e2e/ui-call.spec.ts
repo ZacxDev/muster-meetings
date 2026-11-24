@@ -237,7 +237,7 @@ for (const size of sizes) {
       // Typing in a field is typing.
       const calls = await f.evaluate(() => (window as any).__lk.calls.length);
       await app.locator('#consent-btn').click();
-      await app.locator('#sw-record').focus();
+      await app.locator('#sw-ai').focus();
       await press('m');
       expect(await f.evaluate(() => (window as any).__lk.calls.length)).toBe(calls);
       // Every shortcut is named on its button.

@@ -382,11 +382,17 @@ func (s *Store) EndRoom(ctx context.Context, room, why string, now time.Time) (s
 }
 
 // endParticipants moves everyone still waiting or admitted in an ended
-// meeting to ended, inside the transaction that ended it.
+// meeting to ended, inside the transaction that ended it. 🔴 Every way a
+// meeting ends (End, room_finished, the 24 h cap, an uninstall, a revoked
+// owner) calls it in that transaction, so it is also where the rest of an
+// end is written, once: closeEnded.
 func endParticipants(ctx context.Context, tx *sql.Tx, now time.Time) error {
 	_, err := tx.ExecContext(ctx, `UPDATE participants SET state = 'ended', left_at = coalesce(left_at, ?)
 		WHERE state IN (`+fromList(EvEnd)+`) AND meeting_id IN (SELECT id FROM meetings WHERE state = 'ended')`, ms(now))
-	return err
+	if err != nil {
+		return err
+	}
+	return closeEnded(ctx, tx, now)
 }
 
 // ---- the owner side: through OwnerRepo, so always the owner's own meeting ----
@@ -543,6 +549,15 @@ func (r *OwnerRepo) Move(ctx context.Context, meetingID, pid string, ev Event, n
 	}
 	if err != nil {
 		return Moved{}, err
+	}
+	if ev == EvAdmit {
+		// 🔴 The meeting's time origin is frozen at the earlier of the owner's
+		// first join (MarkStarted) and the first admit: from either on, a
+		// guest's speech and the recording are placed in meeting time, and
+		// both must count from one instant that never moves.
+		if _, err := tx.ExecContext(ctx, `UPDATE meetings SET started_at = ? WHERE id = ? AND started_at IS NULL`, ms(now), meetingID); err != nil {
+			return Moved{}, err
+		}
 	}
 	if err := audit(ctx, tx, now, r.subject, meetingID, "participant."+string(t.to), pid); err != nil {
 		return Moved{}, err

@@ -276,7 +276,11 @@
     var text = notice && notice.badge ? notice.badge : '';
     b.textContent = text;
     var off = $('badge-off');
-    if (off) off.hidden = !!text;
+    if (off) {
+      off.hidden = !!text;
+      // Only a plugin that can record says what is not recorded.
+      off.textContent = notice && notice.recordable ? 'Not recorded' : 'Off';
+    }
     btn.hidden = !text && !(opts && opts.owner);
     btn.classList.toggle('mu-chip--error', !!text);
     var box = $('consent-text');

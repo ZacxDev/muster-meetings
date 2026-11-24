@@ -209,9 +209,9 @@ func (s *Server) Transcribing() bool { return s.cfg.Engine != nil }
 
 // noticeFor is the consent notice for a meeting's switches on this plugin:
 // the "transcribed" clause and the Transcribing badge only while it has an
-// engine (lobby.NoticeWith). Every page and stream takes its notice here.
+// engine, and the recording's only while it has a bucket (lobby.NoticeFull). Every page and stream takes its notice here.
 func (s *Server) noticeFor(record, ai bool) lobby.Notice {
-	return lobby.NoticeWith(record, ai, s.Transcribing())
+	return lobby.NoticeFull(record, ai, s.Transcribing(), s.Recording())
 }
 
 // sinceStart is now in meeting time (ms from start), never negative.

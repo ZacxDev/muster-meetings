@@ -58,3 +58,14 @@ func SetAmendLogGraceForTest(t *testing.T, d time.Duration) {
 
 // RunContactsForTest is Run's contacts step alone (the boot's outbox rule).
 func (s *Server) RunContactsForTest(ctx context.Context) { s.runContacts(ctx) }
+
+// SetRecordingLookupFaultForTest makes every part lookup of an egress fail
+// with err (nil clears it), until t ends.
+func SetRecordingLookupFaultForTest(t *testing.T, err error) {
+	if err == nil {
+		testHookRecordingLookup = nil
+		return
+	}
+	testHookRecordingLookup = func() error { return err }
+	t.Cleanup(func() { testHookRecordingLookup = nil })
+}

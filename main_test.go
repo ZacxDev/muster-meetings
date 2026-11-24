@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/base64"
+	"errors"
 	"net/netip"
 	"slices"
 	"strings"
@@ -387,5 +388,59 @@ func TestContactsConfigIsOptionalBothOrNeither(t *testing.T) {
 				t.Errorf("startup line with contacts: %q", line)
 			}
 		}
+	}
+}
+
+// The recording (phase 5) is optional: no MEETINGS_S3_* variable is today's
+// config, all four configure the bucket, any part refuses to start, and no
+// value is ever shown. The startup line gains a recording clause only when
+// configured.
+func TestRecordingConfigIsAllOrNothing(t *testing.T) {
+	// Built at run time from short parts: a fixture, not a key (gitleaks).
+	secret := strings.Join([]string{"s3", "fixture", "only"}, "-")
+	c, err := LoadConfig(env(base()))
+	if err != nil || c.S3 != nil {
+		t.Fatalf("no S3 variables: %v, %v; want no bucket", c.S3, err)
+	}
+	if line := startupLine(c, "meet", 1, false); strings.Contains(line, "recording") {
+		t.Fatalf("startup line without a bucket names a recording: %q", line)
+	}
+	full := map[string]string{"MEETINGS_S3_ENDPOINT": "http://minio.example.test:9000", "MEETINGS_S3_BUCKET": "meetings",
+		"MEETINGS_S3_ACCESS_KEY": "meetings-key", "MEETINGS_S3_SECRET_KEY": secret}
+	m := base()
+	for k, v := range full {
+		m[k] = v
+	}
+	c, err = LoadConfig(env(m))
+	if err != nil || c.S3 == nil || c.S3.Bucket() != "meetings" || c.S3.Region() != "us-east-1" {
+		t.Fatalf("all four: %v, %v", c.S3, err)
+	}
+	line := startupLine(c, "meet", 1, false)
+	if !strings.Contains(line, `; recording: bucket "meetings" at http://minio.example.test:9000, `) || strings.Contains(line, secret) || strings.Contains(line, "meetings-key") {
+		t.Errorf("startup line with a bucket: %q", line)
+	}
+	for k := range full {
+		m := base()
+		for k2, v := range full {
+			if k2 != k {
+				m[k2] = v
+			}
+		}
+		if _, err := LoadConfig(env(m)); !errors.Is(err, ErrS3Half) {
+			t.Errorf("without %s: %v, want ErrS3Half", k, err)
+		}
+	}
+	m = base()
+	m["MEETINGS_S3_REGION"] = "us-east-1"
+	if c, err := LoadConfig(env(m)); err != nil || c.S3 != nil {
+		t.Errorf("a region alone (the Kubernetes base's): %v, %v; want no bucket", c.S3, err)
+	}
+	m = base()
+	for k, v := range full {
+		m[k] = v
+	}
+	m["MEETINGS_S3_ENDPOINT"] = "http://minio.example.test:9000/" + secret
+	if _, err := LoadConfig(env(m)); err == nil || strings.Contains(err.Error(), secret) {
+		t.Errorf("an endpoint with a path: %v", err)
 	}
 }

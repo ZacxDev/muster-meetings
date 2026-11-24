@@ -13,7 +13,9 @@ import { test, expect, type FrameLocator, type Page } from '@playwright/test';
 import { startHarness, useFakeLiveKit, ownerPrejoin, lk, appFrame, sizes, type Harness } from './helpers';
 
 let h: Harness;
-test.beforeAll(async () => { h = await startHarness(); });
+// A plugin that records (-s3=fake), as the goldens were drawn: the badge
+// reads "Recording · …".
+test.beforeAll(async () => { h = await startHarness(['-s3=fake']); });
 test.afterAll(() => { h?.proc.stdin?.end(); });
 
 // settle waits until nothing in the app frame is still animating, and moves

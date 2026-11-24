@@ -12,7 +12,11 @@
 #                    Secret without it still boots the utterance engine),
 #                    and for contacts only MEETINGS_CONTACTS_TOKEN (a COPY of
 #                    the contacts plugin's CONTACTS_API_TOKEN; optional, so a
-#                    Secret without it boots with no guest card)
+#                    Secret without it boots with no guest card),
+#                    and for the recording only MEETINGS_S3_ACCESS_KEY and
+#                    MEETINGS_S3_SECRET_KEY (the bucket-scoped key Egress
+#                    uploads with too; optional, so a Secret without them
+#                    boots with no recording)
 #   livekit-keys     LIVEKIT_API_KEY, LIVEKIT_API_SECRET (shared with LiveKit)
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -108,6 +112,17 @@ spec:
             # Secret from before contacts still boots.
             - name: MEETINGS_CONTACTS_URL
               valueFrom: {configMapKeyRef: {name: muster-meetings-params, key: contacts-url, optional: true}}
+            # The recording (optional; README "Recording (optional)"): the
+            # bucket the plugin reads and deletes from and Egress writes to.
+            # s3-endpoint and s3-bucket empty (the base) and no keys in the
+            # Secret is meetings with no recording, exactly as before; all
+            # set turns it on; some alone refuses to start.
+            - name: MEETINGS_S3_ENDPOINT
+              valueFrom: {configMapKeyRef: {name: muster-meetings-params, key: s3-endpoint, optional: true}}
+            - name: MEETINGS_S3_BUCKET
+              valueFrom: {configMapKeyRef: {name: muster-meetings-params, key: s3-bucket, optional: true}}
+            - name: MEETINGS_S3_REGION
+              valueFrom: {configMapKeyRef: {name: muster-meetings-params, key: s3-region, optional: true}}
             - name: MEETINGS_INGEST_LISTEN
               value: ":8082"
             - name: MEETINGS_INGEST_URL
@@ -124,6 +139,10 @@ spec:
               valueFrom: {secretKeyRef: {name: muster-meetings, key: MEETINGS_STREAM_STT_TOKEN, optional: true}}
             - name: MEETINGS_CONTACTS_TOKEN
               valueFrom: {secretKeyRef: {name: muster-meetings, key: MEETINGS_CONTACTS_TOKEN, optional: true}}
+            - name: MEETINGS_S3_ACCESS_KEY
+              valueFrom: {secretKeyRef: {name: muster-meetings, key: MEETINGS_S3_ACCESS_KEY, optional: true}}
+            - name: MEETINGS_S3_SECRET_KEY
+              valueFrom: {secretKeyRef: {name: muster-meetings, key: MEETINGS_S3_SECRET_KEY, optional: true}}
             - name: LIVEKIT_API_KEY
               valueFrom: {secretKeyRef: {name: livekit-keys, key: LIVEKIT_API_KEY}}
             - name: LIVEKIT_API_SECRET

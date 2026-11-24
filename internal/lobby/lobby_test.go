@@ -228,3 +228,24 @@ func TestTheHubKnowsWhenAnOwnerIsWatching(t *testing.T) {
 	}
 	stopGuest()
 }
+
+// 🔴 A plugin that cannot record never mentions recording, whatever the
+// Record switch says; one that can, does. The switch's state is kept for the
+// knock's check.
+func TestTheNoticeMentionsRecordingOnlyWhenThePluginCanRecord(t *testing.T) {
+	n := lobby.NoticeFull(true, true, true, false)
+	all := strings.Join(n.Text, " ") + " " + n.Badge
+	if strings.Contains(all, "record") || strings.Contains(all, "Record") || !n.Record || n.Recordable {
+		t.Fatalf("no bucket: %+v", n)
+	}
+	if n.Badge != "Transcribing · AI" || n.Text[0] != lobby.NoticeTranscribed {
+		t.Fatalf("no bucket: %+v", n)
+	}
+	if f := n.WithRecordingFailed(); f.Badge != n.Badge || f.RecordingFailed {
+		t.Fatalf("no bucket, failed: %+v", f)
+	}
+	r := lobby.NoticeFull(true, true, true, true)
+	if r.Badge != "Recording · Transcribing · AI" || r.Text[0] != lobby.NoticeRecorded || !r.Recordable {
+		t.Fatalf("a bucket: %+v", r)
+	}
+}

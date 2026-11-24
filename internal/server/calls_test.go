@@ -229,7 +229,8 @@ func TestNoGuestTokenBeforeAdmissionAndItsGrantIsExact(t *testing.T) {
 	ticket := kb["ticket"].(string)
 	w := e.wait(c.Code, ticket)
 	first := w.want("waiting")
-	if !strings.Contains(first.Data, "This meeting is recorded and transcribed.") {
+	// No bucket here: the notice names no recording.
+	if !strings.Contains(first.Data, "This meeting is transcribed.") {
 		t.Errorf("waiting event = %s: want the current notice", first.Data)
 	}
 	if ev, ok := w.next(300 * time.Millisecond); ok {
@@ -913,7 +914,7 @@ func TestTheLinkIs410After24Hours(t *testing.T) {
 // they are; a knock carrying another one is 409 with the current one, and
 // the current one is taken.
 func TestAKnockWithAStaleNoticeIs409(t *testing.T) {
-	e := newEnv(t)
+	e, _ := recEnv(t) // a plugin that records: the notice names it
 	c := e.meeting(ada)
 	_, page := e.do("GET", "/j/"+c.Code, "", nil)
 	for _, want := range []string{"This meeting is recorded and transcribed.", "sent to an AI service (OpenRouter)", `data-record="true"`, `data-ai="true"`} {

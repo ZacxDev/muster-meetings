@@ -310,6 +310,7 @@ var migrations = []string{
 	ALTER TABLE owners ADD COLUMN email_token_expires_at INTEGER;
 	CREATE UNIQUE INDEX owners_email_token ON owners (email_token_sha256) WHERE email_token_sha256 IS NOT NULL;
 	ALTER TABLE participants ADD COLUMN card_email TEXT; -- a guest's address from the card: never logged
+	ALTER TABLE meetings ADD COLUMN ai_frames INTEGER NOT NULL DEFAULT 0 CHECK (ai_frames IN (0, 1)); -- its notice named the frames of shared screens
 	ALTER TABLE recording_shares ADD COLUMN kind TEXT NOT NULL DEFAULT 'owner' CHECK (kind IN ('owner', 'mail'));
 	CREATE TABLE ai_runs (
 		id           INTEGER PRIMARY KEY,

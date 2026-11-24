@@ -370,7 +370,7 @@ func (s *Server) handleLeave(w http.ResponseWriter, r *http.Request) {
 	s.hub.Changed(g.MeetingID)
 	// With contacts configured and a card offered, the answer carries it
 	// (200); otherwise it is today's 204.
-	if c := s.offerCard(r.Context(), g.Subject, g.ParticipantID); c != nil {
+	if c := s.offerCard(r.Context(), g.Subject, g.ParticipantID, g.MeetingID); c != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"card": c})
 		return
 	}

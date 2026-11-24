@@ -126,7 +126,7 @@ type cardPayload struct {
 // cached answer says contacts accepts the meeting's owner, and the store's
 // card predicate holds (an admitted guest, never the owner, whose meeting
 // ended by End or their Leave, offered none before). nil otherwise.
-func (s *Server) offerCard(ctx context.Context, subject, pid string) *cardPayload {
+func (s *Server) offerCard(ctx context.Context, subject, pid, meetingID string) *cardPayload {
 	if s.contacts == nil || !s.contacts.accepting.Get(subject) {
 		return nil
 	}
@@ -138,14 +138,14 @@ func (s *Server) offerCard(ctx context.Context, subject, pid string) *cardPayloa
 	if !ok {
 		return nil
 	}
-	return &cardPayload{ID: off.ID, Name: off.TypedName, Owner: off.OwnerName, Notes: s.notes != nil}
+	return &cardPayload{ID: off.ID, Name: off.TypedName, Owner: off.OwnerName, Notes: s.notesFor(ctx, meetingID)}
 }
 
 // endedPayload is a guest's "ended" event: its message, and the card when
 // one is offered. Without a card it is the event as it always was.
 func (s *Server) endedPayload(ctx context.Context, g store.Guest) map[string]any {
 	out := map[string]any{"message": GuestEnded}
-	if c := s.offerCard(ctx, g.Subject, g.ParticipantID); c != nil {
+	if c := s.offerCard(ctx, g.Subject, g.ParticipantID, g.MeetingID); c != nil {
 		out["card"] = c
 	}
 	return out

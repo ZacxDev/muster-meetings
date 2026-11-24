@@ -226,10 +226,12 @@ func (s *Store) Live(ctx context.Context, meetingID string) (LiveState, error) {
 }
 
 // QueuePost queues a post-call pass of an ended meeting with these models;
-// it answers the run's id.
+// it answers the run's id. 🔴 Only a meeting whose AI action items were on:
+// with them off its guests were told nothing goes to an AI service, and
+// ErrNotFound is the answer.
 func (s *Store) QueuePost(ctx context.Context, meetingID, itemsModel, itemsPrefs, visionModel, visionPrefs, by string, now time.Time) (int64, error) {
 	res, err := s.db.ExecContext(ctx, `INSERT INTO ai_runs (meeting_id, kind, items_model, items_prefs, vision_model, vision_prefs, state, next_at, requested_by, created_at)
-		SELECT id, 'post', ?, ?, ?, ?, 'queued', ?, ?, ? FROM meetings WHERE id = ? AND state = 'ended'`,
+		SELECT id, 'post', ?, ?, ?, ?, 'queued', ?, ?, ? FROM meetings WHERE id = ? AND state = 'ended' AND ai = 1`,
 		itemsModel, itemsPrefs, visionModel, visionPrefs, ms(now), by, ms(now), meetingID)
 	if err != nil {
 		return 0, err
@@ -256,10 +258,10 @@ func (s *Store) QueueEnded(ctx context.Context, itemsModel, itemsPrefs, visionMo
 	return res.RowsAffected()
 }
 
-// EndedBetween is the ended meetings that ended in [from, to) (the
-// reprocess command's range).
+// EndedBetween is the ended meetings with their AI action items on that
+// ended in [from, to) (the reprocess command's range).
 func (s *Store) EndedBetween(ctx context.Context, from, to time.Time) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id FROM meetings WHERE state = 'ended' AND ended_at >= ? AND ended_at < ? ORDER BY ended_at`, ms(from), ms(to))
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM meetings WHERE state = 'ended' AND ai = 1 AND ended_at >= ? AND ended_at < ? ORDER BY ended_at`, ms(from), ms(to))
 	if err != nil {
 		return nil, err
 	}
@@ -553,6 +555,21 @@ func (s *Store) FinalSegments(ctx context.Context, meetingID string) ([]Segment,
 		return nil, err
 	}
 	return scanSegments(rows)
+}
+
+// SetAIFrames records that a meeting's notice names the frames of shared
+// screens (the plugin had a vision model when it was made): only then may
+// its post runs send frames.
+func (s *Store) SetAIFrames(ctx context.Context, meetingID string, on bool) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE meetings SET ai_frames = ? WHERE id = ?`, on, meetingID)
+	return err
+}
+
+// AIFrames says a meeting's notice named the frames (SetAIFrames).
+func (s *Store) AIFrames(ctx context.Context, meetingID string) (bool, error) {
+	var on bool
+	err := s.db.QueryRowContext(ctx, `SELECT ai_frames = 1 FROM meetings WHERE id = ?`, meetingID).Scan(&on)
+	return on, err
 }
 
 // MeetingAI is whether a meeting's AI switch is on and it is open.

@@ -458,10 +458,22 @@ func (s *Server) sendOne(ctx context.Context, o store.OutMail) {
 
 // ---- the card's address ----
 
-// keepCardEmail keeps a guest's card address for the notes (only with mail
-// on), and drafts their notes when the meeting's run is already done.
-func (s *Server) keepCardEmail(ctx context.Context, c store.Card, email string) {
+// notesFor says a meeting's guests get its notes: mail is configured and
+// the meeting's AI action items are on (with them off nothing is analysed,
+// so there are no notes, and the card does not promise them).
+func (s *Server) notesFor(ctx context.Context, meetingID string) bool {
 	if s.notes == nil {
+		return false
+	}
+	ai, _, err := s.store.MeetingAI(ctx, meetingID)
+	return err == nil && ai
+}
+
+// keepCardEmail keeps a guest's card address for the notes (only when the
+// card said so: notesFor), and drafts their notes when the meeting's run is
+// already done.
+func (s *Server) keepCardEmail(ctx context.Context, c store.Card, email string) {
+	if !s.notesFor(ctx, c.MeetingID) {
 		return
 	}
 	if err := s.store.KeepCardEmail(ctx, c.ParticipantID, email); err != nil {

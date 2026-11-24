@@ -725,6 +725,13 @@ func (s *Server) handleCreateMeeting(w http.ResponseWriter, r *http.Request, rep
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "the meeting could not be made"})
 		return
 	}
+	// The notice of a meeting made now names the frames (with a vision
+	// model and a bucket): its post runs may send them.
+	if s.ai != nil && s.ai.visionModel != "" {
+		if err := s.store.SetAIFrames(r.Context(), c.Meeting.ID, true); err != nil {
+			s.cfg.Log.Printf("create: %v", err)
+		}
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{"id": c.Meeting.ID, "join_url": s.JoinURL(c.JoinCode), "meeting": c.Meeting})
 }
 

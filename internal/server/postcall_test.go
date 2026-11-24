@@ -749,11 +749,11 @@ func TestAnAgentTokenReadsOneMeetingsTimeline(t *testing.T) {
 	}
 }
 
-// 🔴 Frames + transcript: frames of a shared screen at the moments a line
-// was said over it, sent with that excerpt to the vision model; the notes
-// cite the frame (a note citing a frame not sent is dropped), and the
-// bundle carries them.
-func TestTheFrameAnalysisSendsSharedScreenFramesWithTheExcerpt(t *testing.T) {
+// framesMeeting is a recorded meeting of Ada's with one line said over her
+// shared screen, ended; consent false makes it a meeting whose notice did
+// not name the frames (one from before the frame analysis).
+func framesMeeting(t *testing.T, consent bool) (*pc, call) {
+	t.Helper()
 	e := pcEnv(t, true)
 	if !e.server.FramesAvailableForTest() {
 		if os.Getenv("MEETINGS_REQUIRE_FFMPEG") == "1" {
@@ -782,7 +782,19 @@ func TestTheFrameAnalysisSendsSharedScreenFramesWithTheExcerpt(t *testing.T) {
 	e.clock.Add(6 * time.Second)
 	e.lk.Unpublish(c.Room, store.OwnerIdentity, scr)
 	e.clock.Add(5 * time.Second)
+	if !consent {
+		e.store.SetAIFrames(context.Background(), c.ID, false)
+	}
 	e.do("POST", "/api/meetings/"+c.ID+"/end", c.Sess, nil)
+	return e, c
+}
+
+// 🔴 Frames + transcript: frames of a shared screen at the moments a line
+// was said over it, sent with that excerpt to the vision model; the notes
+// cite the frame (a note citing a frame not sent is dropped), and the
+// bundle carries them.
+func TestTheFrameAnalysisSendsSharedScreenFramesWithTheExcerpt(t *testing.T) {
+	e, c := framesMeeting(t, true)
 	a := e.postDone(c, 1)
 	if n := e.or.Count(openroutertest.KindVision); n != 1 {
 		t.Fatalf("%d vision calls, want 1", n)
@@ -813,6 +825,72 @@ func TestTheFrameAnalysisSendsSharedScreenFramesWithTheExcerpt(t *testing.T) {
 	resp, raw := e.do("GET", "/api/meetings/"+c.ID+"/timeline", c.Sess, nil)
 	if resp.StatusCode != 200 || !strings.Contains(string(raw), `"notes":[{"frame_ms":6000,"text":"The slide shows ticket MEET-42."`) {
 		t.Errorf("timeline = %d %.600s", resp.StatusCode, raw)
+	}
+}
+
+// 🔴 A meeting whose notice did not name the frames (one from before the
+// frame analysis) sends none, even with a vision model and its recording.
+func TestAMeetingWhoseNoticeNamedNoFramesSendsNone(t *testing.T) {
+	e, c := framesMeeting(t, false)
+	a := e.postDone(c, 1)
+	if n := e.or.Count(openroutertest.KindVision); n != 0 {
+		t.Fatalf("%d vision calls for a meeting whose notice did not name the frames", n)
+	}
+	if a.Output == nil || len(a.Output.Items) != 1 || len(a.Output.Notes) != 0 {
+		t.Errorf("output = %+v: want the transcript's item and no frame note", a.Output)
+	}
+}
+
+// 🔴 With the AI action items off, a meeting is never analysed, the card
+// promises no notes and keeps no address, and no reprocess may send it to
+// an AI service.
+func TestAMeetingWithAIOffIsNeverSentToTheAIService(t *testing.T) {
+	e := pcEnv(t, false)
+	c := e.meeting(ada)
+	if resp, raw := e.do("POST", "/api/meetings/"+c.ID+"/ai", c.Sess, map[string]bool{"on": false}); resp.StatusCode != 200 {
+		t.Fatalf("ai off = %d %s", resp.StatusCode, raw)
+	}
+	e.started(c)
+	e.say(c, store.OwnerIdentity, "Ada L.", 1_000, 3_000, "I'll book the caterer.")
+	resp, b := e.knockFrom(c.Code, grace, map[string]bool{"record": true, "ai": false, "transcribed": true}, "198.51.100.7")
+	tk, _ := b["ticket"].(string)
+	if resp.StatusCode != 201 || tk == "" {
+		t.Fatalf("knock = %d %v", resp.StatusCode, b)
+	}
+	e.admit(c, grace)
+	s := e.guestEvents(c.Code, tk)
+	s.want("meeting")
+	if a := e.server.Accepting(); a != nil {
+		a.Wait()
+	}
+	e.server.LiveTick(context.Background())
+	e.end(c)
+	ev := endedOf(t, s)
+	raw, _ := json.Marshal(ev.Card)
+	if ev.Card == nil || strings.Contains(string(raw), "notes") {
+		t.Fatalf("card = %s: want a card that promises no notes", raw)
+	}
+	if resp, raw := e.do("POST", "/card", "", map[string]string{"id": ev.Card.ID, "name": grace, "email": graceAddr}); resp.StatusCode != 200 {
+		t.Fatalf("card = %d %s", resp.StatusCode, raw)
+	}
+	e.server.PostPass(context.Background())
+	if a := e.analysis(c, ""); len(a.Runs) != 0 {
+		t.Errorf("runs = %+v for a meeting with AI off", a.Runs)
+	}
+	resp, body := e.do("POST", "/api/meetings/"+c.ID+"/reprocess", c.Sess, map[string]any{})
+	if resp.StatusCode != 409 || !strings.Contains(string(body), server.ErrReprocessNoAI) {
+		t.Errorf("reprocess = %d %s", resp.StatusCode, body)
+	}
+	if n := len(e.or.Requests()); n != 0 {
+		t.Errorf("%d AI calls for a meeting with AI off", n)
+	}
+	if ds := e.drafts(c); len(ds) != 0 {
+		t.Errorf("drafts = %+v", ds)
+	}
+	var kept int
+	e.dbQuery(`SELECT count(*) FROM participants WHERE card_email IS NOT NULL`).Scan(&kept)
+	if kept != 0 {
+		t.Errorf("%d card addresses kept for a meeting with no notes", kept)
 	}
 }
 

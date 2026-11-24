@@ -1606,6 +1606,15 @@ var mutants = []mutant{
 	{name: "summary: an uncited point kept", file: itSum, from: "if p.Text == \"\" || len(p.Segments) == 0 || len(out) >= SummaryMaxPoints {", to: "if p.Text == \"\" || len(out) >= SummaryMaxPoints {",
 		pkg: "./internal/items", test: "TestGuardSummary", want: "summary ="},
 
+	// Consent: the notice is what may go to the AI service.
+	{name: "consent: a meeting with AI off reprocessed", file: pcRuns, from: "FROM meetings WHERE id = ? AND state = 'ended' AND ai = 1`", to: "FROM meetings WHERE id = ? AND state = 'ended'`",
+		more: []edit{{pcAn, "\tif !m.AI {\n\t\twriteJSON(w, http.StatusConflict, map[string]any{\"error\": ErrReprocessNoAI})", "\tif false {\n\t\twriteJSON(w, http.StatusConflict, map[string]any{\"error\": ErrReprocessNoAI})"}},
+		pkg: "./internal/server", test: "TestAMeetingWithAIOffIsNeverSentToTheAIService", want: "reprocess = "},
+	{name: "consent: frames sent though the notice did not name them", file: pcAn, from: "if on, err := s.store.AIFrames(ctx, run.MeetingID); err != nil || !on {", to: "if on, err := s.store.AIFrames(ctx, run.MeetingID); err != nil || (!on && false) {",
+		pkg: "./internal/server", test: "TestAMeetingWhoseNoticeNamedNoFramesSendsNone", want: "vision calls for a meeting whose notice did not name the frames"},
+	{name: "consent: the card promises notes with AI off", file: pcNotes, from: "\treturn err == nil && ai\n", to: "\treturn err == nil\n",
+		pkg: "./internal/server", test: "TestAMeetingWithAIOffIsNeverSentToTheAIService", want: "want a card that promises no notes"},
+
 	// ---- 🔴 contacts, phase 1b, in a browser (go run ./scripts/mutate -e2e) ----
 	{name: "contacts ui: the consent sentence reworded", file: guestJS, from: "', who will see that you were in this meeting. Nothing else is shared.'", to: "', who may see that you were in this meeting. Nothing else is shared.'",
 		e2e: cardE2E, test: "End: the guest's card .*\\(mobile\\)", want: "Your name and email go to Ada L., who will see"},

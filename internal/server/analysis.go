@@ -549,6 +549,11 @@ func (s *Server) analyseFrames(ctx context.Context, run store.Run, segs []items.
 		return nil, nil, nil
 	}
 	// kept is the caller's: refinements change its items in place.
+	// 🔴 Only a meeting whose notice named the frames (SetAIFrames): a
+	// meeting from before the frame analysis, reprocessed, sends none.
+	if on, err := s.store.AIFrames(ctx, run.MeetingID); err != nil || !on {
+		return nil, nil, err
+	}
 	repo := s.store.ForSubject(run.Subject)
 	b, err := s.bundle(ctx, repo, run.MeetingID)
 	if err != nil {
@@ -749,8 +754,13 @@ func (s *Server) handleAnalysis(w http.ResponseWriter, r *http.Request, repo *st
 // modelRE is an OpenRouter slug: provider/model, with an optional :variant.
 var modelRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*(:[a-z0-9._-]+)?$`)
 
-// ErrReprocessOpen is a reprocess of a meeting still open.
-const ErrReprocessOpen = "The meeting is still open: it is processed when it ends."
+// ErrReprocessOpen is a reprocess of a meeting still open; ErrReprocessNoAI
+// one whose AI action items were off (its guests were told nothing goes to
+// an AI service).
+const (
+	ErrReprocessOpen = "The meeting is still open: it is processed when it ends."
+	ErrReprocessNoAI = "AI action items were off for this meeting, so nothing of it may go to an AI service."
+)
 
 func (s *Server) handleReprocess(w http.ResponseWriter, r *http.Request, repo *store.OwnerRepo) {
 	var in struct {
@@ -770,6 +780,10 @@ func (s *Server) handleReprocess(w http.ResponseWriter, r *http.Request, repo *s
 	}
 	if m.State != "ended" {
 		writeJSON(w, http.StatusConflict, map[string]any{"error": ErrReprocessOpen})
+		return
+	}
+	if !m.AI {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": ErrReprocessNoAI})
 		return
 	}
 	im, ip, err := s.pickModel(in.ItemsModel, in.ItemsPrefs, s.cfg.AI.Items.Model, s.ai.prefs, "items")

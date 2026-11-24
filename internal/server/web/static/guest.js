@@ -78,11 +78,15 @@
   // own Leave. Optional: Skip is as easy as Send, closing the tab is a
   // skip, nothing is pre-ticked. Its id lives in this function's memory
   // only, and is sent in a body, never a URL.
-  function cardText(owner) {
+  // With notes (the server mails meeting notes, and says so in the card),
+  // the consent also says the address gets them.
+  function cardText(owner, notes) {
     var who = owner || 'the host';
     return {
       title: 'Stay in touch with ' + who + '?',
-      consent: 'Your name and email go to ' + who + ', who will see that you were in this meeting. Nothing else is shared.'
+      consent: notes
+        ? 'Your name and email go to ' + who + ', who will see that you were in this meeting, and you get the meeting notes when ' + who + ' sends them. Nothing else is shared.'
+        : 'Your name and email go to ' + who + ', who will see that you were in this meeting. Nothing else is shared.'
     };
   }
 
@@ -109,7 +113,7 @@
 
   function showCard(page, card) {
     if (document.getElementById('card')) return;
-    var t = cardText(card.owner);
+    var t = cardText(card.owner, !!card.notes);
     var sec = el('section', 'mu-card card-ask');
     sec.id = 'card';
     sec.setAttribute('aria-labelledby', 'card-title');
@@ -236,6 +240,7 @@
   // from the start, so a new stream (a Retry) redraws it.
   var side = MeetingsCall.Side();
   var transcript = MeetingsCall.transcriptPanel(side);
+  var actionItems = MeetingsCall.itemsPanel(side);
 
   // events follows the admitted guest's stream: a fresh token at its start
   // (used on a Retry), the CURRENT notice (its badge), the live transcript,
@@ -244,6 +249,7 @@
     if (abort) abort.abort();
     abort = new AbortController();
     transcript.reset();
+    actionItems.reset();
     post('/events', { ticket: ticket }, abort.signal).then(function (res) {
       if (res.status === 410) { finish('ended', 'This meeting has ended.'); return; }
       if (!res.ok) { finish('removed', 'You are no longer in this meeting.'); return; }
@@ -254,6 +260,7 @@
         else if (name === 'amend') transcript.amend(data);
         else if (name === 'partials') transcript.partials(data.partials);
         else if (name === 'transcript') transcript.status(data.status);
+        else if (name === 'items') actionItems.update(data);
         else if (name === 'ended') finish('ended', 'This meeting has ended.', data && data.card);
         else if (name === 'removed') finish('removed', 'You are no longer in this meeting.');
       });

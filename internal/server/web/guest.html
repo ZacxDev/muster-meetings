@@ -81,8 +81,17 @@
         <button id="btn-retry" type="button" class="mu-btn mu-btn--primary overlay-action" data-icon="phone" hidden>Retry</button>
       </div>
       <aside id="side" class="side" hidden>
-        <!-- The same live transcript as the owner's; the action items join it
-             in phase 4, without Make task or Dismiss. -->
+        <!-- The live action items (only with the AI action items on and a
+             model configured): what the AI service found, each with whose it
+             is, the same for the owner and every admitted guest. -->
+        <section id="items-panel" class="panel" hidden aria-labelledby="items-title">
+          <div class="panel__head"><h2 id="items-title">Action items</h2>
+            <span id="items-status" class="mu-chip mu-chip--warning" data-icon="warning" role="status" hidden>Action items paused</span>
+            <button type="button" class="mu-icon-btn panel-close" aria-label="Close action items" data-icon="close"></button></div>
+          <ol id="items-list" class="items" aria-live="polite"></ol>
+          <p id="items-empty" class="empty items-empty"><span data-icon="check"></span>No action items yet.</p>
+        </section>
+        <!-- The same live transcript as the owner's. -->
         <section id="panels" class="panel" hidden aria-labelledby="transcript-title">
           <div class="panel__head"><h2 id="transcript-title">Transcript</h2>
             <span id="transcript-status" class="mu-chip mu-chip--warning" role="status"></span>
@@ -98,6 +107,7 @@
       <button id="btn-share" type="button" class="mu-icon-btn mu-toggle" aria-label="Share screen" data-mu-tooltip="Share screen (S)" aria-keyshortcuts="S" aria-pressed="false" data-icon="screen-share"></button>
       <button id="btn-layout" type="button" class="mu-icon-btn mu-toggle" aria-label="Presentation view" aria-pressed="false" data-icon="fullscreen"></button>
       <span class="sep" aria-hidden="true"></span>
+<button id="btn-items" type="button" class="mu-icon-btn mu-toggle" aria-label="Action items" aria-pressed="false" aria-controls="items-panel" data-icon="check" hidden><span id="items-new" class="dot" hidden></span></button>
       <button id="btn-transcript" type="button" class="mu-icon-btn mu-toggle" aria-label="Transcript" aria-pressed="false" aria-controls="panels" data-icon="transcript"><span id="transcript-new" class="dot" hidden></span></button>
       <button id="btn-leave" type="button" class="mu-icon-btn mu-icon-btn--danger" aria-label="Leave" data-icon="leave"></button>
     </div>

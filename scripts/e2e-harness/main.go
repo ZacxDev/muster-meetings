@@ -71,12 +71,23 @@
 // Without it (the default) the plugin has no bucket: it records nothing,
 // exactly as a deployment that never set one.
 //
+// With -notes=fake the plugin finds action items and mails notes: the fake
+// OpenRouter (internal/openroutertest: an item for every "I'll …" line, a
+// note per frame, a summary of the first lines) and the fake SMTP server
+// (internal/mailtest, over STARTTLS). The live window runs every second,
+// and the fake engine's first line is "I'll send the deck by Friday.". The
+// parent adds:
+//
+//	GET /mail-received          every message the fake SMTP server accepted: to, subject, text
+//	GET /confirm-link           the newest confirmation link's path (/e/<token>)
+//
 // LiveKit is a fake (internal/livekittest): rooms and participants over its
 // server API, and a signalling endpoint that records, verified, the token a
 // browser connects with and refuses the connection (it carries no media).
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -85,8 +96,11 @@ import (
 	"html"
 	"io"
 	"log"
+	"mime"
+	"mime/multipart"
 	"net"
 	"net/http"
+	netmail "net/mail"
 	"net/url"
 	"os"
 	"os/exec"
@@ -101,10 +115,14 @@ import (
 	"github.com/ZacxDev/muster-meetings/internal/contactstest"
 	"github.com/ZacxDev/muster-meetings/internal/egresstest"
 	"github.com/ZacxDev/muster-meetings/internal/frames"
+	"github.com/ZacxDev/muster-meetings/internal/items"
 	"github.com/ZacxDev/muster-meetings/internal/livekit"
 	"github.com/ZacxDev/muster-meetings/internal/livekittest"
+	"github.com/ZacxDev/muster-meetings/internal/mail"
+	"github.com/ZacxDev/muster-meetings/internal/mailtest"
 	"github.com/ZacxDev/muster-meetings/internal/muster"
 	"github.com/ZacxDev/muster-meetings/internal/mustertest"
+	"github.com/ZacxDev/muster-meetings/internal/openroutertest"
 	"github.com/ZacxDev/muster-meetings/internal/owners"
 	"github.com/ZacxDev/muster-meetings/internal/s3"
 	"github.com/ZacxDev/muster-meetings/internal/s3test"
@@ -125,6 +143,7 @@ var (
 	nemLines = flag.String("nemotron-script", "", "with -stt=nemotron: the fake Nemotron server's script, lines separated by |")
 	ctMode   = flag.String("contacts", "off", "off (no contacts URL: no card), or fake (the fake contacts API)")
 	s3Mode   = flag.String("s3", "off", "off (no bucket: no recording), or fake (the fake S3 store and the fake composite Egress)")
+	nMode    = flag.String("notes", "off", "off (no model, no mail), or fake (the fake OpenRouter and the fake SMTP server)")
 )
 
 // contactsToken is the harness's contacts API token (the fake's and the
@@ -207,6 +226,30 @@ func run(logger *log.Logger) error {
 	// utterances (1 s of speech, 1 s of silence, twice) in real time.
 	lk.WebhookURL = "http://" + internalLn.Addr().String() + "/livekit/webhook"
 	lk.EgressAudio = func(room, identity, track string) []byte { return egresstest.Script(1000, 1000, 1000) }
+	var aiCfg *server.AIConfig
+	var sender *mail.Sender
+	var smf *mailtest.Fake
+	switch *nMode {
+	case "off":
+	case "fake":
+		orf := openroutertest.New()
+		defer orf.Close()
+		if smf, err = mailtest.New(); err != nil {
+			return err
+		}
+		defer smf.Close()
+		ip, _ := items.ParsePrefs(`{"order":["deepinfra/fp8"],"allow_fallbacks":false}`, items.AdapterChatJSON)
+		vp, _ := items.ParsePrefs(`{"order":["anthropic"],"allow_fallbacks":false}`, items.AdapterChatJSON)
+		aiCfg = &server.AIConfig{Every: time.Second,
+			Items:  items.Config{Model: "deepseek/deepseek-v4.1-flash-1017", Adapter: items.AdapterChatJSON, Prefs: ip, APIKey: "e2e-fixture", BaseURL: orf.URL()},
+			Vision: items.Config{Model: "anthropic/claude-haiku-5.5", Adapter: items.AdapterChatJSON, Prefs: vp, APIKey: "e2e-fixture", BaseURL: orf.URL()}}
+		if sender, err = mail.New(mail.Config{Addr: smf.Addr(), From: "meetings@mail.example.test", ServerName: "127.0.0.1", RootCAs: smf.Pool()}); err != nil {
+			return err
+		}
+		script = []string{"I'll send the deck by Friday.", "Ada opens the meeting."}
+	default:
+		return fmt.Errorf("-notes is off or fake, not %q", *nMode)
+	}
 	var engine stt.Engine = stt.NewFake(script)
 	if *sttMode == "nemotron" {
 		const token = "e2e-harness-stream-token-0a1b"
@@ -275,7 +318,8 @@ func run(logger *log.Logger) error {
 		// The fake engine (MEETINGS_TEST_MODE's) or the nemotron engine
 		// against the fake Nemotron server, and the ingest listener the fake
 		// Egress streams to.
-		Engine: engine, IngestURL: "ws://" + ingestLn.Addr().String(), IngestKey: []byte("e2e harness ingest key 0123456789ab")}, st, a)
+		Engine: engine, IngestURL: "ws://" + ingestLn.Addr().String(), IngestKey: []byte("e2e harness ingest key 0123456789ab"),
+		AI: aiCfg, Mail: sender, MailBackoff: []time.Duration{100 * time.Millisecond}}, st, a)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go srv.Run(ctx)
@@ -379,6 +423,32 @@ func run(logger *log.Logger) error {
 				return
 			}
 			io.WriteString(w, strconv.FormatInt(e.StartedAt.UnixMilli(), 10))
+		})
+	}
+	if smf != nil {
+		mux.HandleFunc("GET /mail-received", func(w http.ResponseWriter, r *http.Request) {
+			type msg struct{ To, Subject, Text string }
+			out := []msg{}
+			for _, m := range smf.Messages() {
+				subj, text := decodeMail(m.Data)
+				out = append(out, msg{To: strings.Join(m.To, ","), Subject: subj, Text: text})
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(out)
+		})
+		mux.HandleFunc("GET /confirm-link", func(w http.ResponseWriter, r *http.Request) {
+			link := ""
+			for _, m := range smf.Messages() {
+				_, text := decodeMail(m.Data)
+				if i := strings.Index(text, "/e/"); i >= 0 && len(text) >= i+46 {
+					link = text[i : i+46]
+				}
+			}
+			if link == "" {
+				http.Error(w, "no confirmation sent", http.StatusNotFound)
+				return
+			}
+			io.WriteString(w, link)
 		})
 	}
 	mux.HandleFunc("GET /livekit-joins", func(w http.ResponseWriter, r *http.Request) {
@@ -513,4 +583,39 @@ func hostIP() string {
 		}
 	}
 	return "127.0.0.1"
+}
+
+// decodeMail is a message's subject and its text/plain part, decoded.
+func decodeMail(raw []byte) (subject, text string) {
+	m, err := netmail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		return "", ""
+	}
+	subject, _ = new(mime.WordDecoder).DecodeHeader(m.Header.Get("Subject"))
+	var walk func(ctype string, r io.Reader)
+	walk = func(ctype string, r io.Reader) {
+		mt, p, _ := mime.ParseMediaType(ctype)
+		if !strings.HasPrefix(mt, "multipart/") {
+			return
+		}
+		mr := multipart.NewReader(r, p["boundary"])
+		for {
+			part, err := mr.NextPart()
+			if err != nil {
+				return
+			}
+			ct := part.Header.Get("Content-Type")
+			pt, _, _ := mime.ParseMediaType(ct)
+			if strings.HasPrefix(pt, "multipart/") {
+				walk(ct, part)
+				continue
+			}
+			if pt == "text/plain" && text == "" && part.Header.Get("Content-Disposition") == "" {
+				b, _ := io.ReadAll(part)
+				text = string(b)
+			}
+		}
+	}
+	walk(m.Header.Get("Content-Type"), m.Body)
+	return subject, text
 }

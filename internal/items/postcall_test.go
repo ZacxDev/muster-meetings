@@ -193,7 +193,7 @@ func TestPostCallKeepsAtMostTheMeetingsCap(t *testing.T) {
 	}
 	a := &recorder{f: func(n int, w items.Window) (items.Result, error) {
 		var its []items.Item
-		for i, s := range w.Segments[len(w.Segments)-8:] {
+		for i, s := range w.Segments[max(0, len(w.Segments)-8):] {
 			its = append(its, items.Item{Text: fmt.Sprintf("task %c%d", 'a'+n, i), Segments: []int64{s.ID}})
 		}
 		return items.Result{Items: its}, nil

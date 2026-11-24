@@ -1,0 +1,35 @@
+id: m03
+kind: standup
+title: Ops stand-up (speech-to-text style)
+asr: true
+speakers:
+  - {name: Hana}
+  - {name: Ivo}
+  - {name: Juno}
+segments:
+  - {id: 299, speaker: Hana, text: "morning all um can every one hear me ok my head set has been cutting out all week so just shout if i drop off half way through a sentence"}
+  - {id: 300, speaker: Juno, text: "yeah we can hear you fine the weekend was quiet for once only one page on saturday and it cleared it self before any one even looked at it"}
+  - {id: 301, speaker: Hana, text: "okay morning um lets go round ivo you first"}
+  - {id: 302, speaker: Ivo, text: "yeah so yesterday i patched the two web nodes and rebooted them no issues after"}
+  - {id: 303, speaker: Ivo, text: "today ill rotate the back up keys on the data base hosts i should be done buy three"}
+  - {id: 304, speaker: Hana, text: "good juno"}
+  - {id: 305, speaker: Juno, text: "im looking at the dns migration still um hana can you approve the change request to day"}
+  - {id: 306, speaker: Hana, text: "yep ill approve it after this call"}
+  - {id: 307, speaker: Juno, text: "thanks and ill up date the run book once its cut over"}
+  - {id: 308, speaker: Ivo, text: "we could maybe look at moving monitoring to the new cluster some time"}
+  - {id: 309, speaker: Hana, text: "maybe next quarter yeah"}
+  - {id: 310, speaker: Juno, text: "did the alerting test page go out last night"}
+  - {id: 311, speaker: Ivo, text: "it did i already checked the pager log this morning"}
+  - {id: 312, speaker: Ivo, text: "oh and ill take the on call swap with sol next week actually no sol said shes fine scratch that"}
+  - {id: 313, speaker: Hana, text: "okay so ivo back up keys by three and me on the change request"}
+  - {id: 314, speaker: Hana, text: "thats it thanks"}
+labels:
+  - {id: m03-1, text: "Rotate the backup keys on the database hosts", assignee: Ivo, due: "by three", segments: [303, 313], cases: [restated]}
+  - {id: m03-2, text: "Approve the DNS migration change request", assignee: Hana, due: "after this call", segments: [305, 306, 313], cases: [cross_speaker, restated]}
+  - {id: m03-3, text: "Update the runbook once the DNS migration is cut over", assignee: Juno, due: "once it is cut over", segments: [307]}
+traps:
+  - {kind: past_tense, segments: [302]}
+  - {kind: hypothetical, segments: [308]}
+  - {kind: question, segments: [310]}
+  - {kind: past_tense, segments: [311]}
+  - {kind: retracted, segments: [312]}

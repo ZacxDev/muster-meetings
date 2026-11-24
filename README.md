@@ -1213,6 +1213,34 @@ that core change exists, and a real `livekit-server` 1.13.11 with `lk`
 against a live muster, and no browser has carried media through it: that is
 phase 2d's click path, with TURN, after 2c deploys it.
 
+### The action-item evaluation (phase 4a)
+
+`cmd/items-eval` replays the labelled corpus in `testdata/items-eval/`
+(twelve synthetic meetings; its README is the format) through the worker's
+own code: `items.Loop` (a tick every 10 s, `items.Select`'s window 90 s
+back and anchored on the last segment a successful call covered, the
+adapter, `items.Guard`, and the failure, backoff and "paused after 3"
+rules that phase 4b's worker drives on the wall clock). It scores by cited segments (no model judges a model), runs
+its four controls first (null, oracle, duplicator, liar: a control that
+does not score as stated stops the run before any model is called), and
+picks the default model. **It costs money and needs a key, so it is run by
+hand, never in CI:**
+
+```sh
+OPENROUTER_API_KEY=… go run ./cmd/items-eval \
+  -prefs 'deepseek/deepseek-v4.1-flash-1017={"order":["<provider>"],"allow_fallbacks":false}' \
+  -md docs/items-eval-$(date -u +%F).md
+go run ./cmd/items-eval -controls-only   # the lint and the controls alone: no key, no cost
+```
+
+Every request goes through production's client with production's
+`provider` object (`items.ParsePrefs`: `data_collection: "deny"` always,
+and a pin for a `chat_json` model). CI runs the scoring against a
+hand-computed fixture, the corpus lint, the controls on the real corpus,
+both adapters against a fake OpenRouter, and a mutant for every guard. No
+action item reaches a meeting yet: the worker, its table and its panel are
+phase 4b.
+
 ## Layout
 
 | path | what |
@@ -1237,6 +1265,8 @@ phase 2d's click path, with TURN, after 2c deploys it.
 | `deploy/kubernetes`, `deploy/example-overlay` | the kustomize base (the plugin, LiveKit, Services, NetworkPolicies) and an example tenant overlay |
 | `compose.meetings.yml` | the fragment for muster's Compose stack |
 | `deploy/deploy_test.go` | the rendered objects and both LiveKit configs, pinned |
+| `internal/items` | action items: the `extract` and `chat_json` adapters, their OpenRouter client, the guards after the model, the window selection and the worker's loop (`items.Loop`), `MEETINGS_ITEMS_PROVIDER_PREFS` |
+| `cmd/items-eval`, `testdata/items-eval` | the action-item evaluation (run by hand) and its labelled synthetic corpus |
 | `scripts/mutate` | the security-gate mutation sweep |
 | `scripts/e2e-harness`, `e2e/` | the browser tests: the `/enter` frame gate, the lobby at 390×844, two owner devices, the transcript in both panels, live captions, and the UI (`ui-*.spec.ts`, goldens in `e2e/goldens/`); the harness also serves muster's UI kit from `e2e/fixtures/ui-kit` |
 | `scripts/vendor-ui-kit.sh`, `scripts/update-goldens.sh` | render muster's UI kit at a pinned commit (the fixtures and the built-in fallback); remake the visual goldens in the pinned Playwright image |

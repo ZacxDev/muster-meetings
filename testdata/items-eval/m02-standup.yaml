@@ -1,0 +1,34 @@
+id: m02
+kind: standup
+title: Support team stand-up
+speakers:
+  - {name: Eli}
+  - {name: Fay}
+  - {name: Gus}
+segments:
+  - {id: 199, speaker: Eli, text: "Morning. Before we start, the queue went from forty tickets to almost ninety over the weekend, mostly billing questions after the price change email went out on Friday."}
+  - {id: 200, speaker: Fay, text: "Yeah, I saw that. A lot of them are the same question about the annual plan discount, people think it disappeared, but it is just shown on a different page now."}
+  - {id: 201, speaker: Eli, text: "Hi both. Quick round today, the queue is long. Fay, go ahead."}
+  - {id: 202, speaker: Fay, text: "I closed out the billing tickets from the weekend, and I already replied to the whole refund backlog."}
+  - {id: 203, speaker: Fay, text: "Today I'll write the help article for the new export button. I should have it published by end of day."}
+  - {id: 204, speaker: Eli, text: "Nice. Gus, how's the chat widget bug going?"}
+  - {id: 205, speaker: Gus, text: "Still reproducing it. Should I escalate it to engineering, or do you want me to keep digging?"}
+  - {id: 206, speaker: Eli, text: "Keep digging this morning, and please file the engineering escalation before lunch either way."}
+  - {id: 207, speaker: Gus, text: "Okay, I'll file the escalation before lunch."}
+  - {id: 208, speaker: Fay, text: "We might want to add a canned reply for that bug too, if it keeps coming up."}
+  - {id: 209, speaker: Eli, text: "Maybe. Let's see how many more come in first."}
+  - {id: 210, speaker: Eli, text: "Also, the weekly report. I'll pull the numbers and send the report to the team on Friday."}
+  - {id: 211, speaker: Gus, text: "Did the new hire get access to the ticket tool yet?"}
+  - {id: 212, speaker: Eli, text: "Yes, I set that up for her yesterday afternoon."}
+  - {id: 213, speaker: Fay, text: "Cool. So just to confirm, the export article goes out end of day from me."}
+  - {id: 214, speaker: Eli, text: "Great. Thanks both, back to the queue."}
+labels:
+  - {id: m02-1, text: "Write and publish the help article for the export button", assignee: Fay, due: "end of day", segments: [203, 213], cases: [restated]}
+  - {id: m02-2, text: "File the engineering escalation for the chat widget bug", assignee: Gus, due: "before lunch", segments: [206, 207], cases: [cross_speaker]}
+  - {id: m02-3, text: "Send the weekly report to the team", assignee: Eli, due: "Friday", segments: [210]}
+traps:
+  - {kind: past_tense, segments: [202]}
+  - {kind: question, segments: [205]}
+  - {kind: hypothetical, segments: [208]}
+  - {kind: question, segments: [211]}
+  - {kind: past_tense, segments: [212]}

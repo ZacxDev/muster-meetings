@@ -85,11 +85,12 @@
   // linkLive: the server still gives this meeting's link (open, under 24 h).
   function linkLive(m) { return m.state === 'open' && new Date(m.link_expires_at) > new Date(); }
 
-  // copyText copies, or falls back to selecting the given field.
-  function copyText(text, input) {
+  // copyText copies, or falls back to selecting the given field. done is
+  // the toast on success ("Link copied." by default).
+  function copyText(text, input, done) {
     var fallback = function () { if (input) input.select(); UI.toast('Press Ctrl+C (or ⌘C) to copy the link.'); };
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      return navigator.clipboard.writeText(text).then(function () { UI.toast('Link copied.', { kind: 'success', timeout: 2500 }); }, fallback);
+      return navigator.clipboard.writeText(text).then(function () { UI.toast(done || 'Link copied.', { kind: 'success', timeout: 2500 }); }, fallback);
     }
     fallback();
     return Promise.resolve();
@@ -300,6 +301,27 @@
     }).catch(function (e) { if (token) archiveSay('Could not share the recording: ' + e.message); });
   });
   $('share-copy').addEventListener('click', function () { copyText($('share-url').value, $('share-url')); });
+
+  // Copy link for an agent: a read-only token for this meeting's timeline
+  // (README "A muster agent reading a meeting"), minted on each tap and
+  // shown once (the server keeps only its hash), as what an agent needs to
+  // read it: the URL and the header.
+  $('agent-link').addEventListener('click', function () {
+    if (!archived) return;
+    var m = archived, b = this;
+    b.disabled = true;
+    archiveSay('');
+    api('POST', '/api/meetings/' + encodeURIComponent(m.id) + '/agent-token').then(function (r) {
+      if (archived !== m) return;
+      var until = new Date(r.expires_at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+      $('agent-snippet').value = 'GET ' + r.timeline_url + '\nAuthorization: Bearer ' + r.token + '\n(read-only, this meeting only, until ' + until + ')';
+      $('agent-until').textContent = 'until ' + until;
+      $('agent-out').hidden = false;
+      return copyText($('agent-snippet').value, $('agent-snippet'), 'Copied for an agent.');
+    }).catch(function (e) { if (token) archiveSay('Could not make a link for an agent: ' + e.message); })
+      .then(function () { b.disabled = false; });
+  });
+  $('agent-copy').addEventListener('click', function () { copyText($('agent-snippet').value, $('agent-snippet'), 'Copied for an agent.'); });
   $('unshare-rec').addEventListener('click', function () {
     if (!archived) return;
     var m = archived;
@@ -396,6 +418,7 @@
     function render(v) {
       var m = meeting;
       $('analysis').hidden = false;
+      $('agent-link').hidden = false;
       cur = v.current;
       var busy = v.runs.some(function (r) { return r.kind === 'post' && (r.state === 'queued' || r.state === 'running'); });
       var shown = v.run;
@@ -472,7 +495,10 @@
     });
     return {
       load: load,
-      reset: function () { stop(); meeting = null; $('analysis').hidden = true; $('drafts').hidden = true; },
+      reset: function () {
+        stop(); meeting = null; $('analysis').hidden = true; $('drafts').hidden = true;
+        $('agent-link').hidden = true; $('agent-out').hidden = true; $('agent-snippet').value = '';
+      },
       current: function () { return cur; }
     };
   })();

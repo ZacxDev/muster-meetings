@@ -49,6 +49,13 @@
     <div class="downloads">
       <button id="dl-txt" type="button" class="mu-btn mu-btn--secondary mu-btn--sm" data-icon="transcript">Text</button>
       <button id="dl-vtt" type="button" class="mu-btn mu-btn--secondary mu-btn--sm" data-icon="captions">WebVTT</button>
+      <!-- Only with a model configured (the agent's read door is part of
+           the notes): a read-only token for this meeting's timeline. -->
+      <button id="agent-link" type="button" class="mu-btn mu-btn--secondary mu-btn--sm" data-icon="copy" hidden>Copy link for an agent</button>
+    </div>
+    <div id="agent-out" class="share-out" hidden>
+      <label class="mu-label" for="agent-snippet">Paste this to an agent: it can read this meeting's transcript and notes <span id="agent-until"></span>. It is shown once.</label>
+      <div class="share-row"><textarea id="agent-snippet" class="mu-textarea" rows="3" readonly aria-label="What an agent needs to read this meeting"></textarea><button id="agent-copy" type="button" class="mu-btn mu-btn--secondary mu-btn--sm">Copy</button></div>
     </div>
     <p id="archive-status" class="status" role="status" aria-live="polite"></p>
     <!-- The recording beside its transcript (only a plugin that records has

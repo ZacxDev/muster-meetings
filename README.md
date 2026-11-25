@@ -767,6 +767,9 @@ have been sent" when the connection broke after the message was handed over
 **A muster agent reading a meeting (decision 4).** muster gives a plugin no
 way to answer an agent today (the plugin calls muster; muster never calls
 it), so the reachable path is a token the owner hands over:
+**Copy link for an agent** in a meeting's archive (with a model configured)
+mints one and copies what an agent needs: the `timeline_url`, the
+`Authorization: Bearer mmr_…` header and the expiry, shown once.
 `POST /api/meetings/{id}/agent-token` (owner session) answers a read-only
 `mmr_…` token for that one meeting, live 7 days (stored as SHA-256), and its
 `timeline_url`. With `Authorization: Bearer mmr_…`,

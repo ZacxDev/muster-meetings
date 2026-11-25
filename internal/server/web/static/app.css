@@ -204,6 +204,8 @@ h2 { font-size: 1rem; font-weight: 600; margin: 0; }
 .share-out { margin-top: .5rem; display: grid; gap: .375rem; }
 .share-row { display: flex; gap: .5rem; }
 .share-row .mu-input { flex: 1 1 auto; min-width: 0; }
+.share-row .mu-textarea { flex: 1 1 auto; min-width: 0; font-family: ui-monospace, monospace; font-size: .8125rem; }
+#agent-out { margin: 0 0 1rem; }
 .transcript li.seekable { cursor: pointer; }
 .transcript li.seekable:hover, .transcript li.seekable:focus-visible { background: rgb(var(--mu-s2)); outline: none; }
 .transcript li.playing { box-shadow: inset 2px 0 0 rgb(var(--mu-accent)); }

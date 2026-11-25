@@ -144,5 +144,39 @@ for (const size of sizes) {
       await expect(cards.nth(1).locator('.mu-chip')).toHaveText('Sent', { timeout: 15_000 });
       await expect(app.locator('#drafts-send')).toBeHidden();
     });
+
+    // The agent's read door from the owner's UI: Copy link for an agent
+    // mints the read-only token and shows what an agent needs (the URL, the
+    // header, the expiry); with exactly that, the timeline answers, items
+    // and all; without the header, nothing.
+    test(`the owner copies a link for an agent, and an agent reads the meeting with it (${size.name})`, async ({ page, browser }) => {
+      const { app, guest, room } = await call(page, browser, `Kai ${size.name}`, size);
+      await speak(room);
+      await expect(app.locator('#btn-items')).toBeVisible({ timeout: 30_000 });
+      await endMeeting(app);
+      await guest.context().close();
+      await app.locator('.meeting').first().locator('.transcript-row').click();
+      await expect(app.locator('#archive-items .item .item__text')).toHaveText(['Send the deck by Friday'], { timeout: 30_000 });
+      await expect(app.locator('#agent-out')).toBeHidden();
+      await app.locator('#agent-link').click();
+      await expect(app.locator('#agent-out')).toBeVisible();
+      const snippet = await app.locator('#agent-snippet').inputValue();
+      const m = snippet.match(/^GET (\S+)\nAuthorization: Bearer (mmr_[A-Za-z0-9_-]+)\n\(read-only, this meeting only, until (.+)\)$/);
+      expect(m, snippet).not.toBeNull();
+      const [, url, tok, until] = m!;
+      expect(url.startsWith(`${h.plugin}/api/agent/meetings/`) && url.endsWith('/timeline'), url).toBe(true);
+      await expect(app.locator('#agent-until')).toHaveText(`until ${until}`);
+      const read = await fetch(url, { headers: { Authorization: `Bearer ${tok}` } });
+      const body = await read.text();
+      expect(read.status, body).toBe(200);
+      expect(body).toContain('Send the deck by Friday');
+      expect((await fetch(url)).status).toBe(404);
+      // Leaving the archive forgets the token: it was shown once.
+      await app.locator('#archive-back').click();
+      await app.locator('.meeting').first().locator('.transcript-row').click();
+      await expect(app.locator('#agent-link')).toBeVisible({ timeout: 15_000 });
+      await expect(app.locator('#agent-out')).toBeHidden();
+      await expect(app.locator('#agent-snippet')).toHaveValue('');
+    });
   });
 }

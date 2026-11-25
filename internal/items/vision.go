@@ -321,7 +321,7 @@ func GuardVision(w VisionWindow, notes []Note, proposed []Item, limit int) (kept
 			continue
 		}
 		if r := d[0].Reason; (r == DropDupText || r == DropDupCitation) && it.Text != "" {
-			if j := dupOf(d[0].Item, w.Existing); j >= 0 && !refined[j] {
+			if j, _ := duplicate(d[0].Item, w.Existing); j >= 0 && !refined[j] {
 				refined[j] = true
 				refs = append(refs, Refinement{Index: j, Text: strings.TrimSpace(it.Text), Frames: d[0].Item.Frames})
 				continue
@@ -330,23 +330,6 @@ func GuardVision(w VisionWindow, notes []Note, proposed []Item, limit int) (kept
 		dropped = append(dropped, d...)
 	}
 	return kept, items, refs, dropped
-}
-
-// dupOf is the index of the item in seen that it duplicates (duplicate's
-// rules), -1 for none.
-func dupOf(it Item, seen []Item) int {
-	toks := Tokens(it.Text)
-	for j, s := range seen {
-		if Jaccard(toks, Tokens(s.Text)) >= DupJaccard {
-			return j
-		}
-	}
-	for j, s := range seen {
-		if subset(it.Segments, s.Segments) {
-			return j
-		}
-	}
-	return -1
 }
 
 // Excerpt is the transcript sent with frames at these meeting times: every

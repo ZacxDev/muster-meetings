@@ -677,7 +677,10 @@ sent as a JSON document of data (a line of speech cannot become an
 instruction), with the items found so far. The model's answer goes through
 deterministic guards (a citation of a line outside the window, an owner
 who is not a speaker or named in the cited lines, a duplicate, more than 5
-in one window: dropped). Kept items appear in the **Action items** panel for
+in one window: dropped). A duplicate is an item whose words are mostly an
+earlier item's (token Jaccard ≥ 0.7), or one citing only lines an earlier
+item cites whose words overlap it too (≥ 0.4): two different commitments
+said in one long line are two items. Kept items appear in the **Action items** panel for
 the owner and every admitted guest; three failed calls in a row show
 "Action items paused". A refused key or model stops the live items for that
 meeting.
@@ -696,7 +699,7 @@ restart), and the worker runs, in order:
    per frame and the items the screen makes clearer; a note citing a frame
    that was not sent, or a line outside the excerpt, is dropped, and so is
    an item citing no frame. An item that restates one the transcript found
-   (same lines) sharpens it (the screen's wording, and its frame), never a
+   (by the same duplicate rule) sharpens it (the screen's wording, and its frame), never a
    second item. The post run waits up to 20 minutes for a recording still
    being written;
 

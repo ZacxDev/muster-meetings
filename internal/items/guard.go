@@ -11,6 +11,11 @@ const MaxPerWindow = 5
 // DupJaccard is the token Jaccard at or above which two items are one.
 const DupJaccard = 0.7
 
+// DupCitedJaccard is the token Jaccard at or above which an item whose cited
+// segments are all cited by another is that item again (a re-proposal in
+// other words), not a second commitment said in the same segment.
+const DupCitedJaccard = 0.4
+
 // Why an item was dropped.
 const (
 	DropNoCitation  = "no-citation"
@@ -36,8 +41,15 @@ type Dropped struct {
 //     in one of its cited segments is dropped (a model, or speech that
 //     reached it, cannot name a stranger as the owner); no owner is allowed;
 //   - an item whose normalised text has token Jaccard ≥ 0.7 with an
-//     existing item (or one kept earlier in this window), or whose cited
-//     segments are all cited by one such item, is a duplicate and dropped;
+//     existing item (or one kept earlier in this window) is a duplicate by
+//     text; one whose cited segments are all cited by one such item AND
+//     whose text has token Jaccard ≥ 0.4 with that same item is a duplicate
+//     by citation; either is dropped. Sharing segments alone is not
+//     enough: streaming STT can return one speaker's whole turn as one
+//     segment, and two commitments said in it ("I'll send the budget …
+//     Also, I can draft the survey …") cite the same segment with
+//     unrelated words. The words decide which of those two cases it is;
+//     the citation lowers the bar a reworded re-proposal must clear;
 //   - at most 5 are kept.
 //
 // The kept items' citations are deduplicated, in the model's order.
@@ -70,7 +82,7 @@ func GuardCap(w Window, proposed []Item, limit int) (kept []Item, dropped []Drop
 			dropped = append(dropped, Dropped{it, DropBadOwner})
 			continue
 		}
-		if why := duplicate(it, seen); why != "" {
+		if _, why := duplicate(it, seen); why != "" {
 			dropped = append(dropped, Dropped{it, why})
 			continue
 		}
@@ -84,20 +96,22 @@ func GuardCap(w Window, proposed []Item, limit int) (kept []Item, dropped []Drop
 	return kept, dropped
 }
 
-// duplicate is why it duplicates one of seen, "" for not.
-func duplicate(it Item, seen []Item) string {
+// duplicate is the index in seen of the item it duplicates and why (Guard's
+// two rules, by text first), -1 and "" for none. The one copy of the rule:
+// the item guards drop on it, and GuardVision turns it into a Refinement.
+func duplicate(it Item, seen []Item) (int, string) {
 	toks := Tokens(it.Text)
-	for _, s := range seen {
+	for j, s := range seen {
 		if Jaccard(toks, Tokens(s.Text)) >= DupJaccard {
-			return DropDupText
+			return j, DropDupText
 		}
 	}
-	for _, s := range seen {
-		if subset(it.Segments, s.Segments) {
-			return DropDupCitation
+	for j, s := range seen {
+		if subset(it.Segments, s.Segments) && Jaccard(toks, Tokens(s.Text)) >= DupCitedJaccard {
+			return j, DropDupCitation
 		}
 	}
-	return ""
+	return -1, ""
 }
 
 // ownerKnown reports it's owner is "", a window speaker (or a speaker's

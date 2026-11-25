@@ -299,7 +299,7 @@ func intro(t *testing.T, text, html string) (fromText, fromHTML string) {
 }
 
 // 🔴 Regression: an untitled meeting's email read "Thanks for joining the
-// meeting on 25 Nov 2026 on 25 Nov 2026." (the title's fallback held the
+// meeting on <date> on <date>." (the title's fallback held the
 // date, then " on <date>" was added). The date is said once, titled or not,
 // to a guest and to the owner, in both parts; the whole sentence is pinned.
 func TestRenderSaysTheMeetingsDateOnce(t *testing.T) {

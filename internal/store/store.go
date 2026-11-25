@@ -384,6 +384,25 @@ var migrations = []string{
 		created_at   INTEGER NOT NULL,
 		expires_at   INTEGER NOT NULL
 	) STRICT;`,
+
+	// 8: the owner's MCP tokens (README: "Using Meetings from Claude Code
+	// (MCP)"). One row per token an owner minted in Meetings settings for
+	// their own Claude Code session: stored ONLY as its SHA-256, shown once,
+	// no expiry, revoked by the owner (revoked_at) or by muster ending the
+	// app for them (EndSubjects, EndAll). id is the token's public handle
+	// in the settings list, not a credential. 🔴 One-way like every
+	// migration here: an older build refuses a database at schema 8; to
+	// turn the MCP door off, revoke every token (nothing else depends on
+	// the table).
+	`CREATE TABLE mcp_tokens (
+		id           TEXT    PRIMARY KEY,
+		token_sha256 TEXT    NOT NULL UNIQUE,
+		subject      TEXT    NOT NULL REFERENCES owners (subject),
+		created_at   INTEGER NOT NULL,
+		last_used_at INTEGER,
+		revoked_at   INTEGER
+	) STRICT;
+	CREATE INDEX mcp_tokens_subject ON mcp_tokens (subject, created_at);`,
 }
 
 // ErrNeedsSubjectMap is a phase-2a database that holds owners or meetings:
@@ -600,6 +619,11 @@ func (s *Store) EndAll(ctx context.Context, why string, now time.Time) (Ended, e
 	if err := endParticipants(ctx, tx, now); err != nil {
 		return out, err
 	}
+	// 🔴 Every MCP token dies with the app: a reinstall does not bring one
+	// back.
+	if _, err := tx.ExecContext(ctx, `UPDATE mcp_tokens SET revoked_at = ? WHERE revoked_at IS NULL`, ms(now)); err != nil {
+		return out, err
+	}
 	if err := audit(ctx, tx, now, "", "", "app.revoked",
 		fmt.Sprintf("%s: %d sessions deleted, %d meetings ended", why, out.Sessions, out.Meetings)); err != nil {
 		return out, err
@@ -630,6 +654,13 @@ func (s *Store) EndSubjects(ctx context.Context, subjects []string, asOf, now ti
 		return out, err
 	}
 	out.Sessions, _ = r.RowsAffected()
+	// 🔴 Their MCP tokens too (made at or before asOf, like the sessions):
+	// a person muster no longer lets the app act for is not served by
+	// a token they minted earlier.
+	if _, err := tx.ExecContext(ctx, `UPDATE mcp_tokens SET revoked_at = ? WHERE revoked_at IS NULL AND subject IN (SELECT value FROM json_each(?)) AND created_at <= ?`,
+		ms(now), list, ms(asOf)); err != nil {
+		return out, err
+	}
 	rows, err := tx.QueryContext(ctx, `UPDATE meetings SET state = 'ended', ended_at = ? WHERE state = 'open' AND subject IN (SELECT value FROM json_each(?)) AND created_at <= ? RETURNING id, subject`,
 		ms(now), list, ms(asOf))
 	if err != nil {
@@ -686,11 +717,13 @@ func (s *Store) EndSessions(ctx context.Context, subjects []string, asOf, now ti
 }
 
 // HeldSubjects is every person the plugin holds something live for: an
-// unexpired owner session or an open meeting. They are the subjects the
-// owners/check poll asks muster about.
+// unexpired owner session, an open meeting, or an unrevoked MCP token. They
+// are the subjects the owners/check poll asks muster about (so a person
+// muster revokes loses their MCP tokens even with no session open).
 func (s *Store) HeldSubjects(ctx context.Context, now time.Time) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT subject FROM owner_sessions WHERE expires_at > ?
-		UNION SELECT subject FROM meetings WHERE state = 'open' ORDER BY 1`, ms(now))
+		UNION SELECT subject FROM meetings WHERE state = 'open'
+		UNION SELECT subject FROM mcp_tokens WHERE revoked_at IS NULL ORDER BY 1`, ms(now))
 	if err != nil {
 		return nil, err
 	}

@@ -594,7 +594,7 @@ var ErrNotShareable = errors.New("the meeting has no finished recording to share
 // or the recording deleted). 🔴 Any earlier link of the meeting is revoked in the same
 // transaction: one live link per meeting, and the token is shown once.
 func (r *OwnerRepo) Share(ctx context.Context, meetingID string, now time.Time) (string, *time.Time, error) {
-	if r.session == "" {
+	if r.session == "" && r.mcp == "" {
 		return "", nil, ErrNoSession
 	}
 	if _, err := r.Meeting(ctx, meetingID); err != nil {
@@ -605,6 +605,9 @@ func (r *OwnerRepo) Share(ctx context.Context, meetingID string, now time.Time) 
 		return "", nil, err
 	}
 	defer tx.Rollback()
+	if err := r.mayWrite(ctx, tx); err != nil {
+		return "", nil, err
+	}
 	var purge sql.NullInt64
 	var playable int
 	err = tx.QueryRowContext(ctx, `SELECT m.purge_recording_at, (SELECT count(*) FROM recordings p WHERE p.meeting_id = m.id AND p.start_ms IS NOT NULL
@@ -625,10 +628,28 @@ func (r *OwnerRepo) Share(ctx context.Context, meetingID string, now time.Time) 
 	if _, err := tx.ExecContext(ctx, `INSERT INTO recording_shares (token_sha256, meeting_id, created_at) VALUES (?, ?, ?)`, Hash(tok), meetingID, ms(now)); err != nil {
 		return "", nil, err
 	}
-	if err := audit(ctx, tx, now, r.subject, meetingID, "recording.shared", ""); err != nil {
+	if err := audit(ctx, tx, now, r.subject, meetingID, "recording.shared", r.via()); err != nil {
 		return "", nil, err
 	}
 	return tok, fromMS(purge), tx.Commit()
+}
+
+// OwnerShareLive says the meeting has a live share link the owner made
+// (Share recording), not counting the notes' video links: the MCP tool's
+// "create if none" (a live one cannot be shown again: only its hash is
+// kept).
+func (r *OwnerRepo) OwnerShareLive(ctx context.Context, meetingID string, now time.Time) (bool, error) {
+	var n int
+	var purge sql.NullInt64
+	err := r.s.db.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM recording_shares s WHERE s.meeting_id = m.id AND s.revoked_at IS NULL AND s.kind = 'owner'),
+		m.purge_recording_at FROM meetings m WHERE m.id = ? AND m.subject = ?`, meetingID, r.subject).Scan(&n, &purge)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, ErrNotFound
+	}
+	if err != nil {
+		return false, err
+	}
+	return n > 0 && !(purge.Valid && purge.Int64 <= ms(now)), nil
 }
 
 // RevokeShare revokes the meeting's live share link. It answers whether there

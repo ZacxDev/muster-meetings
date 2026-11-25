@@ -31,6 +31,19 @@
         <button id="notes-addr-send" type="submit" class="mu-btn mu-btn--secondary mu-btn--sm">Send link</button>
       </form>
     </section>
+    <!-- The owner's MCP tokens: their own Claude Code session reads their
+         meetings, sets action items, edits and sends the notes. A token is
+         shown once, inside the command to paste. -->
+    <section id="mcp-settings" class="mu-card notes-settings" hidden aria-labelledby="mcp-settings-title">
+      <h2 id="mcp-settings-title"><span data-icon="link"></span>Use Meetings from Claude Code</h2>
+      <p class="mu-help">A token lets your own Claude Code session read your meetings, set their action items, and edit and send their notes, as you can here. Anyone with it can, so keep it to yourself; revoke it when you stop using it.</p>
+      <button id="mcp-create" type="button" class="mu-btn mu-btn--secondary mu-btn--sm" data-icon="plus">Create token</button>
+      <div id="mcp-out" class="share-out" hidden>
+        <label class="mu-label" for="mcp-command">Run this once in a terminal. It is shown once.</label>
+        <div class="share-row"><textarea id="mcp-command" class="mu-textarea" rows="3" readonly aria-label="The command that adds Meetings to Claude Code"></textarea><button id="mcp-copy" type="button" class="mu-btn mu-btn--secondary mu-btn--sm">Copy</button></div>
+      </div>
+      <ul id="mcp-tokens" class="mcp-tokens" aria-label="Your tokens"></ul>
+    </section>
     <section aria-label="Past meetings">
       <div id="empty" class="empty" hidden><span data-icon="people"></span>No meetings yet.</div>
       <ul id="meetings" class="meetings"></ul>

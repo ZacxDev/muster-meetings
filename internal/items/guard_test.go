@@ -252,3 +252,32 @@ func TestGuardDropsAnOwnerWhoIsNeitherASpeakerNorNamed(t *testing.T) {
 		t.Errorf("owners: kept %d, dropped %s %+v; want Fay-elsewhere and Mallory dropped as bad-owner", len(kept), reasons(dropped), dropped)
 	}
 }
+
+// 🔴 The owner's own items (GuardSupplied, the MCP tool meeting_items_set):
+// the model path's guards, except that an item may cite nothing. A cited
+// segment outside the meeting, an owner no one by that name, a duplicate
+// and an item past the cap are dropped as Guard drops them.
+func TestGuardSuppliedIsGuardButAnItemMayCiteNothing(t *testing.T) {
+	w := win(4, 5)
+	kept, dropped := items.GuardSupplied(w, []items.Item{
+		{Text: "renew the domain"},                                        // no citation: kept
+		{Text: "order new badges", Assignee: "Ada", Segments: []int64{5}}, // a speaker: kept
+		{Text: "book the venue hall", Segments: []int64{9}},               // not a line of the meeting
+		{Text: "email the auditor", Assignee: "Mallory"},                  // no one by that name
+		{Text: "Renew the domain."},                                       // the first again, by text
+		{Text: "print the seating chart", Segments: []int64{4}},           // the third kept
+		{Text: "water the office plants"},                                 // over the cap of 3
+	}, 3)
+	var got []string
+	for _, k := range kept {
+		got = append(got, k.Text)
+	}
+	if fmt.Sprint(got) != "[renew the domain order new badges print the seating chart]" ||
+		reasons(dropped) != "[out-of-window bad-owner duplicate-text over-cap]" {
+		t.Errorf("kept %v, dropped %s", got, reasons(dropped))
+	}
+	// The model path still drops the uncited.
+	if k, d := items.GuardCap(w, []items.Item{{Text: "renew the domain"}}, 3); len(k) != 0 || reasons(d) != "[no-citation]" {
+		t.Errorf("GuardCap of an uncited item: kept %+v, dropped %s", k, reasons(d))
+	}
+}

@@ -406,7 +406,7 @@ var ErrNoOwnerEmail = errors.New("the owner's address is not confirmed")
 // a draft. share, when not nil, is called in the transaction for each
 // queued draft (the notes' video link). It answers how many were queued.
 func (r *OwnerRepo) Approve(ctx context.Context, meetingID string, ids []string, now time.Time, share func(tx *sql.Tx, d Draft) error) (int, error) {
-	if r.session == "" {
+	if r.session == "" && r.mcp == "" {
 		return 0, ErrNoSession
 	}
 	if _, err := r.Meeting(ctx, meetingID); err != nil {
@@ -417,6 +417,9 @@ func (r *OwnerRepo) Approve(ctx context.Context, meetingID string, ids []string,
 		return 0, err
 	}
 	defer tx.Rollback()
+	if err := r.mayWrite(ctx, tx); err != nil {
+		return 0, err
+	}
 	var email sql.NullString
 	if err := tx.QueryRowContext(ctx, `SELECT email FROM owners WHERE subject = ?`, r.subject).Scan(&email); err != nil {
 		return 0, err
@@ -459,13 +462,21 @@ func (r *OwnerRepo) Approve(ctx context.Context, meetingID string, ids []string,
 		}
 		n++
 	}
-	if err := audit(ctx, tx, now, r.subject, meetingID, "notes.approved", `{"queued":`+itoa(n)+`}`); err != nil {
+	// The audit says which door approved it: the owner app, or the owner's
+	// MCP token (its id, the handle the settings list shows).
+	detail := `{"queued":` + itoa(n) + `}`
+	if r.mcp != "" {
+		detail = `{"queued":` + itoa(n) + `,"via":"mcp","token":` + jsonString(r.mcp) + `}`
+	}
+	if err := audit(ctx, tx, now, r.subject, meetingID, "notes.approved", detail); err != nil {
 		return 0, err
 	}
 	return n, tx.Commit()
 }
 
 func itoa(n int) string { b, _ := json.Marshal(n); return string(b) }
+
+func jsonString(s string) string { b, _ := json.Marshal(s); return string(b) }
 
 // RetryDraft queues a failed draft (or one of unknown outcome, which the
 // owner was told may have arrived) again.

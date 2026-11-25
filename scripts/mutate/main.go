@@ -198,6 +198,10 @@ const (
 	mlNotes = "internal/mail/notes.go"
 	mlSMTP  = "internal/mail/smtp.go"
 	itVis   = "internal/items/vision.go"
+	// the MCP server
+	mcpGo    = "internal/server/mcp.go"
+	mcpTools = "internal/server/mcp_tools.go"
+	mcpSt    = "internal/store/mcp.go"
 )
 
 var mutants = []mutant{
@@ -208,7 +212,7 @@ var mutants = []mutant{
 		pkg: "./internal/store", test: "TestJoinCodeIs128BitsIn22Base64urlCharacters", survive: true},
 
 	// ---- action items, phase 4a: the guards after the model ----
-	{name: "items guard: an item citing no segment kept", file: itGuard, from: "if len(it.Segments) == 0 {", to: "if false {",
+	{name: "items guard: an item citing no segment kept", file: itGuard, from: "if cite && len(it.Segments) == 0 {", to: "if false {",
 		pkg: "./internal/items", test: "TestGuardDropsAnItemCitingNoSegment", want: "want both dropped as no-citation"},
 	{name: "items guard: an out-of-window citation kept", file: itGuard, from: "if !in {", to: "if !in && false {",
 		pkg: "./internal/items", test: "TestGuardDropsAnItemCitingASegmentOutsideTheWindow", want: "want only the item citing 4 and 6"},
@@ -1651,6 +1655,38 @@ var mutants = []mutant{
 	{name: "consent: the card promises notes with AI off", file: pcNotes, from: "\treturn err == nil && ai\n", to: "\treturn err == nil && (ai || true)\n",
 		pkg: "./internal/server", test: "TestAMeetingWithAIOffIsNeverSentToTheAIService", want: "want a card that promises no notes"},
 
+	// ---- 🔴 the MCP server: the door, owner isolation, the send gate ----
+	{name: "mcp door: a revoked token opens /mcp", file: mcpSt, from: "subtle.ConstantTimeCompare([]byte(stored), []byte(h)) != 1 || revoked.Valid {", to: "subtle.ConstantTimeCompare([]byte(stored), []byte(h)) != 1 {",
+		pkg: "./internal/server", test: "TestMCPDoorRefusesEverythingButALiveMCPToken", want: "a revoked token = 200"},
+	{name: "mcp door: a token opens /mcp after the uninstall", file: mcpGo, from: "if err == nil && s.app.Live() {", to: "if err == nil {",
+		pkg: "./internal/server", test: "TestMCPDoorRefusesEverythingButALiveMCPToken", want: "a token after the uninstall = 200"},
+	{name: "mcp door: failed attempts unlimited", file: mcpGo, from: "if !s.mcpFails.Allow(s.clientAddr(r), s.cfg.Now()) {", to: "if false {",
+		pkg: "./internal/server", test: "TestMCPFailedAuthenticationIsLimitedPerAddress", want: "want 429"},
+	{name: "mcp door: a page on another origin served", file: mcpGo, from: "if o := r.Header.Get(\"Origin\"); o != \"\" && o != s.cfg.PublicURL {", to: "if o := r.Header.Get(\"Origin\"); o == \"-\" {",
+		pkg: "./internal/server", test: "TestMCPProtocol", want: "another origin = 200"},
+	{name: "mcp door: muster revoking the owner leaves their token", file: st, from: "`UPDATE mcp_tokens SET revoked_at = ? WHERE revoked_at IS NULL AND subject IN", to: "`UPDATE mcp_tokens SET revoked_at = ? WHERE 0 AND revoked_at IS NULL AND subject IN",
+		pkg: "./internal/server", test: "TestMusterRevokingTheOwnerRevokesTheirMCPToken", want: "Ada's token after muster revoked her = 200"},
+	{name: "mcp door: an owner holding only a token never checked", file: st, from: "\n\t\tUNION SELECT subject FROM mcp_tokens WHERE revoked_at IS NULL ORDER BY 1`", to: " ORDER BY 1`",
+		pkg: "./internal/server", test: "TestMusterRevokingTheOwnerRevokesTheirMCPToken", want: "Ada's token after muster revoked her = 200"},
+	{name: "mcp isolation: every token acts for the first owner", file: mcpSt, from: "`SELECT id, token_sha256, subject, created_at", to: "`SELECT id, token_sha256, (SELECT t.subject FROM mcp_tokens t ORDER BY t.created_at, t.rowid LIMIT 1), created_at",
+		pkg: "./internal/server", test: "TestEveryMCPToolIsScopedToItsTokensOwner", want: "on another owner's meeting"},
+	{name: "mcp isolation: another owner's token listed", file: mcpSt, from: "FROM mcp_tokens WHERE subject = ? AND revoked_at IS NULL ORDER BY", to: "FROM mcp_tokens WHERE (subject = ? OR 1) AND revoked_at IS NULL ORDER BY",
+		pkg: "./internal/server", test: "TestMCPTokenSettings", want: "Bea's list holds Ada's token"},
+	{name: "mcp isolation: another owner's token revoked", file: mcpSt, from: "WHERE id = ? AND subject = ? AND revoked_at IS NULL`", to: "WHERE id = ? AND (subject = ? OR 1) AND revoked_at IS NULL`",
+		pkg: "./internal/server", test: "TestMCPTokenSettings", want: "Bea revoking Ada's token = 200"},
+	{name: "mcp send: an unconfirmed owner address used", file: pcMail, from: "\tif !email.Valid || email.String == \"\" {\n\t\treturn 0, ErrNoOwnerEmail", to: "\tif false {\n\t\treturn 0, ErrNoOwnerEmail",
+		pkg: "./internal/server", test: "TestMCPSendNeedsTheConfirmedAddressThenMails", want: "send with no address"},
+	{name: "mcp send: a revoked token sends", file: repo, from: "\tif n == 0 {\n\t\treturn ErrNoSession", to: "\tif false {\n\t\treturn ErrNoSession",
+		pkg: "./internal/store", test: "TestAnMCPRepositoryWritesOnlyWhileItsTokenStands", want: "Send with a revoked token"},
+	{name: "mcp send: the audit does not say it came via MCP", file: pcMail, from: "\tif r.mcp != \"\" {\n\t\tdetail =", to: "\tif false {\n\t\tdetail =",
+		pkg: "./internal/server", test: "TestMCPSendNeedsTheConfirmedAddressThenMails", want: "audit ="},
+	{name: "mcp items: a set the guards refused stored anyway", file: mcpTools, from: "\tif len(why) > 0 {", to: "\tif false {",
+		pkg: "./internal/server", test: "TestMCPItemsSetRefusesWhatTheGuardsRefuse", want: "something was stored"},
+	{name: "mcp items: the owner's uncited item dropped", file: itGuard, from: "return guard(w, proposed, limit, false)", to: "return guard(w, proposed, limit, true)",
+		pkg: "./internal/items", test: "TestGuardSuppliedIsGuardButAnItemMayCiteNothing", want: "kept [order new badges print the seating chart]"},
+	{name: "mcp log: a tool's arguments reach the log", file: mcpGo, from: "t.Name, mid, outcome, s.cfg.Now()", to: "t.Name, mid, outcome+string(args), s.cfg.Now()",
+		pkg: "./internal/server", test: "TestMCPToolCallsLogNoMeetingContent", want: "the log holds"},
+
 	// ---- 🔴 contacts, phase 1b, in a browser (go run ./scripts/mutate -e2e) ----
 	{name: "contacts ui: the consent sentence reworded", file: guestJS, from: "', who will see that you were in this meeting. Nothing else is shared.'", to: "', who may see that you were in this meeting. Nothing else is shared.'",
 		e2e: cardE2E, test: "End: the guest's card .*\\(mobile\\)", want: "Your name and email go to Ada L., who will see"},
@@ -1670,6 +1706,8 @@ var mutants = []mutant{
 		e2e: recE2E, test: "390x844 the owner and a guest see the recording badge", want: "Recording failed"},
 	{name: "delete ui: Cancel deletes", file: appJS, from: "$('delete-no').addEventListener('click', function () { $('delete-confirm').hidden = true; $('delete-rec').focus(); });", to: "$('delete-no').addEventListener('click', function () { $('delete-yes').click(); });",
 		e2e: recE2E, test: "1280x800 Delete now asks first", want: "Expected: 200"},
+	{name: "mcp ui: Revoke revokes nothing", file: appJS, from: "api('DELETE', '/api/settings/mcp/' + encodeURIComponent(t.id))", to: "Promise.resolve()",
+		e2e: "mcp-settings.spec.ts", test: "Revoke makes /mcp refuse it", want: "the revoked token still opens /mcp"},
 	{name: "notice ui: the Record switch shown with no bucket", file: appJS, from: "    $('sw-record-row').hidden = !s.notice.recordable;\n", to: "    $('sw-record-row').hidden = false;\n",
 		e2e: "lobby-mobile.spec.ts", test: "at 390×844 a guest knocks", want: "sw-record-row"},
 }

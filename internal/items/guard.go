@@ -58,10 +58,28 @@ func Guard(w Window, proposed []Item) (kept []Item, dropped []Dropped) {
 // GuardCap is Guard keeping at most limit items: the post-call pass's cap is
 // what is left of the meeting's (PostCallMaxItems), not 5 per window.
 func GuardCap(w Window, proposed []Item, limit int) (kept []Item, dropped []Dropped) {
+	return guard(w, proposed, limit, true)
+}
+
+// GuardSupplied is the same guards over items the meeting's OWNER supplied
+// (their own Claude read the transcript: the MCP tool meeting_items_set),
+// with one difference: an item may cite no segment (an owner's own note
+// needs no citation). Every segment it does cite must be in the window
+// (the meeting's lines), its owner must be "" or known as Guard's are, a
+// duplicate is dropped (by text, or by citation when it cites), and at
+// most limit are kept. The caller refuses the whole set when anything is
+// dropped.
+func GuardSupplied(w Window, proposed []Item, limit int) (kept []Item, dropped []Dropped) {
+	return guard(w, proposed, limit, false)
+}
+
+// guard is the one copy of the guards; cite says an item must cite a
+// segment.
+func guard(w Window, proposed []Item, limit int, cite bool) (kept []Item, dropped []Dropped) {
 	seen := append([]Item{}, w.Existing...)
 	for _, it := range proposed {
 		it.Segments = uniq(it.Segments)
-		if len(it.Segments) == 0 {
+		if cite && len(it.Segments) == 0 {
 			dropped = append(dropped, Dropped{it, DropNoCitation})
 			continue
 		}

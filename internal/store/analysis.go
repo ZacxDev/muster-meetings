@@ -360,6 +360,16 @@ func (s *Store) FinishRun(ctx context.Context, run Run, out Outcome, mail bool, 
 		return RedraftResult{}, err
 	}
 	defer tx.Rollback()
+	res, err := finishRunTx(ctx, tx, run, out, mail, now)
+	if err != nil {
+		return RedraftResult{}, err
+	}
+	return res, tx.Commit()
+}
+
+// finishRunTx is FinishRun inside tx: the one copy of a run's finish (the
+// worker's post run, and the owner's own items: AddOwnerRun).
+func finishRunTx(ctx context.Context, tx *sql.Tx, run Run, out Outcome, mail bool, now time.Time) (RedraftResult, error) {
 	var state string
 	if err := tx.QueryRowContext(ctx, `SELECT state FROM ai_runs WHERE id = ?`, run.ID).Scan(&state); err != nil {
 		return RedraftResult{}, err
@@ -385,7 +395,7 @@ func (s *Store) FinishRun(ctx context.Context, run Run, out Outcome, mail bool, 
 	if err := audit(ctx, tx, now, run.Subject, run.MeetingID, "analysis.done", runDetail(run.ID, len(out.Items), len(out.Notes))); err != nil {
 		return RedraftResult{}, err
 	}
-	return res, tx.Commit()
+	return res, nil
 }
 
 func runDetail(id int64, items, notes int) string {

@@ -226,7 +226,7 @@ var mutants = []mutant{
 		pkg: "./internal/items", test: "TestGuardKeepsTwoCommitmentsSaidInOneSegment", want: "want both kept"},
 	{name: "items guard: the citation rule ignores the citations", file: itGuard, from: "if subset(it.Segments, s.Segments) && sameSentence", to: "if true && sameSentence",
 		pkg: "./internal/items", test: "TestGuardDropsADuplicateByCitation", want: "want only the re-proposal from the same sentence dropped"},
-	{name: "items guard: any two anchors are the same sentence", file: itGuard, from: "\t\tif b[i] {\n\t\t\treturn true", to: "\t\tif true {\n\t\t\treturn true",
+	{name: "items guard: any two anchors are the same sentence", file: itGuard, from: "\t\tif b[i] {\n\t\t\treturn true", to: "\t\tif b[i] || true {\n\t\t\treturn true",
 		pkg: "./internal/items", test: "TestGuardKeepsTwoCommitmentsSaidInOneSegment", want: "want both kept"},
 	{name: "items guard: an item anchors to every sentence it beats, not the best", file: itGuard, from: "out, best = map[int]bool{i: true}, n", to: "out[i], best = true, n",
 		pkg: "./internal/items", test: "TestGuardDuplicateByCitationIsBySentence", want: `"Draft the survey questions for the whole team" after`},

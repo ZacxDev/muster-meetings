@@ -87,7 +87,7 @@ func (s *Server) mcpTools() []mcpTool {
 	}
 	if s.ai != nil {
 		ts = append(ts,
-			mcpTool{Name: "meeting_items_set", Description: "Store the meeting's action items, as found by you reading its transcript. They become the meeting's current run (recorded under label, default \"mcp\"; earlier runs are kept) and every notes email draft not yet sent is drawn again from them, exactly as a reprocess does; a recipient already sent to is left alone. The same checks as the AI's items apply, and the whole set is refused (nothing stored) if any item fails one: an owner must be \"\" or a speaker in the meeting (or a name said in a segment the item cites), every segment_ids entry must be a segment of this meeting, and no two items may say the same thing. Only for an ENDED meeting. Allowed even when the meeting's AI action items were off: these are the owner's own notes, and nothing goes to an AI service. An empty items list stores \"no action items\".",
+			mcpTool{Name: "meeting_items_set", Description: "Store the meeting's action items, as found by you reading its transcript. They become the meeting's current run (recorded under label, default \"mcp\"; earlier runs are kept) and every notes email draft not yet sent is drawn again from them, exactly as a reprocess does; a recipient already sent to is left alone. The same checks as the AI's items apply, and the whole set is refused (nothing stored) if any item fails one: an owner must be \"\" or a speaker in the meeting (or a name said in a segment the item cites), every segment_ids entry must be a segment of this meeting, and no two items may say the same thing. Only for an ENDED meeting. Allowed even when the meeting's AI action items were off: these are the owner's own notes, and nothing goes to an AI service. An empty items list stores \"no action items\". Calling it again with the same set (and label) as the current run changes nothing: it answers that run, unchanged true.",
 				Schema: obj([]string{"id", "items"}, map[string]any{
 					"id": meetingIDProp,
 					"items": map[string]any{"type": "array", "maxItems": store.MaxDraftItems, "items": obj([]string{"task"}, map[string]any{
@@ -119,8 +119,8 @@ func (s *Server) mcpTools() []mcpTool {
 						"removed":         boolean("true: don't send this recipient's notes; false: send them again."),
 						"email":           str("A guest's corrected address (not the owner's: that is the one confirmed in settings)."),
 					}), run: s.toolDraftUpdate},
-				mcpTool{Name: "meeting_drafts_send", Description: "SEND the notes emails now: every unsent draft of the meeting (state draft), or only draft_ids. Real email leaves at once, from the owner's name with replies to the owner's confirmed address; it cannot be recalled. Call it only when the owner asked you to send. Refused until the owner's email address is confirmed in Meetings settings. Answers how many were queued; their states move to sent in meeting_drafts_list.",
-					Schema: obj([]string{"id"}, map[string]any{"id": meetingIDProp, "draft_ids": map[string]any{"type": "array", "items": draftIDProp, "description": "Only these drafts (default: every unsent one)."}}), run: s.toolSend},
+				mcpTool{Name: "meeting_drafts_send", Description: "SEND the notes emails now: with draft_ids left out, EVERY unsent draft of the meeting (state draft); with draft_ids, only those (an empty list is refused). Real email leaves at once, from the owner's name with replies to the owner's confirmed address; it cannot be recalled. Call it only when the owner asked you to send. Refused until the owner's email address is confirmed in Meetings settings. Answers how many were queued; their states move to sent in meeting_drafts_list.",
+					Schema: obj([]string{"id"}, map[string]any{"id": meetingIDProp, "draft_ids": map[string]any{"type": "array", "minItems": 1, "items": draftIDProp, "description": "Only these drafts (at least one). Leave it out to send every unsent draft; an empty list is refused."}}), run: s.toolSend},
 				mcpTool{Name: "meeting_draft_retry", Description: "Send a draft whose send failed (or whose outcome is unknown: it may have arrived) once more.",
 					Schema: obj([]string{"id", "draft_id"}, map[string]any{"id": meetingIDProp, "draft_id": draftIDProp}), run: s.toolRetry},
 			)
@@ -466,6 +466,13 @@ func (s *Server) toolItemsSet(ctx context.Context, repo *store.OwnerRepo, raw js
 		return toolError(http.StatusBadRequest, "Nothing was stored: "+strings.Join(why, "; ")+".")
 	}
 	kept, _ := items.GuardSupplied(w, proposed, store.MaxDraftItems)
+	// The same set as the current run the owner stored under this label: no
+	// new run (a retried call changes nothing twice).
+	if cur, ok := s.sameOwnerRun(ctx, in.ID, label, kept); ok {
+		r := jsonResult(map[string]any{"run": cur, "items": len(kept), "drafts": nil, "unchanged": true})
+		r.logNote = "unchanged"
+		return r
+	}
 	run, res, err := repo.AddOwnerRun(ctx, in.ID, label, toStored(store.SrcTranscript, kept), s.notes != nil, s.cfg.Now())
 	switch {
 	case errors.Is(err, store.ErrNotFound):
@@ -486,6 +493,36 @@ func (s *Server) toolItemsSet(ctx context.Context, repo *store.OwnerRepo, raw js
 	r := jsonResult(out)
 	r.logNote = strconv.Itoa(len(kept)) + " items"
 	return r
+}
+
+// normText is an item's text as two items are compared: case and runs of
+// space aside.
+func normText(t string) string { return strings.ToLower(strings.Join(strings.Fields(t), " ")) }
+
+// sameOwnerRun is the meeting's current run when it is one the owner stored
+// (meeting_items_set: a post run never claimed by the worker) under label,
+// holding exactly kept.
+func (s *Server) sameOwnerRun(ctx context.Context, meetingID, label string, kept []items.Item) (store.Run, bool) {
+	cur, err := s.store.CurrentRun(ctx, meetingID)
+	if err != nil || cur.Kind != store.RunPost || cur.Attempts != 0 || cur.RequestedBy != "owner" || cur.ItemsModel != label {
+		return store.Run{}, false
+	}
+	its, err := s.store.RunItems(ctx, cur.ID)
+	if err != nil || len(its) != len(kept) {
+		return store.Run{}, false
+	}
+	for i, it := range its {
+		k := kept[i]
+		if it.Text != k.Text || it.Assignee != k.Assignee || it.Due != k.Due || len(it.Segments) != len(k.Segments) {
+			return store.Run{}, false
+		}
+		for j := range k.Segments {
+			if it.Segments[j] != k.Segments[j] {
+				return store.Run{}, false
+			}
+		}
+	}
+	return cur, true
 }
 
 // ---- the analysis ----
@@ -645,7 +682,17 @@ func (s *Server) toolDraftUpdate(ctx context.Context, repo *store.OwnerRepo, raw
 				its = append(its, it)
 			}
 		}
+		// An item whose text the draft already has (case and spacing
+		// aside) is not added again: a retried call adds nothing twice.
+		have := map[string]bool{}
+		for _, it := range its {
+			have[normText(it.Text)] = true
+		}
 		for _, a := range in.Add {
+			if have[normText(a.Task)] {
+				continue
+			}
+			have[normText(a.Task)] = true
 			its = append(its, store.DraftItem{Text: a.Task, Assignee: a.Owner, Due: a.Due})
 		}
 		body["items"] = its
@@ -668,13 +715,22 @@ func (s *Server) toolDraftUpdate(ctx context.Context, repo *store.OwnerRepo, raw
 
 func (s *Server) toolSend(ctx context.Context, repo *store.OwnerRepo, raw json.RawMessage) toolResult {
 	var in struct {
-		ID       string   `json:"id"`
-		DraftIDs []string `json:"draft_ids"`
+		ID       string    `json:"id"`
+		DraftIDs *[]string `json:"draft_ids"`
 	}
 	if r, ok := args(raw, &in); !ok {
 		return r
 	}
-	a := s.inner(ctx, s.handleSend, repo, "POST", "/api/meetings/"+in.ID+"/drafts/send", map[string]string{"id": in.ID}, map[string]any{"ids": in.DraftIDs})
+	// 🔴 The handler reads an empty list as "every unsent draft": a list
+	// given empty is refused here, so only an ABSENT draft_ids sends all.
+	var ids []string
+	if in.DraftIDs != nil {
+		if len(*in.DraftIDs) == 0 {
+			return toolError(http.StatusBadRequest, "draft_ids is empty: nothing was sent. Leave draft_ids out to send every unsent draft, or name the drafts to send.")
+		}
+		ids = *in.DraftIDs
+	}
+	a := s.inner(ctx, s.handleSend, repo, "POST", "/api/meetings/"+in.ID+"/drafts/send", map[string]string{"id": in.ID}, map[string]any{"ids": ids})
 	if !a.ok() {
 		return a.failure()
 	}

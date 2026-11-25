@@ -238,3 +238,62 @@ func TestAnOwnerRunIsFinishedCurrentAndNeverClaimed(t *testing.T) {
 		t.Errorf("another owner's meeting = %v, want ErrNotFound", err)
 	}
 }
+
+// 🔴 The draft writes an MCP token may make (edit, retry, revert) re-check
+// the token in their own transaction too: once revoked, each is
+// ErrNoSession and changes nothing.
+func TestAnMCPRepositorysDraftWritesRecheckItsToken(t *testing.T) {
+	s, _ := open(t)
+	r := owner(t, s, subA, t0)
+	id, run := ended(t, s, r)
+	ds, _ := r.Drafts(ctx, id)
+	if err := s.ExecForTest(`UPDATE mail_drafts SET state = 'failed' WHERE id = ?`, ds[1].ID); err != nil {
+		t.Fatal(err)
+	}
+	tok, mt := mintMCP(t, r, t0)
+	got, err := s.LookupMCPToken(ctx, tok, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := s.ForMCP(got)
+	if err := r.RevokeMCPToken(ctx, mt.ID, t0); err != nil {
+		t.Fatal(err)
+	}
+	yes := true
+	if _, err := m.EditDraft(ctx, id, ds[0].ID, nil, &yes, nil, t0); !errors.Is(err, store.ErrNoSession) {
+		t.Errorf("EditDraft with a revoked token = %v, want ErrNoSession", err)
+	}
+	if err := m.RetryDraft(ctx, id, ds[1].ID, t0); !errors.Is(err, store.ErrNoSession) {
+		t.Errorf("RetryDraft with a revoked token = %v, want ErrNoSession", err)
+	}
+	if _, err := m.SetCurrent(ctx, id, run, true, t0); !errors.Is(err, store.ErrNoSession) {
+		t.Errorf("SetCurrent with a revoked token = %v, want ErrNoSession", err)
+	}
+	after, _ := r.Drafts(ctx, id)
+	if after[0].State != "draft" || after[1].State != "failed" || after[0].ID != ds[0].ID {
+		t.Errorf("drafts changed through a revoked token: %+v", after)
+	}
+}
+
+// 🔴 A guest's address the owner corrected on their draft survives every
+// redraft (new items, Run again, a revert): the new draft is not given the
+// card's address back, as "Don't send" is not undone.
+func TestARedraftKeepsACorrectedGuestAddress(t *testing.T) {
+	s, _ := open(t)
+	r := owner(t, s, subA, t0)
+	id, _ := ended(t, s, r)
+	ds, _ := r.Drafts(ctx, id)
+	fixed := "grace.fixed@example.test"
+	if _, err := r.EditDraft(ctx, id, ds[1].ID, nil, nil, &fixed, t0); err != nil {
+		t.Fatal(err)
+	}
+	postRun(t, s, id, "model/b", []store.NewItem{{Source: store.SrcTranscript, Text: "Book the band", Assignee: "Grace H.", Segments: []int64{1}}})
+	ds, _ = r.Drafts(ctx, id)
+	var got []string
+	for _, d := range ds {
+		got = append(got, d.Name+":"+d.Email)
+	}
+	if strings.Join(got, " ") != "fixture name: Grace H.:"+fixed+" Linus T.:linus@example.test" {
+		t.Errorf("after a redraft: %v (the corrected address must stay; the others keep their card's)", got)
+	}
+}

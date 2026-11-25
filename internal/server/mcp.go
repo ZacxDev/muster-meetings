@@ -150,6 +150,10 @@ type rpcRequest struct {
 	ID      json.RawMessage `json:"id,omitempty"`
 	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params,omitempty"`
+	// Result and Error make it a response (the client answering a request
+	// of ours): accepted, never answered.
+	Result json.RawMessage `json:"result,omitempty"`
+	Error  json.RawMessage `json:"error,omitempty"`
 }
 
 type rpcError struct {
@@ -223,6 +227,9 @@ func (s *Server) rpcOne(ctx context.Context, repo *store.OwnerRepo, raw json.Raw
 		return rpcResponse{JSONRPC: "2.0", ID: json.RawMessage("null"), Error: &rpcError{rpcParse, "not JSON-RPC"}}, true
 	}
 	if len(req.ID) == 0 || string(req.ID) == "null" {
+		return rpcResponse{}, false
+	}
+	if req.Method == "" && (len(req.Result) > 0 || len(req.Error) > 0) {
 		return rpcResponse{}, false
 	}
 	out := rpcResponse{JSONRPC: "2.0", ID: req.ID}

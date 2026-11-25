@@ -957,3 +957,123 @@ func TestMusterRevokingTheOwnerRevokesTheirMCPToken(t *testing.T) {
 
 // A count of the model's calls, to read "no call" claims against.
 var _ = openroutertest.KindItems
+
+// 🔴 draft_ids present and empty is refused (it never means "all"), and the
+// schema says at least one; draft_ids absent sends every unsent draft.
+func TestMCPSendWithAnEmptyDraftIDsListSendsNothing(t *testing.T) {
+	e := pcEnv(t, false)
+	c := e.fixture()
+	e.postDone(c, 1)
+	tok, _ := e.mintMCP(c.Sess)
+	_, tools := e.toolNames(tok)
+	for _, tl := range tools {
+		if tl["name"] == "meeting_drafts_send" {
+			ids := tl["inputSchema"].(map[string]any)["properties"].(map[string]any)["draft_ids"].(map[string]any)
+			if ids["minItems"] != 1.0 {
+				t.Errorf("draft_ids schema = %v: want minItems 1", ids)
+			}
+		}
+	}
+	e.confirmOwner(c)
+	before := len(e.smtp.Messages())
+	if a := e.tool(tok, "meeting_drafts_send", map[string]any{"id": c.ID, "draft_ids": []string{}}); !a.IsError || !strings.Contains(a.text(), "draft_ids is empty") {
+		t.Errorf("send with draft_ids [] = %v %q, want refused", a.IsError, a.text())
+	}
+	time.Sleep(100 * time.Millisecond)
+	if ds, _ := e.mcpDrafts(tok, c.ID); ds[0].State != "draft" || ds[1].State != "draft" || len(e.smtp.Messages()) != before {
+		t.Fatalf("after draft_ids []: states %s %s, %d mailed", ds[0].State, ds[1].State, len(e.smtp.Messages())-before)
+	}
+	var sent struct{ Queued int }
+	e.ok(tok, "meeting_drafts_send", map[string]any{"id": c.ID}, &sent)
+	if sent.Queued != 2 {
+		t.Errorf("send with draft_ids absent queued %d, want every unsent (2)", sent.Queued)
+	}
+}
+
+// 🔴 A guest's address corrected with meeting_draft_update stays through
+// the owner's new items and through Run again, and the notes go there.
+func TestMCPACorrectedGuestAddressSurvivesItemsAndReprocess(t *testing.T) {
+	e := pcEnv(t, false)
+	c := e.fixture()
+	e.postDone(c, 1)
+	tok, _ := e.mintMCP(c.Sess)
+	ds, _ := e.mcpDrafts(tok, c.ID)
+	const fixed = "grace.fixed@example.test"
+	e.ok(tok, "meeting_draft_update", map[string]any{"id": c.ID, "draft_id": ds[1].DraftID, "email": fixed}, nil)
+	e.ok(tok, "meeting_items_set", map[string]any{"id": c.ID, "items": []any{map[string]any{"task": "Print the seating chart", "owner": grace}}}, nil)
+	if ds, _ = e.mcpDrafts(tok, c.ID); ds[1].Address != fixed {
+		t.Errorf("Grace's address after items_set = %q, want %q", ds[1].Address, fixed)
+	}
+	var q struct {
+		Run int64 `json:"run"`
+	}
+	e.ok(tok, "meeting_reprocess", map[string]any{"id": c.ID}, &q)
+	e.postDone(c, 3)
+	if ds, _ = e.mcpDrafts(tok, c.ID); ds[1].Address != fixed {
+		t.Errorf("Grace's address after Run again = %q, want %q", ds[1].Address, fixed)
+	}
+	e.confirmOwner(c)
+	before := len(e.smtp.Messages())
+	e.ok(tok, "meeting_drafts_send", map[string]any{"id": c.ID, "draft_ids": []string{ds[1].DraftID}}, nil)
+	eventually(t, 10*time.Second, "Grace's notes mailed", func() bool { return len(e.smtp.Messages()) == before+1 })
+	if to := e.smtp.Messages()[before].To[0]; to != fixed {
+		t.Errorf("mailed to %q, want the corrected %q", to, fixed)
+	}
+}
+
+// Retries are harmless: the same item added twice is on the draft once, and
+// the same set of items stored twice is one run (the current one, said
+// unchanged).
+func TestMCPRetriedCallsChangeNothingTwice(t *testing.T) {
+	e := pcEnv(t, false)
+	c := e.fixture()
+	e.postDone(c, 1)
+	tok, _ := e.mintMCP(c.Sess)
+	ds, _ := e.mcpDrafts(tok, c.ID)
+	n := len(ds[0].Items)
+	for i := 0; i < 2; i++ {
+		e.ok(tok, "meeting_draft_update", map[string]any{"id": c.ID, "draft_id": ds[0].DraftID, "add_items": []any{map[string]any{"task": "Send the invoices", "owner": "Ada L."}}}, nil)
+	}
+	e.ok(tok, "meeting_draft_update", map[string]any{"id": c.ID, "draft_id": ds[0].DraftID, "add_items": []any{map[string]any{"task": "  send THE invoices ", "owner": "Ada L."}}}, nil)
+	if ds, _ = e.mcpDrafts(tok, c.ID); len(ds[0].Items) != n+1 {
+		t.Errorf("after adding one item three times: %d items, want %d", len(ds[0].Items), n+1)
+	}
+	set := map[string]any{"id": c.ID, "items": []any{map[string]any{"task": "Order the flowers", "owner": "Ada L.", "due": "Friday"}}}
+	var a, b struct {
+		Run       struct{ ID int64 } `json:"run"`
+		Unchanged bool               `json:"unchanged"`
+	}
+	e.ok(tok, "meeting_items_set", set, &a)
+	e.ok(tok, "meeting_items_set", set, &b)
+	if b.Run.ID != a.Run.ID || !b.Unchanged || a.Unchanged {
+		t.Errorf("the same set twice: runs %d then %d (unchanged %v, %v), want one run", a.Run.ID, b.Run.ID, a.Unchanged, b.Unchanged)
+	}
+	if runs := len(e.analysis(c, "").Runs); runs != 2 {
+		t.Errorf("%d runs, want the post run and one owner run", runs)
+	}
+	// A different set is a new run.
+	set["items"] = []any{map[string]any{"task": "Order the flowers", "owner": "Ada L.", "due": "Monday"}}
+	var d struct {
+		Run struct{ ID int64 } `json:"run"`
+	}
+	e.ok(tok, "meeting_items_set", set, &d)
+	if d.Run.ID == a.Run.ID {
+		t.Error("a changed set was not stored")
+	}
+}
+
+// A JSON-RPC response (an id and a result, no method: the client answering)
+// is accepted with 202 and no body, as a notification is.
+func TestMCPAcceptsAJSONRPCResponseWith202(t *testing.T) {
+	e := newEnv(t)
+	tok, _ := e.mintMCP(e.enter(ada))
+	for _, body := range []string{`{"jsonrpc":"2.0","id":5,"result":{}}`, `{"jsonrpc":"2.0","id":"x","error":{"code":-1,"message":"no"}}`} {
+		if resp, raw := e.do("POST", "/mcp", tok, body); resp.StatusCode != 202 || len(raw) != 0 {
+			t.Errorf("%s = %d %s, want 202 and no body", body, resp.StatusCode, raw)
+		}
+	}
+	// A request with an id and no method is still invalid.
+	if _, raw := e.do("POST", "/mcp", tok, `{"jsonrpc":"2.0","id":6}`); !strings.Contains(string(raw), `"code":-32600`) {
+		t.Errorf("an id with neither method nor result = %s, want -32600", raw)
+	}
+}

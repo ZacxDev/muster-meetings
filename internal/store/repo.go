@@ -20,10 +20,12 @@ type OwnerRepo struct {
 	// from (ForSession), "" for ForSubject. A write needs it: see CreateMeeting.
 	session string
 	// mcp is the id of the live MCP token this repository was built from
-	// (ForMCP), "" otherwise. It may do the writes the MCP tools need (Send,
-	// Share), each re-checking the token inside its own transaction
-	// (credLive); never the session-only ones (a new meeting, the owner's
-	// address, the settings, an agent or MCP token, Delete now).
+	// (ForMCP), "" otherwise. It may do the writes the MCP tools need —
+	// Approve (Send), Share, AddOwnerRun, EditDraft, RetryDraft, SetCurrent —
+	// each re-checking the token inside its own transaction (mayWrite);
+	// never the session-only ones (a new meeting, the owner's address, the
+	// settings, an agent or MCP token, Delete now). QueuePost (reprocess) is
+	// a store write with no repository: it does not re-check.
 	mcp string
 }
 

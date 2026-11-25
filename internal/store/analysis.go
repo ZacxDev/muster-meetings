@@ -503,6 +503,9 @@ func (r *OwnerRepo) SetCurrent(ctx context.Context, meetingID string, runID int6
 		return RedraftResult{}, err
 	}
 	defer tx.Rollback()
+	if err := r.mayWrite(ctx, tx); err != nil {
+		return RedraftResult{}, err
+	}
 	res, err := makeCurrent(ctx, tx, meetingID, runID, mail, now)
 	if err != nil {
 		return RedraftResult{}, err

@@ -68,27 +68,36 @@ func TestGuardDropsADuplicateByTextAtJaccard0Point7(t *testing.T) {
 
 func TestGuardDropsADuplicateByCitation(t *testing.T) {
 	w := win(3, 4, 5)
+	w.Segments[1].Text = "We ship the beta build on Monday. I'll write release notes tonight."
 	w.Existing = []items.Item{{Text: "ship the beta build", Segments: []int64{3, 4}}}
 	kept, dropped := items.Guard(w, []items.Item{
-		{Text: "ship the beta", Segments: []int64{4}},           // all cited by the existing item, J=2/3: the same task
-		{Text: "write release notes", Segments: []int64{4}},     // all cited by it, no word shared: another task
+		{Text: "ship the beta", Segments: []int64{4}},           // all cited by the existing item, the same sentence
+		{Text: "write release notes", Segments: []int64{4}},     // all cited by it, another sentence: another task
 		{Text: "update the changelog", Segments: []int64{4, 5}}, // 5 is new: kept
 	})
 	if len(kept) != 2 || kept[0].Text != "write release notes" || kept[1].Text != "update the changelog" || reasons(dropped) != "[duplicate-citation]" || dropped[0].Item.Text != "ship the beta" {
-		t.Errorf("by citation: kept %+v, dropped %s; want only the reworded re-proposal dropped", kept, reasons(dropped))
+		t.Errorf("by citation: kept %+v, dropped %s; want only the re-proposal from the same sentence dropped", kept, reasons(dropped))
 	}
 }
 
-// 🔴 Regression: real streaming STT returned one speaker's whole turn as
-// ONE segment, and the two commitments in it were proposed citing it. The
-// second was dropped as duplicate-citation (its cited segments are a subset
-// of the first's) in every window, live and post-call. Two commitments in
-// one segment are two items; proposing them again is still a duplicate.
+// turn is one speaker's whole 16 s turn that real streaming STT returned as
+// ONE segment, with two commitments in it.
+var turn = items.Segment{ID: 7, Speaker: "Ada", StartMS: 0, EndMS: 16000,
+	Text: "Hi everyone, thanks for making time. I will send the revised budget to the whole team by Friday. Also, I can draft the customer survey questions before our next call"}
+
+const (
+	budgetText = "Send the revised budget to the whole team by Friday"
+	surveyText = "Draft the customer survey questions before the next call"
+)
+
+// 🔴 Regression: the two commitments in turn were proposed citing it, and
+// the second was dropped as duplicate-citation (its cited segments are a
+// subset of the first's) in every window, live and post-call. Two
+// commitments in one segment are two items; proposing them again is still a
+// duplicate.
 func TestGuardKeepsTwoCommitmentsSaidInOneSegment(t *testing.T) {
-	turn := items.Segment{ID: 7, Speaker: "Ada", StartMS: 0, EndMS: 16000,
-		Text: "Hi everyone, thanks for making time. I will send the revised budget to the whole team by Friday. Also, I can draft the customer survey questions before our next call"}
-	budget := items.Item{Text: "Send the revised budget to the whole team by Friday", Assignee: "Ada", Due: "Friday", Segments: []int64{7}}
-	survey := items.Item{Text: "Draft the customer survey questions before the next call", Assignee: "Ada", Segments: []int64{7}}
+	budget := items.Item{Text: budgetText, Assignee: "Ada", Due: "Friday", Segments: []int64{7}}
+	survey := items.Item{Text: surveyText, Assignee: "Ada", Segments: []int64{7}}
 	w := items.Window{Segments: []items.Segment{turn}}
 	kept, dropped := items.Guard(w, []items.Item{budget, survey})
 	if len(kept) != 2 || kept[0].Text != budget.Text || kept[1].Text != survey.Text || len(dropped) != 0 {
@@ -103,37 +112,58 @@ func TestGuardKeepsTwoCommitmentsSaidInOneSegment(t *testing.T) {
 	}
 }
 
-// The citation rule's text bar at 0.40 exactly (2/5), below it (3/8 =
-// 0.375) and above it (2/4 = 0.5), each citing only what the existing item
-// cites; and the same 0.5 pair citing a segment the existing item does not,
-// which no rule makes a duplicate. Texts are pairwise distinct across the
-// cases.
-func TestGuardDuplicateByCitationNeedsJaccard0Point4(t *testing.T) {
+// The citation rule by sentence: an item citing only what an existing item
+// cites is a duplicate when both anchor to the same sentence of it (the
+// sentence sharing the most words with each), however it is reworded (the
+// live loop re-proposes a segment in each of the ~9 windows that hold it);
+// a commitment from another sentence of the segment is kept; an item
+// sharing no word with any sentence falls back to the citation alone.
+func TestGuardDuplicateByCitationIsBySentence(t *testing.T) {
+	segs := []items.Segment{turn,
+		{ID: 8, Speaker: "Ada", StartMS: 20000, EndMS: 23000, Text: "Thanks all. I'll send the deck by Friday."},
+		{ID: 9, Speaker: "Ada", StartMS: 24000, EndMS: 28000, Text: "Great, that settles the date. I'll book the caterer."},
+	}
 	cases := []struct {
-		name, existing, proposed string
-		cites                    []int64
-		dup                      bool
+		existing string
+		cites    int64
+		proposed string
+		want     string // the drop reason, "" for kept
 	}{
-		{"J=2/5", "renew office lease", "Renew the office parking permits", []int64{3}, true},
-		{"J=3/8", "audit vendor invoices march ledger", "audit vendor invoices, April payroll report", []int64{3}, false},
-		{"J=2/4", "email the auditor", "Email the auditor tomorrow morning", []int64{4, 3}, true},
-		{"J=2/4, a new segment", "phone the landlord", "Phone the landlord at noon today", []int64{3, 5}, false},
+		{budgetText, 7, "Ada to share the updated budget with the team before Friday", "duplicate-citation"},
+		{"Send the deck by Friday", 8, "Email the slide deck to everyone by Friday", "duplicate-citation"},
+		{"Book the caterer", 9, "Ada will contact the catering company to book", "duplicate-citation"},
+		{budgetText, 7, "Send revised budget to team (Friday)", "duplicate-text"},
+		{surveyText, 7, "Prepare customer survey questions for next call", "duplicate-citation"},
+		{budgetText, 7, surveyText, ""},
+		// "whole team" is in the budget's sentence, but the survey's shares more.
+		{budgetText, 7, "Draft the survey questions for the whole team", ""},
+		// no word of it in any sentence of the segment: the citation decides
+		{budgetText, 7, "Ada will follow up on it", "duplicate-citation"},
 	}
 	for _, c := range cases {
-		w := win(3, 4, 5)
-		w.Existing = []items.Item{{Text: c.existing, Segments: []int64{3, 4}}}
-		kept, dropped := items.Guard(w, []items.Item{{Text: c.proposed, Segments: c.cites}})
-		if c.dup && (len(kept) != 0 || reasons(dropped) != "[duplicate-citation]") {
-			t.Errorf("%s: kept %+v dropped %s, want it dropped as duplicate-citation", c.name, kept, reasons(dropped))
+		w := items.Window{Segments: segs, Existing: []items.Item{{Text: c.existing, Segments: []int64{c.cites}}}}
+		kept, dropped := items.Guard(w, []items.Item{{Text: c.proposed, Segments: []int64{c.cites}}})
+		got := ""
+		if len(dropped) == 1 {
+			got = dropped[0].Reason
 		}
-		if !c.dup && (len(kept) != 1 || len(dropped) != 0) {
-			t.Errorf("%s: dropped %s, want it kept", c.name, reasons(dropped))
+		if got != c.want || len(kept)+len(dropped) != 1 {
+			t.Errorf("%q after %q: kept %d, dropped %s; want %q", c.proposed, c.existing, len(kept), reasons(dropped), c.want)
 		}
 	}
 }
 
+func TestSentences(t *testing.T) {
+	got := items.Sentences("Use a tool, e.g. the tracker. Then ship v2.1 to Dr. Bo! Done? yes")
+	if want := `["Use a tool, e.g. the tracker." "Then ship v2.1 to Dr. Bo!" "Done?" "yes"]`; fmt.Sprintf("%q", got) != want {
+		t.Errorf("Sentences = %q, want %s", got, want)
+	}
+}
+
 func TestGuardDedupesWithinOneWindow(t *testing.T) {
-	kept, dropped := items.Guard(win(1, 2, 3), []items.Item{
+	w := win(1, 2, 3)
+	w.Segments[0].Text = "Book the venue for Friday. Then hire a caterer."
+	kept, dropped := items.Guard(w, []items.Item{
 		{Text: "book the venue", Segments: []int64{1}},
 		{Text: "Book the venue.", Segments: []int64{2}},
 		{Text: "book the venue for Friday", Segments: []int64{1}},

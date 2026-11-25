@@ -321,7 +321,7 @@ func GuardVision(w VisionWindow, notes []Note, proposed []Item, limit int) (kept
 			continue
 		}
 		if r := d[0].Reason; (r == DropDupText || r == DropDupCitation) && it.Text != "" {
-			if j, _ := duplicate(d[0].Item, w.Existing); j >= 0 && !refined[j] {
+			if j, _ := duplicate(win, d[0].Item, w.Existing); j >= 0 && !refined[j] {
 				refined[j] = true
 				refs = append(refs, Refinement{Index: j, Text: strings.TrimSpace(it.Text), Frames: d[0].Item.Frames})
 				continue

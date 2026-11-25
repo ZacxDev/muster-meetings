@@ -11,11 +11,6 @@ const MaxPerWindow = 5
 // DupJaccard is the token Jaccard at or above which two items are one.
 const DupJaccard = 0.7
 
-// DupCitedJaccard is the token Jaccard at or above which an item whose cited
-// segments are all cited by another is that item again (a re-proposal in
-// other words), not a second commitment said in the same segment.
-const DupCitedJaccard = 0.4
-
 // Why an item was dropped.
 const (
 	DropNoCitation  = "no-citation"
@@ -42,14 +37,17 @@ type Dropped struct {
 //     reached it, cannot name a stranger as the owner); no owner is allowed;
 //   - an item whose normalised text has token Jaccard ≥ 0.7 with an
 //     existing item (or one kept earlier in this window) is a duplicate by
-//     text; one whose cited segments are all cited by one such item AND
-//     whose text has token Jaccard ≥ 0.4 with that same item is a duplicate
-//     by citation; either is dropped. Sharing segments alone is not
-//     enough: streaming STT can return one speaker's whole turn as one
-//     segment, and two commitments said in it ("I'll send the budget …
-//     Also, I can draft the survey …") cite the same segment with
-//     unrelated words. The words decide which of those two cases it is;
-//     the citation lowers the bar a reworded re-proposal must clear;
+//     text; one whose cited segments are all cited by one such item, and
+//     that anchors to the same sentence of those segments as that item
+//     (sameSentence), is a duplicate by citation; either is dropped. Each
+//     item anchors to the sentence(s) of the segments it cites sharing the
+//     most Tokens with its text. Streaming STT can return one speaker's
+//     whole turn as one segment, so two commitments said in it ("I'll send
+//     the budget … Also, I can draft the survey …") cite the same segment
+//     but anchor to different sentences: both are kept. A rewording of one
+//     anchors to its sentence however few words it keeps. An item sharing
+//     no token with any sentence of those segments falls back to the
+//     citation alone (a duplicate);
 //   - at most 5 are kept.
 //
 // The kept items' citations are deduplicated, in the model's order.
@@ -82,7 +80,7 @@ func GuardCap(w Window, proposed []Item, limit int) (kept []Item, dropped []Drop
 			dropped = append(dropped, Dropped{it, DropBadOwner})
 			continue
 		}
-		if _, why := duplicate(it, seen); why != "" {
+		if _, why := duplicate(w, it, seen); why != "" {
 			dropped = append(dropped, Dropped{it, why})
 			continue
 		}
@@ -99,7 +97,8 @@ func GuardCap(w Window, proposed []Item, limit int) (kept []Item, dropped []Drop
 // duplicate is the index in seen of the item it duplicates and why (Guard's
 // two rules, by text first), -1 and "" for none. The one copy of the rule:
 // the item guards drop on it, and GuardVision turns it into a Refinement.
-func duplicate(it Item, seen []Item) (int, string) {
+// w holds the text of every segment it cites.
+func duplicate(w Window, it Item, seen []Item) (int, string) {
 	toks := Tokens(it.Text)
 	for j, s := range seen {
 		if Jaccard(toks, Tokens(s.Text)) >= DupJaccard {
@@ -107,11 +106,98 @@ func duplicate(it Item, seen []Item) (int, string) {
 		}
 	}
 	for j, s := range seen {
-		if subset(it.Segments, s.Segments) && Jaccard(toks, Tokens(s.Text)) >= DupCitedJaccard {
+		if subset(it.Segments, s.Segments) && sameSentence(w, it, s) {
 			return j, DropDupCitation
 		}
 	}
 	return -1, ""
+}
+
+// sameSentence reports it and s anchor to one sentence of the segments it
+// cites (all of which s cites too): each item's anchor is the set of those
+// sentences sharing the most Tokens with its text (ties all count), and
+// they are the same when the two sets meet. When either item shares no
+// token with any of the sentences, there is nothing to tell them apart by,
+// and it is true: the citation alone decides, as a duplicate.
+func sameSentence(w Window, it, s Item) bool {
+	var sents []map[string]bool
+	for _, id := range it.Segments {
+		for _, seg := range w.Segments {
+			if seg.ID == id {
+				for _, x := range Sentences(seg.Text) {
+					sents = append(sents, Tokens(x))
+				}
+			}
+		}
+	}
+	a, b := anchor(Tokens(it.Text), sents), anchor(Tokens(s.Text), sents)
+	if len(a) == 0 || len(b) == 0 {
+		return true
+	}
+	for i := range a {
+		if b[i] {
+			return true
+		}
+	}
+	return false
+}
+
+// anchor is the indexes of the sentences sharing the most tokens with toks;
+// none when no sentence shares one.
+func anchor(toks map[string]bool, sents []map[string]bool) map[int]bool {
+	out, best := map[int]bool{}, 0
+	for i, st := range sents {
+		n := 0
+		for t := range toks {
+			if st[t] {
+				n++
+			}
+		}
+		switch {
+		case n > best:
+			out, best = map[int]bool{i: true}, n
+		case n == best && n > 0:
+			out[i] = true
+		}
+	}
+	return out
+}
+
+// abbrevs end in a full stop that does not end a sentence.
+var abbrevs = map[string]bool{"e.g": true, "i.e": true, "etc": true, "vs": true, "mr": true, "mrs": true, "ms": true, "dr": true}
+
+// Sentences is text split after each '.', '!' or '?' that a space (or the
+// end) follows, unless the word before a '.' is one of abbrevs ("e.g.").
+// Blank sentences are left out.
+func Sentences(text string) []string {
+	var out []string
+	rs := []rune(text)
+	start := 0
+	for i, r := range rs {
+		if r != '.' && r != '!' && r != '?' {
+			continue
+		}
+		if i+1 < len(rs) && !unicode.IsSpace(rs[i+1]) {
+			continue
+		}
+		if r == '.' {
+			w := string(rs[start:i])
+			if k := strings.LastIndexFunc(w, unicode.IsSpace); k >= 0 {
+				w = w[k+1:]
+			}
+			if abbrevs[strings.ToLower(strings.TrimLeft(w, "(\"'"))] {
+				continue
+			}
+		}
+		if x := strings.TrimSpace(string(rs[start : i+1])); x != "" {
+			out = append(out, x)
+		}
+		start = i + 1
+	}
+	if x := strings.TrimSpace(string(rs[start:])); x != "" {
+		out = append(out, x)
+	}
+	return out
 }
 
 // ownerKnown reports it's owner is "", a window speaker (or a speaker's

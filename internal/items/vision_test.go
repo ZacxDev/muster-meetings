@@ -60,6 +60,23 @@ func TestGuardVision(t *testing.T) {
 	}
 }
 
+// 🔴 A frame item restating a transcript item from the same sentence (in
+// the screen's words, sharing few of the transcript's) is that item's
+// refinement, never a second item.
+func TestGuardVisionRefinesAnItemFromTheSameSentence(t *testing.T) {
+	w := items.VisionWindow{
+		Frames:   []items.FrameIn{{MS: 6000, JPEG: []byte{0xFF, 0xD8}}},
+		Segments: []items.Segment{{ID: 5, Speaker: "Ada L.", StartMS: 5000, EndMS: 7000, Text: "This slide has the pricing. I'll send the deck by Friday."}},
+		Existing: []items.Item{{Text: "Send the deck by Friday", Assignee: "Ada L.", Segments: []int64{5}}},
+	}
+	_, its, refs, dropped := items.GuardVision(w, nil, []items.Item{
+		{Text: "Email the Q3 pricing slides (v2) to the team by Friday", Assignee: "Ada L.", Segments: []int64{5}, Frames: []int64{6000}},
+	}, 10)
+	if len(its) != 0 || len(refs) != 1 || refs[0].Index != 0 || refs[0].Text != "Email the Q3 pricing slides (v2) to the team by Friday" || len(dropped) != 0 {
+		t.Errorf("items %+v, refinements %+v, dropped %+v; want one refinement of item 0 and no new item", its, refs, dropped)
+	}
+}
+
 func TestExcerptAndSpread(t *testing.T) {
 	segs := []items.Segment{{ID: 1, StartMS: 0, EndMS: 1000}, {ID: 2, StartMS: 70_000, EndMS: 71_000}, {ID: 3, StartMS: 140_000, EndMS: 141_000}, {ID: 4, StartMS: 175_000, EndMS: 176_000}}
 	var got []int64

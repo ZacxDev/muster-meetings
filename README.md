@@ -679,8 +679,11 @@ deterministic guards (a citation of a line outside the window, an owner
 who is not a speaker or named in the cited lines, a duplicate, more than 5
 in one window: dropped). A duplicate is an item whose words are mostly an
 earlier item's (token Jaccard ≥ 0.7), or one citing only lines an earlier
-item cites whose words overlap it too (≥ 0.4): two different commitments
-said in one long line are two items. Kept items appear in the **Action items** panel for
+item cites that comes from the same sentence of them: each item belongs to
+the sentence of its cited lines sharing the most words with it, so a
+rewording is still the same item, while two commitments said in one long
+line are two items. An item sharing no word with any of those sentences
+counts as the earlier one. Kept items appear in the **Action items** panel for
 the owner and every admitted guest; three failed calls in a row show
 "Action items paused". A refused key or model stops the live items for that
 meeting.
@@ -767,9 +770,6 @@ have been sent" when the connection broke after the message was handed over
 **A muster agent reading a meeting (decision 4).** muster gives a plugin no
 way to answer an agent today (the plugin calls muster; muster never calls
 it), so the reachable path is a token the owner hands over:
-**Copy link for an agent** in a meeting's archive (with a model configured)
-mints one and copies what an agent needs: the `timeline_url`, the
-`Authorization: Bearer mmr_…` header and the expiry, shown once.
 `POST /api/meetings/{id}/agent-token` (owner session) answers a read-only
 `mmr_…` token for that one meeting, live 7 days (stored as SHA-256), and its
 `timeline_url`. With `Authorization: Bearer mmr_…`,

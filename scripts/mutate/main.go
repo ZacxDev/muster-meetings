@@ -1658,8 +1658,10 @@ var mutants = []mutant{
 	// ---- 🔴 the MCP server: the door, owner isolation, the send gate ----
 	{name: "mcp door: a revoked token opens /mcp", file: mcpSt, from: "subtle.ConstantTimeCompare([]byte(stored), []byte(h)) != 1 || revoked.Valid {", to: "subtle.ConstantTimeCompare([]byte(stored), []byte(h)) != 1 {",
 		pkg: "./internal/server", test: "TestMCPDoorRefusesEverythingButALiveMCPToken", want: "a revoked token = 200"},
-	{name: "mcp door: a token opens /mcp after the uninstall", file: mcpGo, from: "if err == nil && s.app.Live() {", to: "if err == nil {",
-		pkg: "./internal/server", test: "TestMCPDoorRefusesEverythingButALiveMCPToken", want: "a token after the uninstall = 200"},
+	{name: "mcp door: a token opens /mcp once the app is dead", file: mcpGo, from: "if err == nil && s.app.Live() {", to: "if err == nil {",
+		pkg: "./internal/server", test: "TestMCPDoorRefusesEverythingButALiveMCPToken", want: "a token whose row survived the uninstall = 200"},
+	{name: "mcp door: the uninstall leaves the tokens", file: st, from: "`UPDATE mcp_tokens SET revoked_at = ? WHERE revoked_at IS NULL`", to: "`UPDATE mcp_tokens SET revoked_at = ? WHERE 0 AND revoked_at IS NULL`",
+		pkg: "./internal/server", test: "TestMCPDoorRefusesEverythingButALiveMCPToken", want: "the uninstall left 1 tokens unrevoked"},
 	{name: "mcp door: failed attempts unlimited", file: mcpGo, from: "if !s.mcpFails.Allow(s.clientAddr(r), s.cfg.Now()) {", to: "if false {",
 		pkg: "./internal/server", test: "TestMCPFailedAuthenticationIsLimitedPerAddress", want: "want 429"},
 	{name: "mcp door: a page on another origin served", file: mcpGo, from: "if o := r.Header.Get(\"Origin\"); o != \"\" && o != s.cfg.PublicURL {", to: "if o := r.Header.Get(\"Origin\"); o == \"-\" {",

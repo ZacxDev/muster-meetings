@@ -189,11 +189,28 @@ func TestMCPDoorRefusesEverythingButALiveMCPToken(t *testing.T) {
 			t.Errorf("%s %s with an MCP token = %d %s, want 401", p.method, p.path, resp.StatusCode, raw)
 		}
 	}
-	// The app uninstalled: the token is refused at once.
+	// The app uninstalled: every token is revoked in the database, and the
+	// door refuses even a token whose row survived (the app's own word that
+	// it is dead decides, as for an owner session).
 	e.fake.Uninstall(app.PluginID)
 	e.app.PollOnce(context.Background())
 	if resp, raw := e.rpc(tok, "tools/list", nil); resp.StatusCode != 401 {
 		t.Errorf("a token after the uninstall = %d %s, want 401", resp.StatusCode, raw)
+	}
+	db, err := sql.Open("sqlite", "file:"+e.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var live int
+	if err := db.QueryRow(`SELECT count(*) FROM mcp_tokens WHERE revoked_at IS NULL`).Scan(&live); err != nil || live != 0 {
+		t.Errorf("the uninstall left %d tokens unrevoked (%v)", live, err)
+	}
+	if _, err := db.Exec(`UPDATE mcp_tokens SET revoked_at = NULL`); err != nil {
+		t.Fatal(err)
+	}
+	if resp, raw := e.rpc(tok, "tools/list", nil); resp.StatusCode != 401 {
+		t.Errorf("a token whose row survived the uninstall = %d %s, want 401", resp.StatusCode, raw)
 	}
 }
 

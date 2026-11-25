@@ -19,6 +19,54 @@ type OwnerRepo struct {
 	// session is the stored hash of the bearer this repository was built
 	// from (ForSession), "" for ForSubject. A write needs it: see CreateMeeting.
 	session string
+	// mcp is the id of the live MCP token this repository was built from
+	// (ForMCP), "" otherwise. It may do the writes the MCP tools need —
+	// Approve (Send), Share, AddOwnerRun, EditDraft, RetryDraft, SetCurrent —
+	// each re-checking the token inside its own transaction (mayWrite);
+	// never the session-only ones (a new meeting, the owner's address, the
+	// settings, an agent or MCP token, Delete now). QueuePost (reprocess) is
+	// a store write with no repository: it does not re-check.
+	mcp string
+}
+
+// ForMCP is the repository of a live MCP token (LookupMCPToken): what the
+// MCP door builds, never from anything the request names.
+func (s *Store) ForMCP(t MCPToken) *OwnerRepo { return &OwnerRepo{s: s, subject: t.Subject, mcp: t.ID} }
+
+// ViaMCP says the repository was built from an MCP token.
+func (r *OwnerRepo) ViaMCP() bool { return r.mcp != "" }
+
+// via is an audit row's detail naming the MCP token a write came through
+// ("" for the owner app's).
+func (r *OwnerRepo) via() string {
+	if r.mcp == "" {
+		return ""
+	}
+	return `{"via":"mcp","token":` + jsonString(r.mcp) + `}`
+}
+
+// mayWrite is the gate of a write an MCP token may make (Send, Share): a
+// session repository passes as before; an MCP one only while its token is
+// unrevoked, checked inside q (the write's own transaction), so a write
+// that raced Revoke either committed first or finds the token gone; a
+// ForSubject repository never (ErrNoSession).
+func (r *OwnerRepo) mayWrite(ctx context.Context, q interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}) error {
+	if r.mcp == "" {
+		if r.session == "" {
+			return ErrNoSession
+		}
+		return nil
+	}
+	var n int
+	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM mcp_tokens WHERE id = ? AND subject = ? AND revoked_at IS NULL`, r.mcp, r.subject).Scan(&n); err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNoSession
+	}
+	return nil
 }
 
 // ForSession is the repository of a live owner session: what the server

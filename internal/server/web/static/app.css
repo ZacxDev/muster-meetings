@@ -272,3 +272,7 @@ h2 { font-size: 1rem; font-weight: 600; margin: 0; }
 .notes-settings { padding: .75rem 1rem; margin: 0 0 1rem; display: flex; flex-direction: column; gap: .5rem; }
 .notes-settings h2 { display: flex; align-items: center; gap: .375rem; }
 .notes-settings .mu-icon { width: 1.125rem; height: 1.125rem; color: rgb(var(--mu-accent)); }
+.notes-settings > .mu-btn { align-self: flex-start; }
+.mcp-tokens { list-style: none; margin: 0; padding: 0; display: grid; gap: .25rem; }
+.mcp-token { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
+.mcp-token .meta { color: rgb(var(--mu-muted)); font-size: .8125rem; }

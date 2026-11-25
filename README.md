@@ -795,6 +795,85 @@ shows both with documentation addresses.
 call, no email, every new route a 404. Migration 7 is one-way like the
 others: never run an older image on the database.
 
+### Using Meetings from Claude Code (MCP)
+
+The owner can do everything Meetings does after a call from their **own**
+Claude Code session: read meetings, transcripts and the time-aligned
+timeline, look at frames of a shared screen, set the action items
+themselves (their Claude reads the transcript), edit the notes emails and
+send them. Meetings serves its own MCP endpoint (Streamable HTTP,
+stateless JSON, no event stream) at `POST <public URL>/mcp`; nothing
+changes in muster.
+
+**Adding it.** In Meetings, the list's **Use Meetings from Claude Code**
+section: **Create token** shows, once, the command to run in a terminal:
+
+```
+claude mcp add --transport http meetings https://meet-<x>.<domain>/mcp --header "Authorization: Bearer mmc_…"
+```
+
+**The token.** `mmc_` and 43 characters, stored only as its SHA-256 and
+shown once. It does not expire; the same section lists your tokens (when
+each was made and last used, never the token) and **Revoke** turns one off
+at once. muster ending the app for you (Hide, disabled, signed out
+everywhere) or the app being uninstalled revokes your tokens too: holding a
+token makes you one of the people the plugin asks muster about every
+minute. A missing, unknown or revoked token is one `401` with no detail;
+after 20 failures from one address in 10 minutes that address gets `429`.
+An owner session (`mmo_`) and an agent read token (`mmr_`) do not open
+`/mcp`, and an `mmc_` token opens no owner-app route. A browser page on
+another origin is refused (`403`). It acts as you and only you: every tool
+reads your meetings alone, and another person's meeting is the same "no
+such meeting" as one that does not exist. It cannot make a meeting, change
+your notes address or settings, delete a recording, or mint tokens.
+
+**The tools.** Each one is a thin adapter over the owner app's own handler
+for the same action, run with your repository, so it obeys the same rules.
+Which are listed depends on what the plugin has configured, as the routes
+do:
+
+| tool | does | needs |
+|---|---|---|
+| `meetings_list {limit?, before?}` | your meetings, newest first: id, title, times, state, AI on, people who joined, has a recording, has notes; page with `before` = the last answer's `next` | |
+| `meeting_get {id}` | the meeting, its guest link while open, everyone who joined or knocked (and a card guest's address while it is kept), the recording's parts and purge time, the runs and which is current, the drafts by state and your notes address | |
+| `meeting_timeline {id}` | the time-aligned bundle (`GET …/timeline`): every segment with its speaker, times and place in the recording, the screen shares, the frames' times, and the current run's items and frame notes | |
+| `meeting_transcript {id, format: txt\|vtt}` | the transcript as text or WebVTT | |
+| `meeting_frame {id, at_ms}` | one frame of the recording at that time, as an image | a bucket (and ffmpeg) |
+| `meeting_recording_link {id, replace?}` | Share recording: a no-login link, made when there is none; a live one was shown once, so `replace: true` makes a new one and turns the old one off (links in notes already sent keep working) | a bucket |
+| `meeting_items_set {id, items: [{task, owner?, due?, segment_ids?}], label?}` | **your** action items: a new current run recorded as made by `"mcp"` (or `label`), the earlier runs kept, and every unsent draft drawn again from it exactly as a reprocess does (a recipient already sent to is left alone). The model path's guards run on them, and the whole set is refused if any item fails one: an owner must be `""` or a speaker (or a name said in a line it cites), every cited segment a line of this meeting, no two items the same. Only once the meeting has ended | a model |
+| `meeting_reprocess {id, items_model?, items_provider_prefs?, vision_model?, vision_provider_prefs?}` | Run again | a model |
+| `meeting_run_set_current {id, run_id}` | make an earlier finished run current again (revert) | a model |
+| `meeting_drafts_list {id}` | each recipient's email as they will read it: draft id, name, address, state, subject and text, their own items and everyone else's, the video link, the attachments | a mail server |
+| `meeting_draft_update {id, draft_id, add_items?, remove_item_ids?, removed?, email?}` | Add item, remove an item, Don't send (or back), a guest's address | a mail server |
+| `meeting_drafts_send {id, draft_ids?}` | **Send notes**: every unsent draft, or those | a mail server |
+| `meeting_draft_retry {id, draft_id}` | Try again on a failed (or "may have been sent") draft | a mail server |
+
+`meeting_run_set_current` is the one tool beyond the first list: the owner
+app's revert would otherwise be unreachable.
+
+**AI off.** A meeting whose AI action items were off is never analysed:
+`meeting_reprocess` refuses it, as Run again does. `meeting_items_set` IS
+allowed on it: those items are the owner's own notes, and the plugin sends
+nothing of the meeting to an AI service. Reading such a meeting through MCP
+puts its transcript into **your** Claude session, exactly as downloading the
+transcript and pasting it would; that is your choice to make, not the
+plugin's.
+
+**Sending.** `meeting_drafts_send` sends real email at once, on the tool
+call, with the same gate as **Send notes**: refused until your notes address
+is confirmed in Meetings settings (confirming it is in the owner app only).
+Your Claude asking to send is your approval: there is no second prompt in
+Meetings, so let it send only when you mean it. The audit row says the send
+came through MCP (and which token), and so does the log line.
+
+**What is logged.** One line per tool call: the tool's name, the meeting id,
+the outcome and the duration (`mcp: tool meeting_drafts_send meeting
+<id>: ok (send via mcp: 2 queued) in 12ms`). Never an argument, a result,
+transcript text, an item, an address or the token.
+
+**Rolling back.** Revoke every token; migration 8 (the `mcp_tokens` table)
+is one-way like the others.
+
 ### Capacity and limits
 
 - **About 100 concurrent participants per LiveKit pod.** Each relayed
@@ -912,6 +991,15 @@ With a mail server configured too:
 | `POST /api/meetings/{id}/drafts/{did}/retry` | send a failed (or "may have been sent") draft again |
 | `GET`/`PUT /api/settings/email` | the owner's notes address; `PUT {"email"}` mails the confirmation link (`202`), at most 5 an hour |
 | `GET`/`POST /e/{token}` | the confirmation page (GET changes nothing) and its button; an unknown, used or expired link is one `404` |
+
+Always ([Using Meetings from Claude Code (MCP)](#using-meetings-from-claude-code-mcp)):
+
+| route | does |
+|---|---|
+| `POST /mcp` | with `Bearer mmc_…`: MCP over JSON-RPC 2.0 (`initialize`, `notifications/*`, `ping`, `tools/list`, `tools/call`); `401` for anything else, `429` past the failure limit, `GET` `405` |
+| `GET /api/settings/mcp` | owner session: `{"tokens": [{"id", "created_at", "last_used_at"}], "url"}` (never a token) |
+| `POST /api/settings/mcp` | owner session: `201 {"token", "id", "created_at", "url", "command"}`, shown once; `409` past 10 live tokens |
+| `DELETE /api/settings/mcp/{tid}` | owner session: revoke one; `404` for another person's or an unknown one |
 
 **The link** is `https://meet-<x>.<domain>/j/<code>`. The code is
 HMAC-SHA256 under `MEETINGS_LINK_KEY` of the meeting's id, cut to 128 bits
@@ -1211,7 +1299,8 @@ made (action items with their cited line ids, frame notes),
 and with a mail server configured the owner's notes address (confirmed, and
 one waiting for its link, whose token is stored only as SHA-256), each
 draft email (the recipient's name, the items as the owner left them, its
-state) and, 🔴 **each card guest's email address**: kept for that meeting's
+state), the owner's MCP tokens (SHA-256 only, with when each was made, last
+used and revoked) and, 🔴 **each card guest's email address**: kept for that meeting's
 notes (only when its AI action items were on and a mail server is
 configured; the card says so), and dropped when their notes are sent, for
 every meeting 30 days after it ended whether or not they were (an hourly
@@ -1551,6 +1640,7 @@ phase 4b.
 | `internal/timeline` | meeting time ↔ recording part and offset |
 | `internal/frames` | frame sampling with ffmpeg through a loopback range proxy to the store; its fixtures in `testdata/` |
 | `internal/server` | the HTTP routes, headers, the webhook and reconcile loop, and the pages (`web/`; LiveKit's browser client vendored in `web/static/vendor/`, by `scripts/vendor-livekit-client.sh`) |
+| `internal/server/mcp.go`, `mcp_tools.go` | the MCP server for the owner's Claude Code (`POST /mcp`, the token settings) and its tools, adapters over the owner app's handlers |
 | `Dockerfile`, `.github/workflows/image.yml` | the image and its GHCR publish |
 | `deploy/kubernetes`, `deploy/example-overlay` | the kustomize base (the plugin, LiveKit, Services, NetworkPolicies) and an example tenant overlay |
 | `compose.meetings.yml` | the fragment for muster's Compose stack |

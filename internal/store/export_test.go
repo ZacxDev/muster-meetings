@@ -1,6 +1,9 @@
 package store
 
-import "fmt"
+import (
+	"database/sql"
+	"fmt"
+)
 
 // Test-only hooks, visible to store_test alone.
 
@@ -54,3 +57,6 @@ func (s *Store) DraftStatesForTest(meetingID string) map[string][]string {
 	}
 	return out
 }
+
+// QueryRowForTest runs one query on the database.
+func (s *Store) QueryRowForTest(q string, args ...any) *sql.Row { return s.db.QueryRow(q, args...) }

@@ -374,6 +374,54 @@
       .then(function () { b.disabled = false; });
   });
 
+  // ---- Use Meetings from Claude Code: the owner's MCP tokens ----
+  //
+  // Create token answers the token ONCE, inside the command to paste; the
+  // list shows each token's dates only, never the token.
+  function renderMCP(ts) {
+    var ul = $('mcp-tokens');
+    ul.textContent = '';
+    ts.forEach(function (t) {
+      var li = document.createElement('li');
+      li.className = 'mcp-token';
+      li.setAttribute('data-token', t.id);
+      var meta = document.createElement('span');
+      meta.className = 'meta';
+      meta.textContent = 'Created ' + when(t.created_at) + ' · ' + (t.last_used_at ? 'last used ' + when(t.last_used_at) : 'not used yet');
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'mu-btn mu-btn--ghost mu-btn--sm mcp-revoke';
+      b.textContent = 'Revoke';
+      b.addEventListener('click', function () {
+        b.disabled = true;
+        api('DELETE', '/api/settings/mcp/' + encodeURIComponent(t.id)).then(function () {
+          UI.toast('The token was revoked.', { kind: 'success', timeout: 3000 });
+          loadMCP();
+        }).catch(function (e) { b.disabled = false; if (token) say('Could not revoke the token: ' + e.message); });
+      });
+      li.appendChild(meta); li.appendChild(b);
+      ul.appendChild(li);
+    });
+  }
+  function loadMCP() {
+    return api('GET', '/api/settings/mcp').then(function (b) {
+      $('mcp-settings').hidden = false;
+      renderMCP(b.tokens || []);
+    });
+  }
+  loadMCP().catch(function () { /* an older server: the section stays hidden */ });
+  $('mcp-create').addEventListener('click', function () {
+    var b = this;
+    b.disabled = true;
+    api('POST', '/api/settings/mcp').then(function (r) {
+      $('mcp-command').value = r.command;
+      $('mcp-out').hidden = false;
+      loadMCP();
+    }).catch(function (e) { if (token) say('Could not create a token: ' + e.message); })
+      .then(function () { b.disabled = false; });
+  });
+  $('mcp-copy').addEventListener('click', function () { copyText($('mcp-command').value, $('mcp-command'), 'Command copied.'); });
+
   // ---- the archive's notes: action items, screen notes, runs,
   // and the drafts of the email (only with a model configured) ----
   var notes = (function () {

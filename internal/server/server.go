@@ -5,6 +5,7 @@
 //	GET  /api/meetings          the owner's meetings, newest first, paged
 //	POST /api/meetings          New meeting: answers {"id", "join_url", "meeting"}
 //	GET  /api/meetings/{id}     one meeting, and its link while it is open
+//	POST /mcp                   the owner's own Claude Code session (mcp.go), for Bearer mmc_…
 //
 // Phase 2b adds the call (calls.go), the guest page and lobby (guest.go), and
 // on the internal listener LiveKit's webhook (machine.go).
@@ -206,6 +207,8 @@ type Server struct {
 	// Config.AI; notes the mail side's (notes.go), nil without Config.Mail.
 	ai    *aiSide
 	notes *notesSide
+	// mcpFails counts failed authentications at /mcp per address (mcp.go).
+	mcpFails *lobby.Limiter
 }
 
 // New builds the handler.
@@ -239,6 +242,7 @@ func New(cfg Config, st *store.Store, app *owners.App) *Server {
 	}
 	s := &Server{cfg: cfg, store: st, app: app, mux: http.NewServeMux(), hub: lobby.NewHub(), limiter: lobby.NewLimiter(),
 		rtcOrigins: RTCOrigins(cfg.LiveKitURL), streams: newStreamReg(), tr: newTranscriber(), rec: newRecorder(), mediaKey: st.MediaKey()}
+	s.mcpFails = newMCPLimiter()
 	s.bg, s.bgStop = context.WithCancel(context.Background())
 	s.kit = newKitProxy(cfg.KitUpstream, cfg.KitTimeout, cfg.KitTTL, cfg.KitRetry, cfg.Now)
 	s.knocker = lobby.NewKnocker(app.Client, s.hub, st.LobbyCount, cfg.Log, cfg.Now)
@@ -290,6 +294,9 @@ func New(cfg Config, st *store.Store, app *owners.App) *Server {
 			s.notesRoutes()
 		}
 	}
+	// The MCP door and its token settings (mcp.go): always; each tool that
+	// needs a feature is listed only with it (mcp_tools.go).
+	s.mcpRoutes()
 	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
 	})

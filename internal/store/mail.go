@@ -176,7 +176,7 @@ func redraft(ctx context.Context, tx *sql.Tx, meetingID string, runID int64, now
 		if sent[r.key] {
 			continue
 		}
-		state, its, changed, err := carry(ctx, tx, meetingID, r.key, items)
+		state, its, changed, kept, err := carry(ctx, tx, meetingID, r.key, items)
 		if err != nil {
 			return RedraftResult{}, err
 		}
@@ -187,6 +187,11 @@ func redraft(ctx context.Context, tx *sql.Tx, meetingID string, runID int64, now
 		var email any
 		if r.key != RecipientOwner {
 			email = r.email
+			// 🔴 An address the owner corrected on the draft stays: the
+			// card's is not put back.
+			if kept != "" {
+				email = kept
+			}
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO mail_drafts (id, meeting_id, run_id, recipient, name, email, items, state, changed, created_at, updated_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, random(DraftIDBytes), meetingID, runID, r.key, r.name, email, its, state, changed, ms(now), ms(now)); err != nil {
@@ -203,17 +208,19 @@ func redraft(ctx context.Context, tx *sql.Tx, meetingID string, runID int64, now
 // apply. Edits apply item by item to the new run's items with the same text
 // as an item the owner edited; when an edited item is gone, or the owner
 // added or removed items and the run's items differ, the new run's items
-// are taken as they are and changed says so (the archive shows it).
-func carry(ctx context.Context, tx *sql.Tx, meetingID, rcpt, runItems string) (state, items string, changed bool, err error) {
+// are taken as they are and changed says so (the archive shows it). email
+// is the unsent draft's address (a guest's, as the owner may have corrected
+// it; "" for none), which the new draft keeps.
+func carry(ctx context.Context, tx *sql.Tx, meetingID, rcpt, runItems string) (state, items string, changed bool, email string, err error) {
 	var prevItems, prevState string
 	var prevRun int64
-	err = tx.QueryRowContext(ctx, `SELECT items, state, run_id FROM mail_drafts WHERE meeting_id = ? AND recipient = ? AND state IN ('draft', 'removed', 'failed')
-		ORDER BY rowid DESC LIMIT 1`, meetingID, rcpt).Scan(&prevItems, &prevState, &prevRun)
+	err = tx.QueryRowContext(ctx, `SELECT items, state, run_id, coalesce(email, '') FROM mail_drafts WHERE meeting_id = ? AND recipient = ? AND state IN ('draft', 'removed', 'failed')
+		ORDER BY rowid DESC LIMIT 1`, meetingID, rcpt).Scan(&prevItems, &prevState, &prevRun, &email)
 	if errors.Is(err, sql.ErrNoRows) {
-		return DraftDraft, runItems, false, nil
+		return DraftDraft, runItems, false, "", nil
 	}
 	if err != nil {
-		return "", "", false, err
+		return "", "", false, "", err
 	}
 	state = DraftDraft
 	if prevState == DraftRemoved {
@@ -221,20 +228,20 @@ func carry(ctx context.Context, tx *sql.Tx, meetingID, rcpt, runItems string) (s
 	}
 	orig, err := runDraftItems(ctx, tx, prevRun)
 	if err != nil {
-		return "", "", false, err
+		return "", "", false, "", err
 	}
 	if prevItems == orig {
-		return state, runItems, false, nil // no edit to carry
+		return state, runItems, false, email, nil // no edit to carry
 	}
 	if runItems == orig {
-		return state, prevItems, false, nil // the same items: the edits stand as they are
+		return state, prevItems, false, email, nil // the same items: the edits stand as they are
 	}
 	var o, p, n []DraftItem
 	_ = json.Unmarshal([]byte(orig), &o)
 	_ = json.Unmarshal([]byte(prevItems), &p)
 	_ = json.Unmarshal([]byte(runItems), &n)
 	if len(o) != len(p) {
-		return state, runItems, true, nil
+		return state, runItems, true, email, nil
 	}
 	edited := map[string]DraftItem{}
 	for i := range o {
@@ -255,7 +262,7 @@ func carry(ctx context.Context, tx *sql.Tx, meetingID, rcpt, runItems string) (s
 		}
 	}
 	b, _ := json.Marshal(n)
-	return state, string(b), changed, nil
+	return state, string(b), changed, email, nil
 }
 
 // DraftFor makes the draft of one guest whose card arrived after the
@@ -354,6 +361,9 @@ func (r *OwnerRepo) EditDraft(ctx context.Context, meetingID, id string, items *
 		return Draft{}, err
 	}
 	defer tx.Rollback()
+	if err := r.mayWrite(ctx, tx); err != nil {
+		return Draft{}, err
+	}
 	d, err := scanDraft(tx.QueryRowContext(ctx, `SELECT `+draftCols+` FROM mail_drafts d JOIN meetings m ON m.id = d.meeting_id
 		WHERE d.id = ? AND d.meeting_id = ? AND m.subject = ?`, id, meetingID, r.subject))
 	if err != nil {
@@ -406,7 +416,7 @@ var ErrNoOwnerEmail = errors.New("the owner's address is not confirmed")
 // a draft. share, when not nil, is called in the transaction for each
 // queued draft (the notes' video link). It answers how many were queued.
 func (r *OwnerRepo) Approve(ctx context.Context, meetingID string, ids []string, now time.Time, share func(tx *sql.Tx, d Draft) error) (int, error) {
-	if r.session == "" {
+	if r.session == "" && r.mcp == "" {
 		return 0, ErrNoSession
 	}
 	if _, err := r.Meeting(ctx, meetingID); err != nil {
@@ -417,6 +427,9 @@ func (r *OwnerRepo) Approve(ctx context.Context, meetingID string, ids []string,
 		return 0, err
 	}
 	defer tx.Rollback()
+	if err := r.mayWrite(ctx, tx); err != nil {
+		return 0, err
+	}
 	var email sql.NullString
 	if err := tx.QueryRowContext(ctx, `SELECT email FROM owners WHERE subject = ?`, r.subject).Scan(&email); err != nil {
 		return 0, err
@@ -459,13 +472,21 @@ func (r *OwnerRepo) Approve(ctx context.Context, meetingID string, ids []string,
 		}
 		n++
 	}
-	if err := audit(ctx, tx, now, r.subject, meetingID, "notes.approved", `{"queued":`+itoa(n)+`}`); err != nil {
+	// The audit says which door approved it: the owner app, or the owner's
+	// MCP token (its id, the handle the settings list shows).
+	detail := `{"queued":` + itoa(n) + `}`
+	if r.mcp != "" {
+		detail = `{"queued":` + itoa(n) + `,"via":"mcp","token":` + jsonString(r.mcp) + `}`
+	}
+	if err := audit(ctx, tx, now, r.subject, meetingID, "notes.approved", detail); err != nil {
 		return 0, err
 	}
 	return n, tx.Commit()
 }
 
 func itoa(n int) string { b, _ := json.Marshal(n); return string(b) }
+
+func jsonString(s string) string { b, _ := json.Marshal(s); return string(b) }
 
 // RetryDraft queues a failed draft (or one of unknown outcome, which the
 // owner was told may have arrived) again.
@@ -476,7 +497,15 @@ func (r *OwnerRepo) RetryDraft(ctx context.Context, meetingID, id string, now ti
 	if _, err := r.Meeting(ctx, meetingID); err != nil {
 		return err
 	}
-	res, err := r.s.db.ExecContext(ctx, `UPDATE mail_drafts SET state = 'queued', attempts = 0, next_at = ?, error = '', updated_at = ?
+	tx, err := r.s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := r.mayWrite(ctx, tx); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE mail_drafts SET state = 'queued', attempts = 0, next_at = ?, error = '', updated_at = ?
 		WHERE id = ? AND meeting_id = ? AND state IN ('failed', 'unknown') AND meeting_id IN (SELECT id FROM meetings WHERE subject = ?)`,
 		ms(now), ms(now), id, meetingID, r.subject)
 	if err != nil {
@@ -485,7 +514,7 @@ func (r *OwnerRepo) RetryDraft(ctx context.Context, meetingID, id string, now ti
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrDraftLocked
 	}
-	return nil
+	return tx.Commit()
 }
 
 // OutMail is a queued draft with what its message needs.

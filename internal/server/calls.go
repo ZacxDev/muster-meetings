@@ -193,12 +193,24 @@ func (s *Server) handleMove(ev store.Event) ownerHandler {
 	}
 }
 
+// EndTeardownTimeout bounds End's teardown after the meeting has ended: the
+// egresses stopped and the room deleted. What it does not finish, the
+// reconcile loop does.
+const EndTeardownTimeout = 20 * time.Second
+
 // handleEnd is End meeting: the meeting ends and its link dies (410), every
 // waiting stream is told "ended", and the room is deleted, which disconnects
 // everyone. Every token for the room is dead from then on: none of its
 // identities passes MayBeInRoom, so a client that reconnects with a token it
 // still holds is removed by the participant_joined check, and a room LiveKit
 // re-creates for it is deleted by the reconcile loop.
+//
+// 🔴 Once repo.End has committed, the meeting HAS ended, so nothing after it
+// runs on the request's context: a client (or a proxy in front of it) that
+// goes away while the egresses and the room are torn down cancels that
+// context, which used to fail the teardown's LiveKit calls and the final read
+// and answer 500 for a meeting that had ended. The teardown runs on a context
+// detached from the request and bounded by EndTeardownTimeout.
 func (s *Server) handleEnd(w http.ResponseWriter, r *http.Request, repo *store.OwnerRepo) {
 	id := r.PathValue("id")
 	room, err := repo.End(r.Context(), id, s.cfg.Now())
@@ -206,16 +218,20 @@ func (s *Server) handleEnd(w http.ResponseWriter, r *http.Request, repo *store.O
 		s.meetingErr(w, err)
 		return
 	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), EndTeardownTimeout)
+	defer cancel()
 	s.hub.Changed(id)
 	s.knocker.Kick(id)
-	s.stopTranscription(r.Context(), id)
-	s.stopRecording(r.Context(), id, nil)
+	s.stopTranscription(ctx, id)
+	s.stopRecording(ctx, id, nil)
 	// The post-call pass (only with the analysis configured).
 	s.kickPost()
-	if err := s.cfg.LiveKit.DeleteRoom(r.Context(), room); err != nil {
+	if err := s.cfg.LiveKit.DeleteRoom(ctx, room); err != nil {
 		s.cfg.Log.Printf("end: LiveKit: %v (the reconcile loop retries)", err)
 	}
-	m, err := repo.Meeting(r.Context(), id)
+	// The answer is read on its own detached context: a teardown that used
+	// all of its time does not turn an ended meeting into a 500.
+	m, err := repo.Meeting(context.WithoutCancel(r.Context()), id)
 	if err != nil {
 		s.meetingErr(w, err)
 		return

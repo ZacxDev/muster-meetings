@@ -276,3 +276,68 @@ func TestSendClassifiesFailures(t *testing.T) {
 		})
 	}
 }
+
+// intro is the email's opening sentence in its plain text (the third line)
+// and its HTML (the paragraph after the greeting, tags removed, entities
+// decoded), each with its whitespace normalised.
+func intro(t *testing.T, text, html string) (fromText, fromHTML string) {
+	t.Helper()
+	lines := strings.Split(text, "\n")
+	if len(lines) < 3 {
+		t.Fatalf("text has %d lines:\n%s", len(lines), text)
+	}
+	const open = `<p style="margin:0 0 20px;">`
+	i := strings.Index(html, open)
+	if i < 0 {
+		t.Fatalf("no opening paragraph in the HTML:\n%s", html)
+	}
+	p := html[i+len(open):]
+	p = p[:strings.Index(p, "</p>")]
+	p = regexp.MustCompile(`<[^>]*>`).ReplaceAllString(p, "")
+	p = strings.NewReplacer("&#34;", `"`, "&quot;", `"`, "&#39;", "'", "&amp;", "&").Replace(p)
+	return strings.Join(strings.Fields(lines[2]), " "), strings.Join(strings.Fields(p), " ")
+}
+
+// 🔴 Regression: an untitled meeting's email read "Thanks for joining the
+// meeting on <date> on <date>." (the title's fallback held the
+// date, then " on <date>" was added). The date is said once, titled or not,
+// to a guest and to the owner, in both parts; the whole sentence is pinned.
+func TestRenderSaysTheMeetingsDateOnce(t *testing.T) {
+	cases := []struct {
+		name, title    string
+		owner          bool
+		subject        string
+		text, htmlText string
+	}{
+		{"guest, titled", "Q3 planning", false, "Notes: Q3 planning",
+			`Thanks for joining "Q3 planning" on 24 Nov 2026. Here are the meeting notes from Ada L..`,
+			`Thanks for joining Q3 planning on 24 Nov 2026. Here are the meeting notes from Ada L..`},
+		{"guest, untitled", "", false, "Notes: the meeting on 24 Nov 2026",
+			`Thanks for joining the meeting on 24 Nov 2026. Here are the meeting notes from Ada L..`,
+			`Thanks for joining the meeting on 24 Nov 2026. Here are the meeting notes from Ada L..`},
+		{"owner, titled", "Roadmap review", true, "Notes: Roadmap review",
+			`Here are the notes from "Roadmap review" on 24 Nov 2026, as you sent them to everyone.`,
+			`Here are the notes from Roadmap review on 24 Nov 2026, as you sent them to everyone.`},
+		{"owner, untitled", "  ", true, "Notes: the meeting on 24 Nov 2026",
+			`Here are the notes from the meeting on 24 Nov 2026, as you sent them to everyone.`,
+			`Here are the notes from the meeting on 24 Nov 2026, as you sent them to everyone.`},
+	}
+	for _, c := range cases {
+		n := fixtureNotes()
+		n.Title, n.ForOwner = c.title, c.owner
+		subj, text, html := mail.Render(n)
+		gotText, gotHTML := intro(t, text, html)
+		if subj != c.subject {
+			t.Errorf("%s: subject %q, want %q", c.name, subj, c.subject)
+		}
+		if gotText != c.text {
+			t.Errorf("%s: text says\n  %s\nwant\n  %s", c.name, gotText, c.text)
+		}
+		if gotHTML != c.htmlText {
+			t.Errorf("%s: HTML says\n  %s\nwant\n  %s", c.name, gotHTML, c.htmlText)
+		}
+		if want := "<title>" + c.subject + "</title>"; !strings.Contains(html, want) {
+			t.Errorf("%s: the HTML's title is not %s", c.name, want)
+		}
+	}
+}

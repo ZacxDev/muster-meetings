@@ -145,9 +145,6 @@ func (s *Server) notesOf(ctx context.Context, repo *store.OwnerRepo, d store.Dra
 	if n.OwnerName == "" {
 		n.OwnerName = CardHost
 	}
-	if n.Title == "" {
-		n.Title = "the meeting on " + n.When
-	}
 	for _, it := range d.Items {
 		n.Items = append(n.Items, mail.NoteItem{Text: it.Text, Assignee: it.Assignee, Due: it.Due})
 	}

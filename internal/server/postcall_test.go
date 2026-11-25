@@ -469,11 +469,15 @@ func TestSendMailsEachRecipientTheirNotesExactly(t *testing.T) {
 		}
 	}
 	ds := e.drafts(c)
+	// 🔴 The meeting is untitled: its date is said once (it used to read
+	// "the meeting on 14 Mar 2031 on 14 Mar 2031").
 	for _, want := range []struct {
-		to, name, yours, others, id string
+		to, name, yours, others, id, intro string
 	}{
-		{adaAddr, "Ada L.", "Book the caterer", "Send the venue shortlist", ds[0].ID},
-		{graceAddr, grace, "Send the venue shortlist", "Book the caterer", ds[1].ID},
+		{adaAddr, "Ada L.", "Book the caterer", "Send the venue shortlist", ds[0].ID,
+			"Here are the notes from the meeting on 14 Mar 2031, as you sent them to everyone."},
+		{graceAddr, grace, "Send the venue shortlist", "Book the caterer", ds[1].ID,
+			"Thanks for joining the meeting on 14 Mar 2031. Here are the meeting notes from Ada L.."},
 	} {
 		m, ok := byTo[want.to]
 		if !ok {
@@ -498,6 +502,12 @@ func TestSendMailsEachRecipientTheirNotesExactly(t *testing.T) {
 			t.Errorf("shape to %s: %v", want.to, shape)
 		}
 		html := ps[1].body
+		if lines := strings.Split(ps[0].body, "\r\n"); len(lines) < 3 || lines[2] != want.intro {
+			t.Errorf("to %s the text part opens:\n%q\nwant %q", want.to, ps[0].body, want.intro)
+		}
+		if p := regexp.MustCompile(`<[^>]*>`).ReplaceAllString(cut(html, `<p style="margin:0 0 20px;">`, "</p>"), ""); strings.Join(strings.Fields(p), " ") != want.intro {
+			t.Errorf("to %s the HTML part opens %q, want %q", want.to, p, want.intro)
+		}
 		yours, others := cut(html, `id="yours"`, "</table>"), cut(html, `id="others"`, "</div>")
 		if !strings.Contains(yours, want.yours) || strings.Contains(yours, want.others) || !strings.Contains(yours, "border-left:4px solid #2f6fdf") {
 			t.Errorf("to %s the YOUR section is not their own items alone:\n%s", want.to, yours)

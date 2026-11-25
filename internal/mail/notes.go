@@ -20,7 +20,7 @@ type NoteItem struct {
 // transcript attached and the video as a link).
 type Notes struct {
 	OwnerName string
-	Title     string // the meeting's title, or its date
+	Title     string // the meeting's title, "" for none
 	When      string // e.g. 24 Nov 2026
 	// RecipientName is the name the recipient spoke under (their knock
 	// name, or the owner's display name): the YOUR section is the items
@@ -100,6 +100,10 @@ func Split(items []NoteItem, recipient string, names []string) (yours, others []
 
 type notesView struct {
 	Notes
+	// Subject is the email's subject; Label what it calls the meeting:
+	// its title, or "the meeting on <When>" for an untitled one.
+	Subject  string
+	Label    string
 	Greeting string
 	Yours    []NoteItem
 	Others   []NoteItem
@@ -113,7 +117,12 @@ func Render(n Notes) (subject, text, html string) {
 	if strings.TrimSpace(n.RecipientName) == "" {
 		v.Greeting = "Hi,"
 	}
-	subject = "Notes: " + n.Title
+	v.Label = n.Title
+	if strings.TrimSpace(n.Title) == "" {
+		v.Title, v.Label = "", "the meeting on "+n.When
+	}
+	subject = "Notes: " + v.Label
+	v.Subject = subject
 	var t, h bytes.Buffer
 	if err := textNotes.Execute(&t, v); err != nil {
 		panic(err) // the templates are constants: TestRender* runs them
@@ -148,7 +157,7 @@ var funcs = map[string]any{
 
 var textNotes = texttemplate.Must(texttemplate.New("t").Funcs(funcs).Parse(`{{.Greeting}}
 
-{{if .ForOwner}}Here are the notes from "{{.Title}}" on {{.When}}, as you sent them to everyone.{{else}}Thanks for joining "{{.Title}}" on {{.When}}. Here are the meeting notes from {{.OwnerName}}.{{end}}
+{{if .ForOwner}}Here are the notes from {{template "which" .}}, as you sent them to everyone.{{else}}Thanks for joining {{template "which" .}}. Here are the meeting notes from {{.OwnerName}}.{{end}}
 
 YOUR ACTION ITEMS
 {{range .Yours}}  * {{.Text}}{{due .Due}}
@@ -164,15 +173,15 @@ Watch the recording{{if .VideoUntil}} ({{.VideoUntil}}){{end}}:
 
 --
 Sent by {{.OwnerName}} via Meetings. Reply to this email to reach {{.OwnerName}}.
-`))
+{{define "which"}}{{if .Title}}"{{.Title}}" on {{.When}}{{else}}{{.Label}}{{end}}{{end}}`))
 
 var htmlNotes = htmltemplate.Must(htmltemplate.New("h").Funcs(funcs).Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark"><title>Notes: {{.Title}}</title></head>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark"><title>{{.Subject}}</title></head>
 <body style="margin:0;padding:0;background-color:#f3f4f6;">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#f3f4f6;"><tr><td align="center" style="padding:24px 12px;">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;background-color:#ffffff;border:1px solid #e1e4e8;border-radius:12px;"><tr><td style="padding:24px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:15px;line-height:1.5;color:#1f2328;">
 <p style="margin:0 0 12px;">{{.Greeting}}</p>
-<p style="margin:0 0 20px;">{{if .ForOwner}}Here are the notes from <strong>{{.Title}}</strong> on {{.When}}, as you sent them to everyone.{{else}}Thanks for joining <strong>{{.Title}}</strong> on {{.When}}. Here are the meeting notes from {{.OwnerName}}.{{end}}</p>
+<p style="margin:0 0 20px;">{{if .ForOwner}}Here are the notes from {{template "which" .}}, as you sent them to everyone.{{else}}Thanks for joining {{template "which" .}}. Here are the meeting notes from {{.OwnerName}}.{{end}}</p>
 <table role="presentation" id="yours" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#eaf1fe;border-left:4px solid #2f6fdf;border-radius:8px;"><tr><td style="padding:14px 16px;">
 <p style="margin:0 0 8px;font-size:13px;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;color:#1f55b8;">&#10003;&nbsp; Your action items</p>
 {{if .Yours}}<ul style="margin:0;padding-left:20px;color:#1f2328;">{{range .Yours}}<li style="margin:4px 0;font-weight:600;">{{.Text}}{{if .Due}}<span style="font-weight:400;color:#57606a;">{{due .Due}}</span>{{end}}</li>{{end}}</ul>{{else}}<p style="margin:0;color:#57606a;">You have no action items from this meeting.</p>{{end}}
@@ -188,7 +197,7 @@ var htmlNotes = htmltemplate.Must(htmltemplate.New("h").Funcs(funcs).Parse(`<!do
 </td></tr></table>
 </td></tr></table>
 </body></html>
-`))
+{{define "which"}}{{if .Title}}<strong>{{.Title}}</strong> on {{.When}}{{else}}{{.Label}}{{end}}{{end}}`))
 
 // Confirm is the owner's confirmation email: subject, text, HTML.
 func Confirm(ownerName, url, until string) (subject, text, html string) {

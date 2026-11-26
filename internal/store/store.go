@@ -426,8 +426,9 @@ var migrations = []string{
 		agent_key  TEXT    NOT NULL UNIQUE,
 		name       TEXT    NOT NULL,           -- what the agent called itself: render as text, never logged
 		joined_at  INTEGER NOT NULL,
+		seen_at    INTEGER NOT NULL,           -- its last join or wait: an agent idle too long is taken out
 		left_at    INTEGER,
-		left_why   TEXT    NOT NULL DEFAULT '' CHECK (left_why IN ('', 'left', 'removed'))
+		left_why   TEXT    NOT NULL DEFAULT '' CHECK (left_why IN ('', 'left', 'removed', 'idle'))
 	) STRICT;
 	CREATE UNIQUE INDEX meeting_agents_one ON meeting_agents (meeting_id) WHERE left_at IS NULL;
 	CREATE TABLE agent_asks (

@@ -104,6 +104,7 @@ func (s *Server) handleKnock(w http.ResponseWriter, r *http.Request) {
 			Record      *bool `json:"record"`
 			AI          *bool `json:"ai"`
 			Transcribed *bool `json:"transcribed"`
+			Agent       *bool `json:"agent"`
 		} `json:"notice"`
 	}
 	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 2048))
@@ -131,7 +132,9 @@ func (s *Server) handleKnock(w http.ResponseWriter, r *http.Request) {
 	// 🔴 Whether the meeting is transcribed is part of the notice: a page
 	// that showed another answer (or none: a page from before it was) is
 	// the same 409 as a switch that changed, with the current notice.
-	if in.Notice.Transcribed == nil || *in.Notice.Transcribed != s.Transcribing() {
+	// 🔴 So is whether it may take an AI agent (its clause, with AI on): a
+	// page from before the clause shows none, and knocks again after this.
+	if in.Notice.Transcribed == nil || *in.Notice.Transcribed != s.Transcribing() || in.Notice.Agent == nil || *in.Notice.Agent != s.Transcribing() {
 		writeJSON(w, http.StatusConflict, map[string]any{"error": "The meeting's notice changed. Read it again before you ask to join.",
 			"notice": s.noticeFor(gm.Notice.Record, gm.Notice.AI)})
 		return

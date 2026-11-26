@@ -120,8 +120,9 @@ func TestTheNoticeSaysTranscribedOnlyWithAnEngine(t *testing.T) {
 			t.Fatalf("engine %v: the owner's badge = %q, want %q", on, snap.Notice.Badge, wantBadge)
 		}
 		for _, n := range []map[string]any{
-			{"record": true, "ai": true, "transcribed": !on},
-			{"record": true, "ai": true}, // a page that never said
+			{"record": true, "ai": true, "transcribed": !on, "agent": on},
+			{"record": true, "ai": true},                    // a page that never said
+			{"record": true, "ai": true, "transcribed": on}, // a page from before the agent clause
 		} {
 			resp, raw := e.do("POST", "/j/"+c.Code+"/knock", "", map[string]any{"name": grace, "notice": n}, "X-Forwarded-For", "198.51.100.7")
 			var b knockAns
@@ -131,7 +132,7 @@ func TestTheNoticeSaysTranscribedOnlyWithAnEngine(t *testing.T) {
 			}
 		}
 		if resp, raw := e.do("POST", "/j/"+c.Code+"/knock", "", map[string]any{"name": grace,
-			"notice": map[string]any{"record": true, "ai": true, "transcribed": on}}, "X-Forwarded-For", "198.51.100.7"); resp.StatusCode != 201 {
+			"notice": map[string]any{"record": true, "ai": true, "transcribed": on, "agent": on}}, "X-Forwarded-For", "198.51.100.7"); resp.StatusCode != 201 {
 			t.Fatalf("engine %v: the knock with the current notice = %d %s, want 201", on, resp.StatusCode, raw)
 		}
 	}

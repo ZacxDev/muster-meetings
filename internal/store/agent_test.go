@@ -69,25 +69,32 @@ func texts(segs []store.Segment) []string {
 	return out
 }
 
-// 🔴 One agent per meeting: a second token, or the same token under another
-// name, is refused while the first is in (and told whose place it is); the
-// same token under the same name answers the same agent; once it leaves,
-// another may join.
+// 🔴 One agent per meeting, told apart by its key: while it is in, a join
+// is refused (with nothing of the agent in) from a second token, from the
+// same token under another name, AND from the same token under the same
+// name (a second session sharing the token): only its key resumes it, and
+// only through its own token. Once it leaves, another may join.
 func TestAMeetingTakesOneAgent(t *testing.T) {
 	f := newAgentFixture(t)
-	a, already, err := f.m1.JoinAgent(ctx, f.id, "Builder", t0)
+	a, already, err := f.m1.JoinAgent(ctx, f.id, "Builder", "", t0)
 	if err != nil || already || len(a.Key) != 22 {
 		t.Fatalf("first join = %+v %v %v", a, already, err)
 	}
-	if b, _, err := f.m2.JoinAgent(ctx, f.id, "Reviewer", t0); !errors.Is(err, store.ErrAgentTaken) || b.Name != "Builder" {
-		t.Errorf("a second agent's join = %+v, %v; want ErrAgentTaken naming Builder", b, err)
+	if b, _, err := f.m2.JoinAgent(ctx, f.id, "Reviewer", "", t0); !errors.Is(err, store.ErrAgentTaken) || b != (store.Agent{}) {
+		t.Errorf("a second agent's join = %+v, %v; want ErrAgentTaken and nothing of the agent in", b, err)
 	}
-	if _, _, err := f.m1.JoinAgent(ctx, f.id, "Builder two", t0); !errors.Is(err, store.ErrAgentTaken) {
+	if _, _, err := f.m1.JoinAgent(ctx, f.id, "Builder two", "", t0); !errors.Is(err, store.ErrAgentTaken) {
 		t.Errorf("the same token under another name = %v; want ErrAgentTaken", err)
 	}
-	again, already, err := f.m1.JoinAgent(ctx, f.id, "Builder", t0)
+	if b, _, err := f.m1.JoinAgent(ctx, f.id, "Builder", "", t0); !errors.Is(err, store.ErrAgentTaken) || b.Key != "" {
+		t.Errorf("the same token and name without the key = %+v, %v; want ErrAgentTaken, no key", b, err)
+	}
+	if _, _, err := f.m2.JoinAgent(ctx, f.id, "Builder", a.Key, t0); !errors.Is(err, store.ErrAgentTaken) {
+		t.Errorf("the key through another token = %v; want ErrAgentTaken", err)
+	}
+	again, already, err := f.m1.JoinAgent(ctx, f.id, "Builder", a.Key, t0)
 	if err != nil || !already || again.Key != a.Key {
-		t.Errorf("a retried join = %+v %v %v; want the same agent, already", again, already, err)
+		t.Errorf("a join with the key = %+v %v %v; want the same agent, already", again, already, err)
 	}
 	var n int
 	if err := f.s.QueryRowForTest(`SELECT count(*) FROM meeting_agents`).Scan(&n); err != nil || n != 1 {
@@ -96,11 +103,11 @@ func TestAMeetingTakesOneAgent(t *testing.T) {
 	if err := f.m1.LeaveAgent(ctx, f.id, a.Key, t0); err != nil {
 		t.Fatal(err)
 	}
-	if b, _, err := f.m2.JoinAgent(ctx, f.id, "Reviewer", t0); err != nil || b.Key == a.Key {
+	if b, _, err := f.m2.JoinAgent(ctx, f.id, "Reviewer", "", t0); err != nil || b.Key == a.Key {
 		t.Errorf("a join after the first left = %+v, %v", b, err)
 	}
 	// An owner session has no token to bind.
-	if _, _, err := f.owner.JoinAgent(ctx, f.id, "Builder", t0); !errors.Is(err, store.ErrNoSession) {
+	if _, _, err := f.owner.JoinAgent(ctx, f.id, "Builder", "", t0); !errors.Is(err, store.ErrNoSession) {
 		t.Errorf("an owner session's join = %v; want ErrNoSession", err)
 	}
 }
@@ -110,7 +117,7 @@ func TestAMeetingTakesOneAgent(t *testing.T) {
 // again from the first line.
 func TestAnAskCarriesTheLinesSinceTheAgentsLastAsk(t *testing.T) {
 	f := newAgentFixture(t)
-	a, _, err := f.m1.JoinAgent(ctx, f.id, "Builder", t0)
+	a, _, err := f.m1.JoinAgent(ctx, f.id, "Builder", "", t0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +165,7 @@ func TestAnAskCarriesTheLinesSinceTheAgentsLastAsk(t *testing.T) {
 	if err := f.owner.RemoveAgent(ctx, f.id, t0); err != nil {
 		t.Fatal(err)
 	}
-	b, _, err := f.m2.JoinAgent(ctx, f.id, "Reviewer", t0)
+	b, _, err := f.m2.JoinAgent(ctx, f.id, "Reviewer", "", t0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +184,7 @@ func TestOneAskIsOutstandingAtATime(t *testing.T) {
 	if _, err := f.owner.AskAgent(ctx, f.id, "", t0); !errors.Is(err, store.ErrNoAgent) {
 		t.Errorf("ask with no agent = %v; want ErrNoAgent", err)
 	}
-	a, _, _ := f.m1.JoinAgent(ctx, f.id, "Builder", t0)
+	a, _, _ := f.m1.JoinAgent(ctx, f.id, "Builder", "", t0)
 	if _, _, err := f.m1.NextAsk(ctx, f.id, a.Key, t0); !errors.Is(err, store.ErrNoAsk) {
 		t.Errorf("wait with nothing asked = %v; want ErrNoAsk", err)
 	}
@@ -211,7 +218,7 @@ func TestOneAskIsOutstandingAtATime(t *testing.T) {
 // different reply is ErrAnswered; the same reply again changes nothing.
 func TestAReplyIsBoundToTheOpenAsk(t *testing.T) {
 	f := newAgentFixture(t)
-	a, _, _ := f.m1.JoinAgent(ctx, f.id, "Builder", t0)
+	a, _, _ := f.m1.JoinAgent(ctx, f.id, "Builder", "", t0)
 	k, err := f.owner.AskAgent(ctx, f.id, "Status?", t0)
 	if err != nil {
 		t.Fatal(err)
@@ -245,7 +252,7 @@ func TestAReplyIsBoundToTheOpenAsk(t *testing.T) {
 	if _, _, err := f.m1.AnswerAsk(ctx, f.id, a.Key, k2.ID, "Too late.", t0); !errors.Is(err, store.ErrNoAgent) {
 		t.Errorf("a reply after Remove = %v; want ErrNoAgent", err)
 	}
-	b, _, _ := f.m2.JoinAgent(ctx, f.id, "Reviewer", t0)
+	b, _, _ := f.m2.JoinAgent(ctx, f.id, "Reviewer", "", t0)
 	if _, _, err := f.m2.AnswerAsk(ctx, f.id, b.Key, k2.ID, "Not mine.", t0); !errors.Is(err, store.ErrNoAsk) {
 		t.Errorf("a reply to the removed agent's ask = %v; want ErrNoAsk", err)
 	}
@@ -255,7 +262,7 @@ func TestAReplyIsBoundToTheOpenAsk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := f.m1.JoinAgent(ctx, c2.Meeting.ID, "Builder", t0); err != nil {
+	if _, _, err := f.m1.JoinAgent(ctx, c2.Meeting.ID, "Builder", "", t0); err != nil {
 		t.Fatal(err)
 	}
 	k3, err := f.owner.AskAgent(ctx, c2.Meeting.ID, "", t0)
@@ -274,7 +281,7 @@ func TestAReplyIsBoundToTheOpenAsk(t *testing.T) {
 // the wait, the reply and the leave are ErrNoSession.
 func TestAnAgentsWritesRecheckItsToken(t *testing.T) {
 	f := newAgentFixture(t)
-	a, _, _ := f.m1.JoinAgent(ctx, f.id, "Builder", t0)
+	a, _, _ := f.m1.JoinAgent(ctx, f.id, "Builder", "", t0)
 	k, err := f.owner.AskAgent(ctx, f.id, "", t0)
 	if err != nil {
 		t.Fatal(err)
@@ -282,7 +289,7 @@ func TestAnAgentsWritesRecheckItsToken(t *testing.T) {
 	if err := f.owner.RevokeMCPToken(ctx, f.tid1, t0); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := f.m1.JoinAgent(ctx, f.id, "Builder", t0); !errors.Is(err, store.ErrNoSession) {
+	if _, _, err := f.m1.JoinAgent(ctx, f.id, "Builder", a.Key, t0); !errors.Is(err, store.ErrNoSession) {
 		t.Errorf("join with a revoked token = %v; want ErrNoSession", err)
 	}
 	if _, _, err := f.m1.NextAsk(ctx, f.id, a.Key, t0); !errors.Is(err, store.ErrNoSession) {
@@ -307,11 +314,11 @@ func TestAnAgentNeedsTheAISwitchAndALiveMeeting(t *testing.T) {
 	if _, err := off.owner.SetSwitch(ctx, off.id, store.SwitchAI, false, t0); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := off.m1.JoinAgent(ctx, off.id, "Builder", t0); !errors.Is(err, store.ErrAIOff) {
+	if _, _, err := off.m1.JoinAgent(ctx, off.id, "Builder", "", t0); !errors.Is(err, store.ErrAIOff) {
 		t.Fatalf("join with AI off = %v; want ErrAIOff", err)
 	}
 	f := newAgentFixture(t)
-	a, _, _ := f.m1.JoinAgent(ctx, f.id, "Builder", t0)
+	a, _, _ := f.m1.JoinAgent(ctx, f.id, "Builder", "", t0)
 	f.line(t, 1_000, "Something said.")
 	if _, err := f.owner.AskAgent(ctx, f.id, "", t0); err != nil {
 		t.Fatal(err)
@@ -338,13 +345,72 @@ func TestAnAgentNeedsTheAISwitchAndALiveMeeting(t *testing.T) {
 	if _, err := g.owner.End(ctx, g.id, t0); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := g.m1.JoinAgent(ctx, g.id, "Builder", t0); !errors.Is(err, store.ErrGone) {
+	if _, _, err := g.m1.JoinAgent(ctx, g.id, "Builder", "", t0); !errors.Is(err, store.ErrGone) {
 		t.Errorf("join of an ended meeting = %v; want ErrGone", err)
 	}
 	other := owner(t, g.s, subB, t0)
 	tok, _ := mintMCP(t, other, t0)
 	mt, _ := g.s.LookupMCPToken(ctx, tok, t0)
-	if _, _, err := g.s.ForMCP(mt).JoinAgent(ctx, g.id, "Intruder", t0); !errors.Is(err, store.ErrNotFound) {
+	if _, _, err := g.s.ForMCP(mt).JoinAgent(ctx, g.id, "Intruder", "", t0); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("another owner's join = %v; want ErrNotFound", err)
+	}
+}
+
+// 🔴 An ask cancelled before delivery (the AI switch went off) moves no
+// cursor: the agent's next ask carries the lines it never received, as its
+// first.
+func TestACancelledAskDoesNotMoveTheCursor(t *testing.T) {
+	f := newAgentFixture(t)
+	a, _, _ := f.m1.JoinAgent(ctx, f.id, "Builder", "", t0)
+	f.line(t, 1_000, "Line A.")
+	if _, err := f.owner.AskAgent(ctx, f.id, "", t0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.owner.SetSwitch(ctx, f.id, store.SwitchAI, false, t0); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := f.m1.NextAsk(ctx, f.id, a.Key, t0); !errors.Is(err, store.ErrNoAsk) {
+		t.Fatalf("wait after AI off = %v; want ErrNoAsk (cancelled)", err)
+	}
+	if _, err := f.owner.SetSwitch(ctx, f.id, store.SwitchAI, true, t0); err != nil {
+		t.Fatal(err)
+	}
+	f.line(t, 2_000, "Line B.")
+	k, err := f.owner.AskAgent(ctx, f.id, "", t0)
+	if err != nil || !k.First {
+		t.Fatalf("the ask after a cancelled one = %+v %v; want first", k, err)
+	}
+	got, segs, err := f.m1.NextAsk(ctx, f.id, a.Key, t0)
+	if w := []string{"Line A.", "Line B."}; err != nil || !got.First || !slices.Equal(texts(segs), w) {
+		t.Errorf("its lines = %q (first %v, %v); want %q", texts(segs), got.First, err, w)
+	}
+}
+
+// 🔴 An agent not seen (no join, no wait) since the cut-off is taken out and
+// its outstanding ask cancelled; one seen since is not.
+func TestAnIdleAgentIsTakenOut(t *testing.T) {
+	f := newAgentFixture(t)
+	a, _, _ := f.m1.JoinAgent(ctx, f.id, "Builder", "", t0)
+	if _, err := f.owner.AskAgent(ctx, f.id, "", t0); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.m1.TouchAgent(ctx, f.id, a.Key, t0.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if gone, err := f.s.ExpireIdleAgent(ctx, f.id, t0.Add(30*time.Second), t0.Add(2*time.Minute)); err != nil || gone {
+		t.Fatalf("an agent seen after the cut-off: taken out %v (%v); want kept", gone, err)
+	}
+	if feed, _ := f.s.AgentFeed(ctx, f.id); feed.Agent == nil {
+		t.Fatal("positive control: the agent is not in")
+	}
+	if gone, err := f.s.ExpireIdleAgent(ctx, f.id, t0.Add(61*time.Second), t0.Add(3*time.Minute)); err != nil || !gone {
+		t.Fatalf("an agent not seen since the cut-off: taken out %v (%v); want taken out", gone, err)
+	}
+	feed, err := f.s.AgentFeed(ctx, f.id)
+	if err != nil || feed.Agent != nil || feed.Ask != nil {
+		t.Errorf("the feed after the idle agent was taken out = %+v %v; want no agent, no ask", feed, err)
+	}
+	if _, _, err := f.m2.JoinAgent(ctx, f.id, "Reviewer", "", t0.Add(3*time.Minute)); err != nil {
+		t.Errorf("a join after the idle agent was taken out = %v", err)
 	}
 }

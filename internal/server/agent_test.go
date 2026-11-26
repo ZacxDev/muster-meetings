@@ -7,7 +7,10 @@ package server_test
 
 import (
 	"encoding/json"
+	"os"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -201,7 +204,7 @@ func TestAnAgentAnswersTheOwnersAskForEveryone(t *testing.T) {
 }
 
 // 🔴 One agent per meeting through the door: a second session's join (its
-// own token) is refused and names the agent in; Remove agent ends the
+// own token) is refused without naming the agent in; its key resumes it; Remove agent ends the
 // first's wait ("ended") and lets the second join.
 func TestASecondAgentIsRefusedUntilTheFirstIsRemoved(t *testing.T) {
 	e := agentEnv(t)
@@ -211,11 +214,15 @@ func TestASecondAgentIsRefusedUntilTheFirstIsRemoved(t *testing.T) {
 	t2, _ := e.mintMCP(c.Sess)
 	k1 := e.agentJoin(t1, c.ID, "Builder")
 	a := e.tool(t2, "meeting_agent_join", map[string]any{"id": c.ID, "name": "Reviewer"})
-	if !a.IsError || !strings.Contains(a.text(), "Another agent (Builder) is already in this meeting") {
-		t.Fatalf("a second agent's join = %v %q; want refused naming Builder", a.IsError, a.text())
+	if !a.IsError || !strings.Contains(a.text(), "An agent is already in this meeting") || strings.Contains(a.text(), "Builder") {
+		t.Fatalf("a second agent's join = %v %q; want refused, not naming the agent in", a.IsError, a.text())
 	}
-	if again := e.agentJoin(t1, c.ID, "Builder"); again != k1 {
-		t.Errorf("a retried join answered another key")
+	var again struct {
+		Key string `json:"agent_key"`
+	}
+	e.ok(t1, "meeting_agent_join", map[string]any{"id": c.ID, "name": "Builder", "agent_key": k1}, &again)
+	if again.Key != k1 {
+		t.Errorf("a join with the agent's key answered another key")
 	}
 	if resp, raw := e.do("DELETE", "/api/meetings/"+c.ID+"/agent", c.Sess, nil); resp.StatusCode != 200 {
 		t.Fatalf("remove = %d %s", resp.StatusCode, raw)
@@ -337,5 +344,60 @@ func TestAgentWordsNeverReachTheLog(t *testing.T) {
 		if !strings.Contains(lg, want) {
 			t.Errorf("the log has no %q:\n%s", want, lg)
 		}
+	}
+}
+
+// 🔴 An agent that stops waiting is taken out after AgentIdle: a wait keeps
+// it in (90 s + 90 s with a wait between, under a 2-minute limit), then
+// with no wait for longer than the limit the streams stop showing it, its
+// outstanding ask is cancelled so Ask agent is not stuck, and its own next
+// wait says ended.
+func TestAnAgentThatStopsWaitingIsTakenOut(t *testing.T) {
+	e := newEnvOpts(t, nil, func(c *server.Config) { c.AgentWait = 200 * time.Millisecond; c.AgentIdle = 2 * time.Minute })
+	c := e.meeting(ada)
+	e.started(c)
+	tok, _ := e.mintMCP(c.Sess)
+	owner := e.open("GET", "/api/meetings/"+c.ID+"/events", c.Sess, nil)
+	key := e.agentJoin(tok, c.ID, "Builder")
+	agentUntil(t, owner, "the agent in", func(f agentFeed) bool { return f.Agent != nil })
+	e.clock.Add(90 * time.Second)
+	if w := e.agentWaitFor(tok, c.ID, key); w.Status != "pending" {
+		t.Fatalf("a wait at 90 s = %+v, want pending", w)
+	}
+	e.clock.Add(90 * time.Second)
+	if code, raw := e.ask(c, "Still there?"); code != 201 {
+		t.Fatalf("an ask 90 s after the agent's last wait (180 s after its join) = %d %s; want 201: a wait keeps it in", code, raw)
+	}
+	e.clock.Add(150 * time.Second)
+	agentUntil(t, owner, "the idle agent gone", func(f agentFeed) bool { return f.Agent == nil && f.Ask == nil })
+	if code, raw := e.ask(c, ""); code != 409 {
+		t.Errorf("an ask after the idle agent was taken out = %d %s, want 409", code, raw)
+	}
+	if w := e.agentWaitFor(tok, c.ID, key); w.Status != "ended" {
+		t.Errorf("the idle agent's own wait = %+v, want ended", w)
+	}
+}
+
+// One rule for the question's length: the owner's question box allows
+// exactly what the route takes (runes), and one rune past it is refused.
+func TestTheQuestionLimitIsOneRule(t *testing.T) {
+	page, err := os.ReadFile("web/app.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`id="agent-question"[^>]*maxlength="(\d+)"`).FindSubmatch(page)
+	if m == nil || string(m[1]) != strconv.Itoa(store.MaxAskQuestion) {
+		t.Fatalf("the question box's maxlength = %q, want %d", m, store.MaxAskQuestion)
+	}
+	e := agentEnv(t)
+	c := e.meeting(ada)
+	e.started(c)
+	tok, _ := e.mintMCP(c.Sess)
+	e.agentJoin(tok, c.ID, "Builder")
+	if code, raw := e.ask(c, strings.Repeat("é", store.MaxAskQuestion+1)); code != 400 {
+		t.Errorf("a question one rune too long = %d %s, want 400", code, raw)
+	}
+	if code, raw := e.ask(c, strings.Repeat("é", store.MaxAskQuestion)); code != 201 {
+		t.Errorf("a question of exactly the limit (in runes, %d bytes) = %d %s, want 201", 2*store.MaxAskQuestion, code, raw)
 	}
 }

@@ -10,7 +10,7 @@
   var $ = function (id) { return document.getElementById(id); };
   var base = location.pathname.replace(/\/+$/, '');
   var shown = { record: root.getAttribute('data-record') === 'true', ai: root.getAttribute('data-ai') === 'true',
-    transcribed: root.getAttribute('data-transcribed') === 'true' };
+    transcribed: root.getAttribute('data-transcribed') === 'true', agent: root.getAttribute('data-agent') === 'true' };
   var ticket = null;
   var conn = null;
   var abort = null;
@@ -29,7 +29,7 @@
       box.appendChild(p);
     });
     box.hidden = !(n.text || []).length;
-    shown = { record: !!n.record, ai: !!n.ai, transcribed: !!n.transcribed };
+    shown = { record: !!n.record, ai: !!n.ai, transcribed: !!n.transcribed, agent: !!n.agent };
   }
 
   function post(path, body, signal) {

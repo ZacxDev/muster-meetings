@@ -860,7 +860,7 @@ func TestAMeetingWithAIOffIsNeverSentToTheAIService(t *testing.T) {
 	}
 	e.started(c)
 	e.say(c, store.OwnerIdentity, "Ada L.", 1_000, 3_000, "I'll book the caterer.")
-	resp, b := e.knockFrom(c.Code, grace, map[string]bool{"record": true, "ai": false, "transcribed": true}, "198.51.100.7")
+	resp, b := e.knockFrom(c.Code, grace, map[string]bool{"record": true, "ai": false, "transcribed": true, "agent": true}, "198.51.100.7")
 	tk, _ := b["ticket"].(string)
 	if resp.StatusCode != 201 || tk == "" {
 		t.Fatalf("knock = %d %v", resp.StatusCode, b)

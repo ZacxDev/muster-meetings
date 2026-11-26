@@ -141,11 +141,13 @@ func (r *OwnerRepo) ActiveAgent(ctx context.Context, meetingID string) (Agent, e
 // agent of one of the owner's LIVE meetings, under name (already checked by
 // the caller), with a new key. 🔴 Only an MCP repository may (an owner
 // session has no token to bind), only while its token stands (mayWrite),
-// and only with the meeting's AI switch on. A join by the same token under
-// the same name as the agent in answers that agent (already true): a retried
-// join changes nothing. Any other join while an agent is in is
-// ErrAgentTaken, with the agent that is.
-func (r *OwnerRepo) JoinAgent(ctx context.Context, meetingID, name string, now time.Time) (Agent, bool, error) {
+// and only with the meeting's AI switch on. 🔴 While an agent is in, only a
+// join presenting ITS key (through the token it joined with) resumes it
+// (already true; its name is kept); any other join is ErrAgentTaken, even
+// with the same token and the same name: one token is often shared by
+// several Claude Code sessions, and the key is what tells them apart. The
+// refusal carries nothing of the agent in. key is ignored when none is in.
+func (r *OwnerRepo) JoinAgent(ctx context.Context, meetingID, name, key string, now time.Time) (Agent, bool, error) {
 	if r.mcp == "" {
 		return Agent{}, false, ErrNoSession
 	}
@@ -162,16 +164,19 @@ func (r *OwnerRepo) JoinAgent(ctx context.Context, meetingID, name string, now t
 	}
 	cur, err := r.activeAgent(ctx, tx, meetingID)
 	switch {
-	case err == nil && cur.TokenID == r.mcp && cur.Name == name:
-		return cur, true, nil
+	case err == nil && key != "" && cur.Key == key && cur.TokenID == r.mcp:
+		if _, err := tx.ExecContext(ctx, `UPDATE meeting_agents SET seen_at = ? WHERE id = ?`, ms(now), cur.ID); err != nil {
+			return Agent{}, false, err
+		}
+		return cur, true, tx.Commit()
 	case err == nil:
-		return cur, false, ErrAgentTaken
+		return Agent{}, false, ErrAgentTaken
 	case !errors.Is(err, ErrNoAgent):
 		return Agent{}, false, err
 	}
 	a := Agent{Name: name, Key: random(16), TokenID: r.mcp, JoinedAt: time.UnixMilli(ms(now)).UTC()}
-	res, err := tx.ExecContext(ctx, `INSERT INTO meeting_agents (meeting_id, token_id, agent_key, name, joined_at) VALUES (?, ?, ?, ?, ?)`,
-		meetingID, a.TokenID, a.Key, a.Name, ms(now))
+	res, err := tx.ExecContext(ctx, `INSERT INTO meeting_agents (meeting_id, token_id, agent_key, name, joined_at, seen_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		meetingID, a.TokenID, a.Key, a.Name, ms(now), ms(now))
 	if err != nil {
 		return Agent{}, false, err
 	}
@@ -270,9 +275,9 @@ func (r *OwnerRepo) RemoveAgent(ctx context.Context, meetingID string, now time.
 	return tx.Commit()
 }
 
-// MaxAskQuestion is the longest question an ask carries, in bytes (the
-// caller cuts it in runes first).
-const MaxAskQuestion = 4000
+// MaxAskQuestion is the longest question an ask carries, in runes: the one
+// rule (the owner's question box has the same maxlength).
+const MaxAskQuestion = 2000
 
 // AskAgent is the owner's Ask agent (an owner session only), on a LIVE
 // meeting with its AI switch on and an agent in: a new outstanding ask
@@ -303,10 +308,11 @@ func (r *OwnerRepo) AskAgent(ctx context.Context, meetingID, question string, no
 	if open > 0 {
 		return AgentAsk{}, ErrAskOutstanding
 	}
-	// 🔴 The delta cursor: this agent's own earlier asks (a new agent starts
+	// 🔴 The delta cursor: this agent's own earlier asks that REACHED it (a
+	// cancelled ask never delivered carried nothing to it; a new agent starts
 	// from the beginning: it has seen nothing).
 	var from sql.NullInt64
-	if err := tx.QueryRowContext(ctx, `SELECT max(to_segment) FROM agent_asks WHERE agent_id = ?`, a.ID).Scan(&from); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT max(to_segment) FROM agent_asks WHERE agent_id = ? AND delivered_at IS NOT NULL`, a.ID).Scan(&from); err != nil {
 		return AgentAsk{}, err
 	}
 	var to sql.NullInt64
@@ -330,7 +336,7 @@ func (r *OwnerRepo) AskAgent(ctx context.Context, meetingID, question string, no
 }
 
 const askCols = `k.id, k.agent_id, k.from_segment, k.to_segment, k.question, k.state, k.asked_at, k.answered_at, coalesce(k.reply, ''),
-	NOT EXISTS (SELECT 1 FROM agent_asks e WHERE e.agent_id = k.agent_id AND e.id < k.id)`
+	NOT EXISTS (SELECT 1 FROM agent_asks e WHERE e.agent_id = k.agent_id AND e.id < k.id AND e.delivered_at IS NOT NULL)`
 
 func scanAsk(sc interface{ Scan(...any) error }) (AgentAsk, error) {
 	var k AgentAsk
@@ -341,6 +347,52 @@ func scanAsk(sc interface{ Scan(...any) error }) (AgentAsk, error) {
 	}
 	k.AskedAt, k.AnsweredAt = time.UnixMilli(asked).UTC(), fromMS(answered)
 	return k, nil
+}
+
+// TouchAgent records that the agent key names (through this repository's
+// token) is still waiting: an agent not seen for a while is taken out
+// (ExpireIdleAgent). Nothing when the key is not the meeting's agent.
+func (r *OwnerRepo) TouchAgent(ctx context.Context, meetingID, key string, now time.Time) error {
+	if key == "" || r.mcp == "" {
+		return nil
+	}
+	_, err := r.s.db.ExecContext(ctx, `UPDATE meeting_agents SET seen_at = ? WHERE meeting_id = ? AND agent_key = ? AND token_id = ? AND left_at IS NULL
+		AND EXISTS (SELECT 1 FROM meetings m WHERE m.id = meeting_id AND m.subject = ?)`, ms(now), meetingID, key, r.mcp, r.subject)
+	return err
+}
+
+// ExpireIdleAgent takes out the meeting's agent when it was last seen (its
+// join or a wait) before seenBefore, cancelling its outstanding ask, so the
+// meeting stops showing an agent that is gone and Ask agent is not left
+// waiting on it. It answers whether it took one out.
+func (s *Store) ExpireIdleAgent(ctx context.Context, meetingID string, seenBefore, now time.Time) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	a, err := scanAgent(tx.QueryRowContext(ctx, `SELECT `+agentCols+` FROM meeting_agents a WHERE a.meeting_id = ? AND a.left_at IS NULL AND a.seen_at < ?`, meetingID, ms(seenBefore)))
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if err := endAgent(ctx, tx, a, "idle", now); err != nil {
+		return false, err
+	}
+	if err := audit(ctx, tx, now, "", meetingID, "agent.idle", ""); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
+}
+
+// HadAgent says an agent ever joined the meeting (a stream with nothing of
+// one to show skips the feed's reads).
+func (s *Store) HadAgent(ctx context.Context, meetingID string) (bool, error) {
+	var ok bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM meeting_agents WHERE meeting_id = ?)`, meetingID).Scan(&ok)
+	return ok, err
 }
 
 // AgentGone says the agent a wait is for is no longer the meeting's: the

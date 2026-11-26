@@ -10,6 +10,9 @@ const (
 	NoticeRecorded    = "This meeting is recorded and transcribed."
 	NoticeTranscribed = "This meeting is transcribed."
 	NoticeAI          = "The transcript text (not the audio) is sent to an AI service (OpenRouter) to find action items."
+	// NoticeAgent goes with the AI clause on a plugin that takes a meeting
+	// agent (one that transcribes: server/agent.go).
+	NoticeAgent = "The host may invite an AI agent: when the host asks, it reads the transcript, and its answers are shown to everyone in the meeting."
 )
 
 // The badge's parts, shown to everyone in the call while the meeting runs.
@@ -69,6 +72,10 @@ type Notice struct {
 	// Recordable says the plugin can record (it has a bucket): only then does
 	// the owner's page show the Record switch.
 	Recordable bool `json:"recordable"`
+	// Agent says the plugin takes a meeting agent (it transcribes): with AI
+	// on, the notice then says the host may invite one (NoticeAgent). A
+	// knock must carry it, as it carries Transcribed.
+	Agent bool `json:"agent"`
 }
 
 // WithRecordingFailed is n with the badge saying the recording failed. A
@@ -107,7 +114,7 @@ func NoticeWith(record, ai, transcribed bool) Notice {
 // the switch's state (the knock's notice check compares the switches), and
 // Recordable says which of the two it is.
 func NoticeFull(record, ai, transcribed, recordable bool) Notice {
-	n := Notice{Record: record, AI: ai, Transcribed: transcribed, Recordable: recordable}
+	n := Notice{Record: record, AI: ai, Transcribed: transcribed, Recordable: recordable, Agent: transcribed}
 	record = record && recordable
 	var badge []string
 	switch {
@@ -126,7 +133,7 @@ func NoticeFull(record, ai, transcribed, recordable bool) Notice {
 	if transcribed {
 		badge = append(badge, BadgeTranscribing)
 		if ai {
-			n.Text = append(n.Text, NoticeAI)
+			n.Text = append(n.Text, NoticeAI, NoticeAgent)
 			badge = append(badge, BadgeAI)
 		}
 	}

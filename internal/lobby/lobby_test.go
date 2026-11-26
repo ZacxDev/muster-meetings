@@ -74,8 +74,8 @@ func TestNoticeForEachSwitchState(t *testing.T) {
 		text       string
 		badge      string
 	}{
-		{true, true, "This meeting is recorded and transcribed. | The transcript text (not the audio) is sent to an AI service (OpenRouter) to find action items.", "Recording · Transcribing · AI"},
-		{false, true, "This meeting is transcribed. | The transcript text (not the audio) is sent to an AI service (OpenRouter) to find action items.", "Transcribing · AI"},
+		{true, true, "This meeting is recorded and transcribed. | The transcript text (not the audio) is sent to an AI service (OpenRouter) to find action items. | The host may invite an AI agent: when the host asks, it reads the transcript, and its answers are shown to everyone in the meeting.", "Recording · Transcribing · AI"},
+		{false, true, "This meeting is transcribed. | The transcript text (not the audio) is sent to an AI service (OpenRouter) to find action items. | The host may invite an AI agent: when the host asks, it reads the transcript, and its answers are shown to everyone in the meeting.", "Transcribing · AI"},
 		{true, false, "This meeting is recorded and transcribed.", "Recording · Transcribing"},
 		{false, false, "This meeting is transcribed.", "Transcribing"},
 	} {

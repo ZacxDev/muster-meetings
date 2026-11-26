@@ -227,7 +227,7 @@
         <!-- The meeting's agent (an experiment): a Claude Code session of
              yours that joined through Meetings' MCP. Ask agent sends it the
              transcript since your last ask, and your question; everyone in
-             the call sees its answers, only you see your question. -->
+             the call sees its answers; guests never get the question itself. -->
         <section id="agent-panel" class="panel" hidden aria-labelledby="agent-title">
           <div class="panel__head"><h2 id="agent-title">Agent</h2>
             <span id="agent-state" class="mu-chip mu-chip--running" role="status" hidden></span>
@@ -239,7 +239,7 @@
             <form id="agent-ask-form" class="agent-ask" hidden>
               <label class="mu-label" for="agent-question">Question (optional)</label>
               <textarea id="agent-question" class="mu-textarea" rows="2" maxlength="2000"></textarea>
-              <p class="mu-help">Everyone in the call sees the answer. Only you see your question.</p>
+              <p class="mu-help">Guests don't see your question, but they see the agent's answer.</p>
               <div class="agent-ask__row">
                 <button id="agent-ask" type="submit" class="mu-btn mu-btn--primary mu-btn--sm" data-icon="send">Ask agent</button>
                 <button id="agent-remove" type="button" class="mu-btn mu-btn--secondary mu-btn--sm" hidden>Remove agent</button>

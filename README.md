@@ -874,6 +874,40 @@ transcript text, an item, an address or the token.
 **Rolling back.** Revoke every token; migration 8 (the `mcp_tokens` table)
 is one-way like the others.
 
+#### An agent in a live meeting (experiment)
+
+On a plugin that transcribes, the owner can bring one of their Claude Code
+sessions (one that has their Meetings token) into a **live** meeting as its
+agent: tell it "join my live meeting as its agent". It finds the meeting
+with `meetings_list` and joins; everyone in the call then has an **Agent**
+panel showing it by name. In that panel the owner types an optional question
+and presses **Ask agent**: the agent receives the transcript lines said
+since its previous ask (all of them on its first) and the question, and its
+text answer appears at once in everyone's panel, the owner's and every
+guest's. Only the owner's page shows the question. **Remove agent** takes it
+out (its pending ask is cancelled).
+
+| tool | does |
+|---|---|
+| `meeting_agent_join {id, name}` | join as the meeting's agent under `name`; answers `agent_key`. One agent per meeting (another's join is refused, naming the one in); the same token and name again answer the same key |
+| `meeting_agent_wait {id, agent_key}` | waits up to about 45 s: `{status: "pending"}` (call again), `{status: "ask", ask_id, first, lines: [{offset_ms, speaker, text}], question}`, or `{status: "ended"}` (the meeting ended, or the agent left or was removed) |
+| `meeting_agent_say {id, agent_key, ask_id, text}` | the answer to that ask, once (the same text again changes nothing) |
+| `meeting_agent_leave {id, agent_key}` | leave |
+
+- **One at a time.** One agent per meeting and one outstanding ask: Ask
+  agent is disabled until the agent answers.
+- **The AI switch.** An agent joins, and an ask is made, only while the
+  meeting's AI action items switch is on (its guests were told the
+  transcript goes to an AI service). An ask made before the switch went off
+  is cancelled, not delivered. ⚠ The consent notice still names the action
+  items' AI service only; an experiment, not yet a notice of its own.
+- **Kept.** Joins, asks (the range of transcript lines each carried, never
+  a copy) and answers are migration 9 (`meeting_agents`, `agent_asks`); the
+  answers are in `meeting_timeline`'s `agent_replies`, at the meeting time
+  each was given.
+- **Logged.** As every tool: its name, the meeting, the outcome and the
+  duration. Never a name, a question, a line or an answer.
+
 ### Capacity and limits
 
 - **About 100 concurrent participants per LiveKit pod.** Each relayed

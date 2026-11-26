@@ -241,6 +241,7 @@
   var side = MeetingsCall.Side();
   var transcript = MeetingsCall.transcriptPanel(side);
   var actionItems = MeetingsCall.itemsPanel(side);
+  var agent = MeetingsCall.agentPanel(side);
 
   // events follows the admitted guest's stream: a fresh token at its start
   // (used on a Retry), the CURRENT notice (its badge), the live transcript,
@@ -250,6 +251,7 @@
     abort = new AbortController();
     transcript.reset();
     actionItems.reset();
+    agent.reset();
     post('/events', { ticket: ticket }, abort.signal).then(function (res) {
       if (res.status === 410) { finish('ended', 'This meeting has ended.'); return; }
       if (!res.ok) { finish('removed', 'You are no longer in this meeting.'); return; }
@@ -261,6 +263,7 @@
         else if (name === 'partials') transcript.partials(data.partials);
         else if (name === 'transcript') transcript.status(data.status);
         else if (name === 'items') actionItems.update(data);
+        else if (name === 'agent') agent.update(data);
         else if (name === 'ended') finish('ended', 'This meeting has ended.', data && data.card);
         else if (name === 'removed') finish('removed', 'You are no longer in this meeting.');
       });

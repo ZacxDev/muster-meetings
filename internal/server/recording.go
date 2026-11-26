@@ -1064,6 +1064,10 @@ type Bundle struct {
 	// Analysis is the current run's items and frame notes (only
 	// with the analysis configured, and once a run exists).
 	Analysis *bundleAnalysis `json:"analysis,omitempty"`
+	// AgentReplies are the meeting's agent's answers (agent.go), at the
+	// meeting time each was given, with the owner's question: left out for
+	// a meeting no agent answered in.
+	AgentReplies []store.AgentReply `json:"agent_replies,omitempty"`
 }
 
 func (s *Server) bundle(ctx context.Context, repo *store.OwnerRepo, id string) (Bundle, error) {
@@ -1130,6 +1134,10 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request, repo *st
 		return
 	}
 	if b.Analysis, err = s.analysisOf(r.Context(), id); err != nil {
+		s.meetingErr(w, err)
+		return
+	}
+	if b.AgentReplies, err = s.store.AgentReplies(r.Context(), id); err != nil {
 		s.meetingErr(w, err)
 		return
 	}

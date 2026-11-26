@@ -360,6 +360,7 @@ func TestAGuestReachesNoOwnerRoute(t *testing.T) {
 		{"GET", "/api/meetings/" + c.ID + "/events"}, {"POST", "/api/meetings/" + c.ID + "/lobby/" + pid + "/admit"},
 		{"POST", "/api/meetings/" + c.ID + "/lobby/" + pid + "/deny"}, {"DELETE", "/api/meetings/" + c.ID + "/participants/" + pid},
 		{"POST", "/api/meetings/" + c.ID + "/end"},
+		{"POST", "/api/meetings/" + c.ID + "/agent/ask"}, {"DELETE", "/api/meetings/" + c.ID + "/agent"},
 	}
 	for _, tk := range []string{waiting, admitted} {
 		for _, r := range routes {

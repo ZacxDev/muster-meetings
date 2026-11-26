@@ -91,6 +91,18 @@
           <ol id="items-list" class="items" aria-live="polite"></ol>
           <p id="items-empty" class="empty items-empty"><span data-icon="check"></span>No action items yet.</p>
         </section>
+        <!-- The meeting's agent (an experiment): its answers, the same as
+             the owner sees them (not the host's questions). -->
+        <section id="agent-panel" class="panel" hidden aria-labelledby="agent-title">
+          <div class="panel__head"><h2 id="agent-title">Agent</h2>
+            <span id="agent-state" class="mu-chip mu-chip--running" role="status" hidden></span>
+            <button type="button" class="mu-icon-btn panel-close" aria-label="Close agent" data-icon="close"></button></div>
+          <div class="panel__body agent">
+            <p id="agent-who" class="mu-help"></p>
+            <ol id="agent-replies" class="agent-replies" aria-live="polite"></ol>
+            <p id="agent-empty" class="empty">No answers yet.</p>
+          </div>
+        </section>
         <!-- The same live transcript as the owner's. -->
         <section id="panels" class="panel" hidden aria-labelledby="transcript-title">
           <div class="panel__head"><h2 id="transcript-title">Transcript</h2>
@@ -108,6 +120,7 @@
       <button id="btn-layout" type="button" class="mu-icon-btn mu-toggle" aria-label="Presentation view" aria-pressed="false" data-icon="fullscreen"></button>
       <span class="sep" aria-hidden="true"></span>
 <button id="btn-items" type="button" class="mu-icon-btn mu-toggle" aria-label="Action items" aria-pressed="false" aria-controls="items-panel" data-icon="check" hidden><span id="items-new" class="dot" hidden></span></button>
+      <button id="btn-agent" type="button" class="mu-icon-btn mu-toggle" aria-label="Agent" aria-pressed="false" aria-controls="agent-panel" data-icon="chat" hidden><span id="agent-new" class="dot" hidden></span></button>
       <button id="btn-transcript" type="button" class="mu-icon-btn mu-toggle" aria-label="Transcript" aria-pressed="false" aria-controls="panels" data-icon="transcript"><span id="transcript-new" class="dot" hidden></span></button>
       <button id="btn-leave" type="button" class="mu-icon-btn mu-icon-btn--danger" aria-label="Leave" data-icon="leave"></button>
     </div>

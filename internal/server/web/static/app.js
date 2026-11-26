@@ -735,6 +735,19 @@
   side.add('people', $('lobby-panel'), $('btn-people'));
   var transcript = MeetingsCall.transcriptPanel(side, function () { return waiting.length > 0; });
   var actionItems = MeetingsCall.itemsPanel(side);
+  // The meeting's agent (an experiment): Ask agent and Remove agent.
+  var agent = MeetingsCall.agentPanel(side, {
+    ask: function (question) {
+      if (!call) return Promise.reject(new Error('no call'));
+      return api('POST', '/api/meetings/' + encodeURIComponent(call.id) + '/agent/ask', { question: question })
+        .catch(function (e) { if (token) UI.toast(e.message, { kind: 'error' }); throw e; });
+    },
+    remove: function () {
+      if (!call) return Promise.reject(new Error('no call'));
+      return api('DELETE', '/api/meetings/' + encodeURIComponent(call.id) + '/agent')
+        .catch(function (e) { if (token) UI.toast(e.message, { kind: 'error' }); throw e; });
+    }
+  });
   var knocked = {}; // participant ids already announced
   var waiting = [];
 
@@ -795,6 +808,9 @@
       } } });
     });
     MeetingsCall.showBadge(s.notice, { owner: true });
+    // How to bring in an agent: only where one may join (the transcript and
+    // the AI switch on).
+    $('agent-hint').hidden = !(s.notice.transcribed && s.notice.ai && s.meeting.state === 'open');
     // The Record switch only on a plugin that can record (it has a bucket).
     $('sw-record-row').hidden = !s.notice.recordable;
     [['sw-record', s.notice.record], ['sw-ai', s.notice.ai]].forEach(function (x) {
@@ -822,6 +838,7 @@
       if (!res.ok) throw new Error('the server answered ' + res.status);
       transcript.reset();
       actionItems.reset();
+      agent.reset();
       return MeetingsCall.readEvents(res, function (name, data) {
         if (name === 'meeting') renderSnapshot(data);
         else if (name === 'segment') transcript.segment(data);
@@ -829,6 +846,7 @@
         else if (name === 'partials') transcript.partials(data.partials);
         else if (name === 'transcript') transcript.status(data.status);
         else if (name === 'items') actionItems.update(data);
+        else if (name === 'agent') agent.update(data);
       });
     }).then(function () {
       // The stream ended. While this meeting is still open here and has not

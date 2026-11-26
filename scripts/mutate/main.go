@@ -202,6 +202,10 @@ const (
 	mcpGo    = "internal/server/mcp.go"
 	mcpTools = "internal/server/mcp_tools.go"
 	mcpSt    = "internal/store/mcp.go"
+	// the meeting's agent (an experiment)
+	agentGo = "internal/server/agent.go"
+	agentSt = "internal/store/agent.go"
+	agentE2 = "agent.spec.ts"
 )
 
 var mutants = []mutant{
@@ -1707,6 +1711,50 @@ var mutants = []mutant{
 	{name: "mcp log: a tool's arguments reach the log", file: mcpGo, from: "t.Name, mid, outcome, s.cfg.Now()", to: "t.Name, mid, outcome+string(args), s.cfg.Now()",
 		pkg: "./internal/server", test: "TestMCPToolCallsLogNoMeetingContent", want: "the log holds"},
 
+	// ---- 🔴 the meeting's agent (an experiment): one agent, the delta
+	// cursor, one outstanding ask, the reply bound to it, the token, the AI
+	// switch, the guest's copy, the log ----
+	{name: "agent: a second agent joins while one is in", file: agentSt, from: "\tcase err == nil:\n\t\treturn cur, false, ErrAgentTaken", to: "\tcase false:\n\t\treturn cur, false, ErrAgentTaken",
+		pkg: "./internal/store", test: "TestAMeetingTakesOneAgent", want: "want ErrAgentTaken naming Builder"},
+	{name: "agent: a second agent joins (through the server)", file: agentSt, from: "\tcase err == nil:\n\t\treturn cur, false, ErrAgentTaken", to: "\tcase false:\n\t\treturn cur, false, ErrAgentTaken",
+		pkg: "./internal/server", test: "TestASecondAgentIsRefusedUntilTheFirstIsRemoved", want: "want refused naming Builder"},
+	{name: "agent: every ask resends every line (no delta cursor)", file: agentSt, from: "`SELECT max(to_segment) FROM agent_asks WHERE agent_id = ?`", to: "`SELECT max(to_segment) FROM agent_asks WHERE 0 AND agent_id = ?`",
+		pkg: "./internal/store", test: "TestAnAskCarriesTheLinesSinceTheAgentsLastAsk", want: "want not first"},
+	{name: "agent: every ask resends every line (through the server)", file: agentSt, from: "`SELECT max(to_segment) FROM agent_asks WHERE agent_id = ?`", to: "`SELECT max(to_segment) FROM agent_asks WHERE 0 AND agent_id = ?`",
+		pkg: "./internal/server", test: "TestAnAgentAnswersTheOwnersAskForEveryone", want: "want only the line since"},
+	{name: "agent: a new agent starts from the last agent's cursor", file: agentSt, from: "`SELECT max(to_segment) FROM agent_asks WHERE agent_id = ?`", to: "`SELECT max(to_segment) FROM agent_asks WHERE meeting_id = (SELECT meeting_id FROM meeting_agents WHERE id = ?)`",
+		pkg: "./internal/store", test: "TestAnAskCarriesTheLinesSinceTheAgentsLastAsk", want: "the new agent's first ask"},
+	{name: "agent: a second ask while one is outstanding", file: agentSt, from: "\tif open > 0 {", to: "\tif false {",
+		pkg: "./internal/store", test: "TestOneAskIsOutstandingAtATime", want: "want ErrAskOutstanding"},
+	{name: "agent: a reply to a cancelled ask stored", file: agentSt, from: "WHERE id = ? AND state IN ('open', 'delivered')`, ms(now), text, k.ID)", to: "WHERE id = ?`, ms(now), text, k.ID)",
+		pkg: "./internal/store", test: "TestAnAgentNeedsTheAISwitchAndALiveMeeting", want: "a reply to the cancelled ask"},
+	{name: "agent: a reply bound to no ask of its own", file: agentSt, from: "WHERE k.id = ? AND k.agent_id = ? AND k.meeting_id = ?`, askID, a.ID, meetingID)", to: "WHERE k.id = ? AND (k.agent_id = ? OR 1) AND (k.meeting_id = ? OR 1)`, askID, a.ID, meetingID)",
+		pkg: "./internal/store", test: "TestAReplyIsBoundToTheOpenAsk", want: "a reply to another meeting's ask"},
+	{name: "agent: a revoked token joins", file: agentSt, from: "\tif err := r.mayWrite(ctx, tx); err != nil {\n\t\treturn Agent{}, false, err", to: "\tif false {\n\t\treturn Agent{}, false, err",
+		pkg: "./internal/store", test: "TestAnAgentsWritesRecheckItsToken", want: "join with a revoked token"},
+	{name: "agent: a revoked token is given an ask", file: agentSt, from: "\tif err := r.mayWrite(ctx, tx); err != nil {\n\t\treturn AgentAsk{}, nil, err", to: "\tif false {\n\t\treturn AgentAsk{}, nil, err",
+		pkg: "./internal/store", test: "TestAnAgentsWritesRecheckItsToken", want: "wait with a revoked token"},
+	{name: "agent: a revoked token is given an ask (a wait already waiting)", file: agentSt, from: "\tif err := r.mayWrite(ctx, tx); err != nil {\n\t\treturn AgentAsk{}, nil, err", to: "\tif false {\n\t\treturn AgentAsk{}, nil, err",
+		pkg: "./internal/server", test: "TestAnAgentNeedsAIOnAndALiveToken", want: "want the revoked-token refusal"},
+	{name: "agent: a revoked token replies", file: agentSt, from: "\tif err := r.mayWrite(ctx, tx); err != nil {\n\t\treturn AgentAsk{}, false, err", to: "\tif false {\n\t\treturn AgentAsk{}, false, err",
+		pkg: "./internal/store", test: "TestAnAgentsWritesRecheckItsToken", want: "reply with a revoked token"},
+	{name: "agent: a revoked token leaves", file: agentSt, from: "\tif err := r.mayWrite(ctx, tx); err != nil {\n\t\treturn err\n\t}\n\ta, err := r.agentByKey", to: "\tif false {\n\t\treturn err\n\t}\n\ta, err := r.agentByKey",
+		pkg: "./internal/store", test: "TestAnAgentsWritesRecheckItsToken", want: "leave with a revoked token"},
+	{name: "agent: an agent joins a meeting with AI off", file: agentSt, from: "\tif ai != 1 {\n\t\treturn ErrAIOff", to: "\tif false {\n\t\treturn ErrAIOff",
+		pkg: "./internal/store", test: "TestAnAgentNeedsTheAISwitchAndALiveMeeting", want: "join with AI off"},
+	{name: "agent: an ask delivered after AI went off", file: agentSt, from: "\tif err := r.liveForAgent(ctx, tx, meetingID, now); err != nil {\n\t\tif !errors.Is(err, ErrAIOff) {", to: "\tif err := r.liveForAgent(ctx, tx, meetingID, now); err != nil && false {\n\t\tif !errors.Is(err, ErrAIOff) {",
+		pkg: "./internal/store", test: "TestAnAgentNeedsTheAISwitchAndALiveMeeting", want: "want ErrNoAsk and no line"},
+	{name: "agent: a guest's copy holds the question of a reply", file: agentGo, from: "\t\t\tfeed.Replies[i].Question = \"\"", to: "\t\t\t_ = feed.Replies[i].Question",
+		pkg: "./internal/server", test: "TestAnAgentAnswersTheOwnersAskForEveryone", want: "want the answer without the question"},
+	{name: "agent: a guest's copy holds the outstanding question", file: agentGo, from: "\t\t\tk.Question = \"\"", to: "\t\t\tk.Question += \"\"",
+		pkg: "./internal/server", test: "TestAnAgentAnswersTheOwnersAskForEveryone", want: "a guest's stream holds the owner's question"},
+	{name: "agent: a waiting agent not woken by the ask", file: agentGo, from: "\t\tcase <-wake:\n\t\tcase <-recheck.C:\n\t\t}\n\t}\n}", to: "\t\tcase <-make(chan struct{}):\n\t\tcase <-recheck.C:\n\t\t}\n\t}\n}",
+		pkg: "./internal/server", test: "TestAWaitingAgentGetsTheAskAtOnce", want: "the waiting agent was not woken by the ask"},
+	{name: "agent: a removed agent's wait never says ended", file: agentSt, from: "\tif errors.Is(err, ErrNoAgent) {\n\t\treturn true, nil", to: "\tif false {\n\t\treturn true, nil",
+		pkg: "./internal/server", test: "TestASecondAgentIsRefusedUntilTheFirstIsRemoved", want: "failed: the meeting could not be read"},
+	{name: "agent log: a tool's arguments reach the log (the agent's words)", file: mcpGo, from: "t.Name, mid, outcome, s.cfg.Now()", to: "t.Name, mid, outcome+string(args), s.cfg.Now()",
+		pkg: "./internal/server", test: "TestAgentWordsNeverReachTheLog", want: "the log holds"},
+
 	// ---- 🔴 contacts, phase 1b, in a browser (go run ./scripts/mutate -e2e) ----
 	{name: "contacts ui: the consent sentence reworded", file: guestJS, from: "', who will see that you were in this meeting. Nothing else is shared.'", to: "', who may see that you were in this meeting. Nothing else is shared.'",
 		e2e: cardE2E, test: "End: the guest's card .*\\(mobile\\)", want: "Your name and email go to Ada L., who will see"},
@@ -1728,6 +1776,10 @@ var mutants = []mutant{
 		e2e: recE2E, test: "1280x800 Delete now asks first", want: "Expected: 200"},
 	{name: "mcp ui: Revoke revokes nothing", file: appJS, from: "api('DELETE', '/api/settings/mcp/' + encodeURIComponent(t.id))", to: "Promise.resolve()",
 		e2e: "mcp-settings.spec.ts", test: "Revoke makes /mcp refuse it", want: "the revoked token still opens /mcp"},
+	{name: "agent ui: Ask agent drops the question", file: appJS, from: "'/agent/ask', { question: question }", to: "'/agent/ask', { question: '' }",
+		e2e: agentE2, test: "Ask agent: the agent gets the transcript", want: "the question typed in Ask agent"},
+	{name: "agent ui: an answer parsed as markup", file: callJS, from: "    text.textContent = r.text;\n", to: "    text.innerHTML = r.text;\n",
+		e2e: agentE2, test: "Ask agent: the agent gets the transcript", want: "agent-reply__text"},
 	{name: "notice ui: the Record switch shown with no bucket", file: appJS, from: "    $('sw-record-row').hidden = !s.notice.recordable;\n", to: "    $('sw-record-row').hidden = false;\n",
 		e2e: "lobby-mobile.spec.ts", test: "at 390×844 a guest knocks", want: "sw-record-row"},
 }

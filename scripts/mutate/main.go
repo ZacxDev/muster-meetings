@@ -1118,7 +1118,7 @@ var mutants = []mutant{
 		pkg: "./internal/server", test: "TestTheExportsFenceGuestSpeech", want: "txt ="},
 	{name: "notice: transcribed without an engine", file: trans, from: "n := lobby.NoticeFull(record, ai, s.Transcribing(), s.Recording())", to: "n := lobby.NoticeFull(record, ai, true, s.Recording())",
 		pkg: "./internal/server", test: "TestTheNoticeSaysTranscribedOnlyWithAnEngine", want: "engine false"},
-	{name: "notice: a knock's transcribed answer not checked", file: guest, from: "if in.Notice.Transcribed == nil || *in.Notice.Transcribed != s.Transcribing() {", to: "if false {",
+	{name: "notice: a knock's transcribed answer not checked", file: guest, from: "if in.Notice.Transcribed == nil || *in.Notice.Transcribed != s.Transcribing() || in.Notice.Agent", to: "if in.Notice.Agent",
 		pkg: "./internal/server", test: "TestTheNoticeSaysTranscribedOnlyWithAnEngine", want: "want 409 with the current notice"},
 
 	// ---- 3a: a connected stream ends the start retries (CI, real LiveKit) ----

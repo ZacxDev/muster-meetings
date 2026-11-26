@@ -873,8 +873,9 @@
       if (open === '' && was === 'transcript') closed = true;
     });
     return Transcript($('transcript'), $('transcript-status'), {
-      // The action items the person opened are not taken over by a line.
-      reveal: function () { if (!closed && !side.isOpen('transcript') && !side.isOpen('items') && !(side.isOpen('people') && busy && busy())) side.open('transcript'); },
+      // The action items or the agent the person opened are not taken over
+      // by a line.
+      reveal: function () { if (!closed && !side.isOpen('transcript') && !side.isOpen('items') && !side.isOpen('agent') && !(side.isOpen('people') && busy && busy())) side.open('transcript'); },
       unseen: function () { if (!side.isOpen('transcript')) dot.hidden = false; },
       hide: function () { closed = false; dot.hidden = true; if (side.isOpen('transcript')) side.close(false); }
     });
@@ -958,9 +959,103 @@
     });
   }
 
+  // ---- the meeting's agent (an experiment): one panel, the owner's and
+  // every admitted guest's; the owner's has Ask agent and Remove agent ----
+  //
+  // replyEl draws one answer: whose (the agent's name), when, and the text.
+  // 🔴 All textContent: the name is what an agent called itself and the
+  // text what it wrote; the owner's question (their page only) the same.
+  function replyEl(r) {
+    var li = document.createElement('li');
+    li.className = 'agent-reply';
+    li.setAttribute('data-ask', String(r.ask_id));
+    var head = document.createElement('div');
+    head.className = 'agent-reply__head';
+    var who = document.createElement('span');
+    who.className = 'who';
+    who.textContent = r.name;
+    var when = document.createElement('span');
+    when.className = 'when';
+    when.textContent = clock(r.at_ms);
+    head.appendChild(who); head.appendChild(when);
+    li.appendChild(head);
+    if (r.question) {
+      var q = document.createElement('p');
+      q.className = 'agent-reply__question muted';
+      q.textContent = 'You asked: ' + r.question;
+      li.appendChild(q);
+    }
+    var text = document.createElement('p');
+    text.className = 'agent-reply__text';
+    text.textContent = r.text;
+    li.appendChild(text);
+    return li;
+  }
+
+  // agentPanel joins the agent's feed (each "agent" event is the whole feed)
+  // to the side panel and its button: the button appears with the first
+  // event (no agent ever joined is no event and no button); a dot and a
+  // toast mark a new answer while the panel is shut. opts.ask(question) and
+  // opts.remove() are the owner's (a guest's page has neither).
+  function agentPanel(side, opts) {
+    opts = opts || {};
+    var btn = $('btn-agent'), dot = $('agent-new'), list = $('agent-replies');
+    side.add('agent', $('agent-panel'), btn);
+    side.on(function (open) { if (open === 'agent') dot.hidden = true; });
+    var shown = {}, name = '', primed = false;
+    var form = $('agent-ask-form'), remove = $('agent-remove');
+    if (form && opts.ask) {
+      form.addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        var b = $('agent-ask');
+        b.disabled = true;
+        opts.ask($('agent-question').value.trim()).then(function () { $('agent-question').value = ''; },
+          function () { b.disabled = false; });
+      });
+    }
+    if (remove && opts.remove) remove.addEventListener('click', function () { remove.disabled = true; opts.remove().then(null, function () { remove.disabled = false; }); });
+    return {
+      update: function (d) {
+        btn.hidden = false;
+        var a = d.agent;
+        name = a ? a.name : '';
+        $('agent-who').textContent = a ? a.name + ' (AI agent) is in this meeting. When the host asks, it reads the transcript and answers here.' : 'No agent is in this meeting.';
+        var waiting = !!(d.ask && a);
+        var st = $('agent-state');
+        st.textContent = waiting ? (d.ask.state === 'delivered' ? a.name + ' is answering…' : 'Waiting for ' + a.name + '…') : '';
+        st.hidden = !waiting;
+        if (form) {
+          form.hidden = !a;
+          $('agent-ask').disabled = waiting;
+          $('agent-question').disabled = waiting;
+        }
+        if (remove) { remove.hidden = !a; remove.disabled = false; }
+        var fresh = false;
+        (d.replies || []).forEach(function (r) {
+          if (shown[r.ask_id]) return;
+          shown[r.ask_id] = true;
+          list.appendChild(replyEl(r));
+          fresh = true;
+        });
+        $('agent-empty').hidden = list.children.length > 0;
+        var announce = primed;
+        primed = true;
+        if (fresh) {
+          list.scrollTop = list.scrollHeight;
+          // The answers a new stream redraws are not news.
+          if (announce && !side.isOpen('agent')) {
+            dot.hidden = false;
+            UI.toast((name || 'The agent') + ' answered', { timeout: 8000, action: { label: 'Show', onClick: function () { side.open('agent'); } } });
+          }
+        }
+      },
+      reset: function () { list.textContent = ''; shown = {}; primed = false; $('agent-empty').hidden = false; }
+    };
+  }
+
   UI.decorate(document);
 
   window.MeetingsCall = { prejoin: prejoin, join: join, usable: usable, PENDING_MS: PENDING_MS, readEvents: readEvents, showBadge: showBadge, replacedElsewhere: replacedElsewhere,
     Transcript: Transcript, transcriptPanel: transcriptPanel, Side: Side, lineEl: lineEl, clock: clock,
-    itemEl: itemEl, ActionItems: ActionItems, itemsPanel: itemsPanel };
+    itemEl: itemEl, ActionItems: ActionItems, itemsPanel: itemsPanel, agentPanel: agentPanel };
 })();

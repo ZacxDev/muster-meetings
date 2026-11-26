@@ -403,6 +403,49 @@ var migrations = []string{
 		revoked_at   INTEGER
 	) STRICT;
 	CREATE INDEX mcp_tokens_subject ON mcp_tokens (subject, created_at);`,
+
+	// 9: the meeting's agent (experimental; agent.go). meeting_agents is one
+	// row per Claude Code session the owner had join a meeting through the
+	// MCP door: the MCP token it came with (token_id: the public handle, not
+	// the token), the name everyone sees, and agent_key, the session's own
+	// handle that its wait, say and leave must carry (a token may be shared
+	// by several sessions: the key tells them apart; it is no credential
+	// without the token). 🔴 At most ONE agent is in a meeting at a time
+	// (meeting_agents_one). agent_asks is one row per Ask agent: the
+	// transcript lines it carries are the meeting's segments with an id in
+	// (from_segment, to_segment], never copied; question and reply are text
+	// the owner typed and the agent wrote: never logged, never audited.
+	// 🔴 At most ONE ask is outstanding (open or delivered) per meeting
+	// (agent_asks_one_open). One-way like every migration here: an older
+	// build refuses a database at schema 9; nothing else reads the tables,
+	// so the feature is off when no agent joins.
+	`CREATE TABLE meeting_agents (
+		id         INTEGER PRIMARY KEY,
+		meeting_id TEXT    NOT NULL REFERENCES meetings (id),
+		token_id   TEXT    NOT NULL,           -- mcp_tokens.id
+		agent_key  TEXT    NOT NULL UNIQUE,
+		name       TEXT    NOT NULL,           -- what the agent called itself: render as text, never logged
+		joined_at  INTEGER NOT NULL,
+		seen_at    INTEGER NOT NULL,           -- its last join or wait: an agent idle too long is taken out
+		left_at    INTEGER,
+		left_why   TEXT    NOT NULL DEFAULT '' CHECK (left_why IN ('', 'left', 'removed', 'idle'))
+	) STRICT;
+	CREATE UNIQUE INDEX meeting_agents_one ON meeting_agents (meeting_id) WHERE left_at IS NULL;
+	CREATE TABLE agent_asks (
+		id           INTEGER PRIMARY KEY,
+		meeting_id   TEXT    NOT NULL REFERENCES meetings (id),
+		agent_id     INTEGER NOT NULL REFERENCES meeting_agents (id),
+		from_segment INTEGER NOT NULL,          -- exclusive
+		to_segment   INTEGER NOT NULL,          -- inclusive
+		question     TEXT    NOT NULL DEFAULT '', -- the owner's words: never logged
+		state        TEXT    NOT NULL CHECK (state IN ('open', 'delivered', 'answered', 'cancelled')),
+		asked_at     INTEGER NOT NULL,
+		delivered_at INTEGER,
+		answered_at  INTEGER,
+		reply        TEXT                       -- the agent's words: never logged
+	) STRICT;
+	CREATE INDEX agent_asks_meeting ON agent_asks (meeting_id, id);
+	CREATE UNIQUE INDEX agent_asks_one_open ON agent_asks (meeting_id) WHERE state IN ('open', 'delivered');`,
 }
 
 // ErrNeedsSubjectMap is a phase-2a database that holds owners or meetings:

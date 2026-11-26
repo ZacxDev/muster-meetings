@@ -331,7 +331,7 @@ func (s *Server) handleOwnerEvents(w http.ResponseWriter, r *http.Request, repo 
 		return
 	}
 	var last []byte
-	var lastItems string
+	var lastItems, lastAgent string
 	tc := newTCursor()
 	s.stream(ctx, w, f, id, true, func() (bool, error) {
 		// 🔴 The session is checked again before every send, not only when
@@ -372,6 +372,10 @@ func (s *Server) handleOwnerEvents(w http.ResponseWriter, r *http.Request, repo 
 		if liveNow {
 			// The live action items (only with the analysis configured).
 			if err := s.sendItems(r.Context(), w, f, id, &lastItems); err != nil {
+				return true, err
+			}
+			// The meeting's agent (agent.go), the owner's copy.
+			if err := s.sendAgent(r.Context(), w, f, id, true, &lastAgent); err != nil {
 				return true, err
 			}
 			// The transcript, through the owner's repository: only this

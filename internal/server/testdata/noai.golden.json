@@ -347,7 +347,7 @@
       "X-Content-Type-Options": "nosniff",
       "X-Frame-Options": "DENY"
     },
-    "body": "{\"notice\":{\"record\":true,\"ai\":false,\"transcribed\":true,\"text\":[\"This meeting is transcribed.\"],\"badge\":\"Transcribing\",\"recordable\":false}}\n"
+    "body": "{\"notice\":{\"record\":true,\"ai\":false,\"transcribed\":true,\"text\":[\"This meeting is transcribed.\"],\"badge\":\"Transcribing\",\"recordable\":false,\"agent\":true}}\n"
   },
   "ai on": {
     "status": 200,
@@ -361,7 +361,7 @@
       "X-Content-Type-Options": "nosniff",
       "X-Frame-Options": "DENY"
     },
-    "body": "{\"notice\":{\"record\":true,\"ai\":true,\"transcribed\":true,\"text\":[\"This meeting is transcribed.\",\"The transcript text (not the audio) is sent to an AI service (OpenRouter) to find action items.\"],\"badge\":\"Transcribing · AI\",\"recordable\":false}}\n"
+    "body": "{\"notice\":{\"record\":true,\"ai\":true,\"transcribed\":true,\"text\":[\"This meeting is transcribed.\",\"The transcript text (not the audio) is sent to an AI service (OpenRouter) to find action items.\",\"The host may invite an AI agent: when the host asks, it reads the transcript, and its answers are shown to everyone in the meeting.\"],\"badge\":\"Transcribing · AI\",\"recordable\":false,\"agent\":true}}\n"
   },
   "card": {
     "status": 200,
@@ -392,6 +392,6 @@
     "body": "{\"meeting\":{\"id\":\"{meeting}\",\"title\":\"\",\"state\":\"ended\",\"record\":true,\"ai\":true,\"created_at\":\"2031-03-14T15:09:26Z\",\"started_at\":\"2031-03-14T15:09:26Z\",\"ended_at\":\"2031-03-14T15:09:26Z\",\"link_expires_at\":\"2031-03-15T15:09:26Z\"}}\n"
   },
   "guest_ended_event": "{\"card\":{\"id\":\"{card}\",\"name\":\"Grace H.\",\"owner\":\"Ada L.\"},\"message\":\"This meeting has ended.\"}",
-  "guest_meeting_event": "{\"notice\":{\"record\":true,\"ai\":true,\"transcribed\":true,\"text\":[\"This meeting is transcribed.\",\"The transcript text (not the audio) is sent to an AI service (OpenRouter) to find action items.\"],\"badge\":\"Transcribing · AI\",\"recordable\":false}}",
-  "owner_notice": "{\"record\":true,\"ai\":true,\"transcribed\":true,\"text\":[\"This meeting is transcribed.\",\"The transcript text (not the audio) is sent to an AI service (OpenRouter) to find action items.\"],\"badge\":\"Transcribing · AI\",\"recordable\":false}"
+  "guest_meeting_event": "{\"notice\":{\"record\":true,\"ai\":true,\"transcribed\":true,\"text\":[\"This meeting is transcribed.\",\"The transcript text (not the audio) is sent to an AI service (OpenRouter) to find action items.\",\"The host may invite an AI agent: when the host asks, it reads the transcript, and its answers are shown to everyone in the meeting.\"],\"badge\":\"Transcribing · AI\",\"recordable\":false,\"agent\":true}}",
+  "owner_notice": "{\"record\":true,\"ai\":true,\"transcribed\":true,\"text\":[\"This meeting is transcribed.\",\"The transcript text (not the audio) is sent to an AI service (OpenRouter) to find action items.\",\"The host may invite an AI agent: when the host asks, it reads the transcript, and its answers are shown to everyone in the meeting.\"],\"badge\":\"Transcribing · AI\",\"recordable\":false,\"agent\":true}"
 }

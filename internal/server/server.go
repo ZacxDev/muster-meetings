@@ -172,6 +172,12 @@ type Config struct {
 	// MailBackoff is the wait before each retry of a deferred send; default
 	// DefaultMailBackoff.
 	MailBackoff []time.Duration
+
+	// AgentWait bounds one meeting_agent_wait (agent.go); default
+	// DefaultAgentWait. AgentIdle is how long an agent may make no join or
+	// wait before it is taken out; default DefaultAgentIdle.
+	AgentWait time.Duration
+	AgentIdle time.Duration
 }
 
 // Server is the plugin's public handler.
@@ -224,6 +230,9 @@ func New(cfg Config, st *store.Store, app *owners.App) *Server {
 	}
 	if cfg.Heartbeat <= 0 {
 		cfg.Heartbeat = 15 * time.Second
+	}
+	if cfg.AgentIdle <= 0 {
+		cfg.AgentIdle = DefaultAgentIdle
 	}
 	if cfg.StreamsPerAddress <= 0 {
 		cfg.StreamsPerAddress = DefaultStreamsPerAddress
@@ -293,6 +302,11 @@ func New(cfg Config, st *store.Store, app *owners.App) *Server {
 			s.notes = newNotesSide()
 			s.notesRoutes()
 		}
+	}
+	// The meeting's agent (agent.go): only on a plugin that transcribes
+	// (there is nothing to ask it about otherwise).
+	if cfg.Engine != nil {
+		s.agentRoutes()
 	}
 	// The MCP door and its token settings (mcp.go): always; each tool that
 	// needs a feature is listed only with it (mcp_tools.go).

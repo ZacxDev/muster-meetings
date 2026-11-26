@@ -874,6 +874,56 @@ transcript text, an item, an address or the token.
 **Rolling back.** Revoke every token; migration 8 (the `mcp_tokens` table)
 is one-way like the others.
 
+#### An agent in a live meeting (experiment)
+
+On a plugin that transcribes, the owner can bring one of their Claude Code
+sessions (one that has their Meetings token) into a **live** meeting as its
+agent: tell it "join my live meeting as its agent". It finds the meeting
+with `meetings_list` and joins; everyone in the call then has an **Agent**
+panel showing it by name. In that panel the owner types an optional question
+and presses **Ask agent**: the agent receives the transcript lines said
+since its previous ask (all of them on its first) and the question, and its
+text answer appears at once in everyone's panel, the owner's and every
+guest's. Guests are never sent the question itself, but they read the
+answer, so an answer can reveal what was asked (the tools tell the agent
+not to quote or restate it; nothing can enforce that). **Remove agent**
+takes it out (its pending ask is cancelled).
+
+| tool | does |
+|---|---|
+| `meeting_agent_join {id, name, agent_key?}` | join as the meeting's agent under `name`; answers `agent_key`. One agent per meeting: while one is in, every join is refused (409, "An agent is already in this meeting", nothing of the agent in) unless it presents that agent's `agent_key` through the token it joined with, which resumes it. The same token and name are not enough: one token is often shared by several sessions |
+| `meeting_agent_wait {id, agent_key}` | waits up to about 45 s: `{status: "pending"}` (call again), `{status: "ask", ask_id, first, lines: [{offset_ms, speaker, text}], question}`, or `{status: "ended"}` (the meeting ended, or the agent left or was removed) |
+| `meeting_agent_say {id, agent_key, ask_id, text}` | the answer to that ask, once (the same text again changes nothing) |
+| `meeting_agent_leave {id, agent_key}` | leave |
+
+- **One at a time.** One agent per meeting and one outstanding ask: Ask
+  agent is disabled until the agent answers.
+- **The AI switch and the notice.** An agent joins, and an ask is made,
+  only while the meeting's AI action items switch is on. With it on, the
+  guest's notice says so before they knock: "The host may invite an AI
+  agent: when the host asks, it reads the transcript, and its answers are
+  shown to everyone in the meeting." A knock must carry `agent` (as it
+  carries `transcribed`), so a page from before this clause is shown the
+  current notice again (409). An ask made before the switch went off is
+  cancelled, not delivered, and does not count as received: the agent's next
+  ask carries those lines.
+- **An agent that goes away.** An agent that makes no join or wait call for
+  `AgentIdle` (2 minutes) is taken out, and its outstanding ask cancelled,
+  so guests stop seeing it and Ask agent is not left waiting.
+- **Kept.** Joins, asks (the range of transcript lines each carried, never
+  a copy) and answers are migration 9 (`meeting_agents`, `agent_asks`); the
+  answers are in `meeting_timeline`'s `agent_replies`, at the meeting time
+  each was given.
+- **Logged.** As every tool: its name, the meeting, the outcome and the
+  duration. Never a name, a question, a line or an answer.
+- **Rolling back.** Migration 9 is one-way like the others: an older build
+  refuses the database. To turn the feature off, revoke the MCP tokens (no
+  agent can join), or run without an engine (no agent tools or routes);
+  the two tables are then never read.
+- ⚠ **Open: Remove is not a ban.** A removed agent's session (or another
+  holding the same token) may join again at once; to keep one out, revoke
+  its token.
+
 ### Capacity and limits
 
 - **About 100 concurrent participants per LiveKit pod.** Each relayed

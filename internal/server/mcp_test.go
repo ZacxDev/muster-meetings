@@ -299,7 +299,8 @@ func TestMCPToolsListAndTheirSchemas(t *testing.T) {
 	full := pcEnv(t, true)
 	fullTok, _ := full.mintMCP(full.enter(ada))
 	names, tools := full.toolNames(fullTok)
-	want := []string{"meeting_draft_retry", "meeting_draft_update", "meeting_drafts_list", "meeting_drafts_send", "meeting_frame", "meeting_get",
+	want := []string{"meeting_agent_join", "meeting_agent_leave", "meeting_agent_say", "meeting_agent_wait",
+		"meeting_draft_retry", "meeting_draft_update", "meeting_drafts_list", "meeting_drafts_send", "meeting_frame", "meeting_get",
 		"meeting_items_set", "meeting_recording_link", "meeting_reprocess", "meeting_run_set_current", "meeting_timeline", "meeting_transcript", "meetings_list"}
 	if !slices.Equal(names, want) {
 		t.Errorf("tools = %v\nwant %v", names, want)
@@ -330,11 +331,18 @@ func TestMCPToolsListAndTheirSchemas(t *testing.T) {
 			}
 		}
 	}
-	// No model, no mail, no bucket: the reads only.
-	bare := newEnv(t)
+	// No engine, no model, no mail, no bucket: the reads only.
+	bare := newEnvOpts(t, nil, func(c *server.Config) { c.Engine = nil })
 	bareTok, _ := bare.mintMCP(bare.enter(ada))
 	if names, _ := bare.toolNames(bareTok); !slices.Equal(names, []string{"meeting_get", "meeting_timeline", "meeting_transcript", "meetings_list"}) {
 		t.Errorf("tools of a plugin with none of the features = %v", names)
+	}
+	// Transcribing and nothing else: the reads and the agent's tools.
+	tr := newEnv(t)
+	trTok, _ := tr.mintMCP(tr.enter(ada))
+	if names, _ := tr.toolNames(trTok); !slices.Equal(names, []string{"meeting_agent_join", "meeting_agent_leave", "meeting_agent_say", "meeting_agent_wait",
+		"meeting_get", "meeting_timeline", "meeting_transcript", "meetings_list"}) {
+		t.Errorf("tools of a plugin that only transcribes = %v", names)
 	}
 }
 
@@ -365,6 +373,12 @@ func TestEveryMCPToolIsScopedToItsTokensOwner(t *testing.T) {
 			m["run_id"] = a.Runs[0].ID
 		case "meeting_transcript":
 			m["format"] = "txt"
+		case "meeting_agent_join":
+			m["name"] = "Intruder"
+		case "meeting_agent_wait", "meeting_agent_leave":
+			m["agent_key"] = strings.Repeat("K", 22)
+		case "meeting_agent_say":
+			m["agent_key"], m["ask_id"], m["text"] = strings.Repeat("K", 22), 1, "Overheard."
 		}
 		return m
 	}
@@ -391,8 +405,8 @@ func TestEveryMCPToolIsScopedToItsTokensOwner(t *testing.T) {
 			t.Errorf("%s: the owner's own call answered no such meeting", name)
 		}
 	}
-	if n != 12 {
-		t.Fatalf("%d meeting tools exercised, want 12", n)
+	if n != 16 {
+		t.Fatalf("%d meeting tools exercised, want 16", n)
 	}
 	var list struct {
 		Meetings []struct{ ID string } `json:"meetings"`

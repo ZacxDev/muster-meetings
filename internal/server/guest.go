@@ -104,6 +104,7 @@ func (s *Server) handleKnock(w http.ResponseWriter, r *http.Request) {
 			Record      *bool `json:"record"`
 			AI          *bool `json:"ai"`
 			Transcribed *bool `json:"transcribed"`
+			Agent       *bool `json:"agent"`
 		} `json:"notice"`
 	}
 	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 2048))
@@ -131,7 +132,9 @@ func (s *Server) handleKnock(w http.ResponseWriter, r *http.Request) {
 	// 🔴 Whether the meeting is transcribed is part of the notice: a page
 	// that showed another answer (or none: a page from before it was) is
 	// the same 409 as a switch that changed, with the current notice.
-	if in.Notice.Transcribed == nil || *in.Notice.Transcribed != s.Transcribing() {
+	// 🔴 So is whether it may take an AI agent (its clause, with AI on): a
+	// page from before the clause shows none, and knocks again after this.
+	if in.Notice.Transcribed == nil || *in.Notice.Transcribed != s.Transcribing() || in.Notice.Agent == nil || *in.Notice.Agent != s.Transcribing() {
 		writeJSON(w, http.StatusConflict, map[string]any{"error": "The meeting's notice changed. Read it again before you ask to join.",
 			"notice": s.noticeFor(gm.Notice.Record, gm.Notice.AI)})
 		return
@@ -294,7 +297,7 @@ func (s *Server) handleGuestEvents(w http.ResponseWriter, r *http.Request) {
 	var last string
 	minted := false
 	tc := newTCursor()
-	var lastItems string
+	var lastItems, lastAgent string
 	s.stream(ctx, w, f, g.MeetingID, false, func() (bool, error) {
 		cur, err := s.store.GuestByParticipant(r.Context(), g.ParticipantID, s.cfg.Now())
 		if err != nil {
@@ -335,6 +338,11 @@ func (s *Server) handleGuestEvents(w http.ResponseWriter, r *http.Request) {
 		// The live action items, as the owner sees them (only with the
 		// analysis configured).
 		if err := s.sendItems(r.Context(), w, f, cur.MeetingID, &lastItems); err != nil {
+			return true, err
+		}
+		// The agent's answers (agent.go): everyone's; the owner's question
+		// is not in a guest's copy.
+		if err := s.sendAgent(r.Context(), w, f, cur.MeetingID, false, &lastAgent); err != nil {
 			return true, err
 		}
 		// The live transcript (decision 6: guests see what the owner sees),

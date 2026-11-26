@@ -794,7 +794,7 @@ func TestWithNoBucketNothingMentionsRecording(t *testing.T) {
 	if !strings.Contains(ev, `"badge":"Transcribing · AI"`) || !strings.Contains(ev, `"recordable":false`) || strings.Contains(ev, "Recording") {
 		t.Fatalf("the owner's notice with no bucket: %s", ev)
 	}
-	resp, b := e.knockFrom(c.Code, grace, map[string]bool{"record": false, "ai": true, "transcribed": true}, "198.51.100.7")
+	resp, b := e.knockFrom(c.Code, grace, map[string]bool{"record": false, "ai": true, "transcribed": true, "agent": true}, "198.51.100.7")
 	if resp.StatusCode != 409 || strings.Contains(jsonOf(b), "recorded") || strings.Contains(jsonOf(b), "Recording") {
 		t.Fatalf("a stale knock = %d %v", resp.StatusCode, b)
 	}

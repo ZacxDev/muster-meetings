@@ -31,7 +31,7 @@ const (
 	linus = "Linus T."
 )
 
-var bothOn = map[string]bool{"record": true, "ai": true, "transcribed": true}
+var bothOn = map[string]bool{"record": true, "ai": true, "transcribed": true, "agent": true}
 
 // call is one owner's open meeting, as the tests drive it.
 type call struct {
@@ -360,6 +360,7 @@ func TestAGuestReachesNoOwnerRoute(t *testing.T) {
 		{"GET", "/api/meetings/" + c.ID + "/events"}, {"POST", "/api/meetings/" + c.ID + "/lobby/" + pid + "/admit"},
 		{"POST", "/api/meetings/" + c.ID + "/lobby/" + pid + "/deny"}, {"DELETE", "/api/meetings/" + c.ID + "/participants/" + pid},
 		{"POST", "/api/meetings/" + c.ID + "/end"},
+		{"POST", "/api/meetings/" + c.ID + "/agent/ask"}, {"DELETE", "/api/meetings/" + c.ID + "/agent"},
 	}
 	for _, tk := range []string{waiting, admitted} {
 		for _, r := range routes {
@@ -930,7 +931,7 @@ func TestAKnockWithAStaleNoticeIs409(t *testing.T) {
 	if resp.StatusCode != 409 || n == nil || n["record"] != false || n["ai"] != true || !strings.Contains(fmt.Sprint(n["text"]), "This meeting is transcribed.") {
 		t.Fatalf("a knock with the stale notice = %d %v: want 409 naming the current one", resp.StatusCode, b)
 	}
-	if resp, b := e.knockFrom(c.Code, grace, map[string]bool{"record": false, "ai": true, "transcribed": true}, "198.51.100.7"); resp.StatusCode != 201 {
+	if resp, b := e.knockFrom(c.Code, grace, map[string]bool{"record": false, "ai": true, "transcribed": true, "agent": true}, "198.51.100.7"); resp.StatusCode != 201 {
 		t.Fatalf("a knock with the current notice = %d %v", resp.StatusCode, b)
 	}
 	// And now it can only stay off.

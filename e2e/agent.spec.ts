@@ -6,7 +6,7 @@
 // in the owner's Agent panel and in an admitted guest's, under its name,
 // and only the owner's copy holds the question.
 import { test, expect } from '@playwright/test';
-import { startHarness, ownerInCall, type Harness } from './helpers';
+import { startHarness, ownerInCall, useFakeLiveKit, type Harness } from './helpers';
 
 let h: Harness;
 test.beforeAll(async () => { h = await startHarness(); });
@@ -30,10 +30,12 @@ async function tool(url: string, token: string, name: string, args: Record<strin
 }
 
 test('Ask agent: the agent gets the transcript and the question, and the owner and a guest see its answer', async ({ page, browser }) => {
+  await useFakeLiveKit(page.context());
   // The owner's MCP token, from settings (shown once, in the command).
   await page.goto(`${h.parent}/apps/${h.pluginID}`);
   const list = page.frameLocator('#app');
   await list.locator('#mcp-create').click();
+  await expect(list.locator('#mcp-command')).toHaveValue(/Bearer mmc_/);
   const cmd = await list.locator('#mcp-command').inputValue();
   const m = cmd.match(/meetings (\S+\/mcp) --header "Authorization: Bearer (mmc_[A-Za-z0-9_-]{43})"$/);
   expect(m, cmd).not.toBeNull();
@@ -48,6 +50,7 @@ test('Ask agent: the agent gets the transcript and the question, and the owner a
 
   // A guest is admitted.
   const guestCtx = await browser.newContext();
+  await useFakeLiveKit(guestCtx);
   const guest = await guestCtx.newPage();
   await guest.goto(link);
   await guest.locator('#name').fill('Grace');

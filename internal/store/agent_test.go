@@ -303,6 +303,13 @@ func TestAnAgentsWritesRecheckItsToken(t *testing.T) {
 // an ask made before it went off is cancelled, not delivered; an ended
 // meeting takes no join and no ask; another owner's meeting is ErrNotFound.
 func TestAnAgentNeedsTheAISwitchAndALiveMeeting(t *testing.T) {
+	off := newAgentFixture(t)
+	if _, err := off.owner.SetSwitch(ctx, off.id, store.SwitchAI, false, t0); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := off.m1.JoinAgent(ctx, off.id, "Builder", t0); !errors.Is(err, store.ErrAIOff) {
+		t.Fatalf("join with AI off = %v; want ErrAIOff", err)
+	}
 	f := newAgentFixture(t)
 	a, _, _ := f.m1.JoinAgent(ctx, f.id, "Builder", t0)
 	f.line(t, 1_000, "Something said.")
@@ -325,12 +332,6 @@ func TestAnAgentNeedsTheAISwitchAndALiveMeeting(t *testing.T) {
 	}
 	if _, err := f.owner.AskAgent(ctx, f.id, "", t0); !errors.Is(err, store.ErrAIOff) {
 		t.Errorf("ask with AI off = %v; want ErrAIOff", err)
-	}
-	if err := f.owner.RemoveAgent(ctx, f.id, t0); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := f.m2.JoinAgent(ctx, f.id, "Reviewer", t0); !errors.Is(err, store.ErrAIOff) {
-		t.Errorf("join with AI off = %v; want ErrAIOff", err)
 	}
 	// Ended; and another owner's.
 	g := newAgentFixture(t)

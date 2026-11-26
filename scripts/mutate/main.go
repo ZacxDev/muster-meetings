@@ -1748,7 +1748,7 @@ var mutants = []mutant{
 		pkg: "./internal/server", test: "TestAnAgentAnswersTheOwnersAskForEveryone", want: "want the answer without the question"},
 	{name: "agent: a guest's copy holds the outstanding question", file: agentGo, from: "\t\t\tk.Question = \"\"", to: "\t\t\tk.Question += \"\"",
 		pkg: "./internal/server", test: "TestAnAgentAnswersTheOwnersAskForEveryone", want: "a guest's stream holds the owner's question"},
-	{name: "agent: a waiting agent not woken by the ask", file: agentGo, from: "\t\tcase <-wake:\n\t\tcase <-recheck.C:\n\t\t}\n\t}\n}", to: "\t\tcase <-make(chan struct{}):\n\t\tcase <-recheck.C:\n\t\t}\n\t}\n}",
+	{name: "agent: a waiting agent not woken by the ask", file: agentGo, from: "\ts.hub.Changed(id)\n\twriteJSON(w, http.StatusCreated, map[string]any{\"ask\": k})", to: "\twriteJSON(w, http.StatusCreated, map[string]any{\"ask\": k})",
 		pkg: "./internal/server", test: "TestAWaitingAgentGetsTheAskAtOnce", want: "the waiting agent was not woken by the ask"},
 	{name: "agent: a removed agent's wait never says ended", file: agentSt, from: "\tif errors.Is(err, ErrNoAgent) {\n\t\treturn true, nil", to: "\tif false {\n\t\treturn true, nil",
 		pkg: "./internal/server", test: "TestASecondAgentIsRefusedUntilTheFirstIsRemoved", want: "failed: the meeting could not be read"},
